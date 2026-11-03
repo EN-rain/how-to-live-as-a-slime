@@ -1,6 +1,9 @@
 [gd_resource type="Resource" script_class="MobData" format=3]
 
 [ext_resource type="Script" path="res://scripts/data/mob_data.gd" id="1_hbpwy"]
+[ext_resource type="PackedScene" path="res://scenes/mobs/villager.tscn" id="2_vis"]
 
 [resource]
 script = ExtResource("1_hbpwy")
+id = &"villager"
+visual_scene = ExtResource("2_vis")

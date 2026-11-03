@@ -1,6 +1,6 @@
 extends Node
 
-## Headless smoke test for the prototype loop.
+## Headless smoke test for the prototype loop, scene architecture, NavigationAgent3D, and Pause Menu.
 ## Run: godot --headless --path . res://tests/smoke_test.tscn
 ## Exit code is 0 when every check passes.
 
@@ -25,11 +25,37 @@ func _run() -> void:
 		_finish()
 		return
 
+	var world := main.get_node_or_null("World") as GameWorld
+	_check(
+		world != null and world.get_node_or_null("NavigationRegion3D/Trees") != null,
+		"main scene instances World scene with NavigationRegion3D and obstacle props"
+	)
+	_check(
+		world != null and world.nav_region != null and world.nav_region.navigation_mesh != null and world.nav_region.navigation_mesh.get_polygon_count() > 100,
+		"world builds an obstacle-carved NavigationMesh around trees and rocks"
+	)
+	_check(
+		player.get_node_or_null("Body/LeftEye/Pupil") != null,
+		"slime visuals (eyes and pupils) are authored in slime.tscn"
+	)
+
+	var menus := main.get_node_or_null("GameMenus") as GameMenus
+	_check(
+		menus != null and menus is CanvasLayer and menus.resume_button != null and menus.save_button != null and menus.quit_button != null,
+		"GameMenus is a CanvasLayer overlay with Resume, Save, and Quit buttons"
+	)
+
 	var edibles := _find_edibles(main)
 	_check(edibles.size() >= 50, "world spawns >= 50 edibles (got %d)" % edibles.size())
 	_check(
-		edibles[0].data != null and edibles[0].size > 0.0,
-		"edibles get their kind from an EdibleData resource"
+		edibles[0].data != null and edibles[0].size > 0.0 and edibles[0].data.visual_scene != null,
+		"edibles get their kind and .tscn visual_scene from an EdibleData resource"
+	)
+
+	var mobs := _find_mobs(main)
+	_check(
+		mobs.size() >= 10 and mobs[0].get_node_or_null("NavigationAgent3D") != null,
+		"mobs spawn with .tscn visuals and NavigationAgent3D"
 	)
 
 	var start_size: float = player.size
@@ -56,7 +82,7 @@ func _run() -> void:
 	_check(player.size >= player.min_size - 0.001, "size never drops below min_size")
 
 	# Input actions must come from Project Settings, not runtime registration.
-	var actions := ["move_forward", "move_back", "move_left", "move_right", "jump", "restart"]
+	var actions := ["move_forward", "move_back", "move_left", "move_right", "jump", "restart", "pause", "quick_save", "quick_load"]
 	var missing := 0
 	for action in actions:
 		if not InputMap.has_action(action):
@@ -80,6 +106,20 @@ func _run() -> void:
 		"growing past an overlapping prop eats it"
 	)
 
+	# Pause toggle and Save/load round-trip check.
+	if menus != null:
+		menus.toggle_pause_menu()
+		var paused_ok := get_tree().paused and menus.pause_panel.visible
+		menus.toggle_pause_menu()
+		_check(paused_ok and not get_tree().paused, "Escape pause menu toggles scene tree pause on and off")
+
+	var saved_eaten: int = player.eaten_count
+	var save_ok: bool = main.save_game()
+	player.eaten_count = 0
+	var load_ok: bool = main.load_game()
+	_check(save_ok and load_ok and player.eaten_count == saved_eaten, "save and load round-trip player state")
+	main.delete_saved_game()
+
 	_finish()
 
 
@@ -90,6 +130,16 @@ func _find_edibles(node: Node) -> Array[Edible]:
 		if edible != null:
 			found.append(edible)
 		found.append_array(_find_edibles(child))
+	return found
+
+
+func _find_mobs(node: Node) -> Array[Mob]:
+	var found: Array[Mob] = []
+	for child in node.get_children():
+		var mob := child as Mob
+		if mob != null:
+			found.append(mob)
+		found.append_array(_find_mobs(child))
 	return found
 
 

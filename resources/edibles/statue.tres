@@ -1,11 +1,13 @@
 [gd_resource type="Resource" script_class="EdibleData" format=3]
 
 [ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_ftk48"]
+[ext_resource type="PackedScene" path="res://scenes/edibles/statue.tscn" id="2_vis"]
 
 [resource]
 script = ExtResource("1_ftk48")
 id = &"statue"
 shape = "capsule"
+visual_scene = ExtResource("2_vis")
 size = 2.4
 nutrition = 55.0
 color = Color(0.62, 0.63, 0.68, 1)

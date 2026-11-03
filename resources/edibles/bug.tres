@@ -1,9 +1,11 @@
 [gd_resource type="Resource" script_class="EdibleData" format=3]
 
 [ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_yojlh"]
+[ext_resource type="PackedScene" path="res://scenes/edibles/bug.tscn" id="2_vis"]
 
 [resource]
 script = ExtResource("1_yojlh")
 id = &"bug"
+visual_scene = ExtResource("2_vis")
 size = 0.22
 color = Color(0.45, 0.3, 0.22, 1)

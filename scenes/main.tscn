@@ -1,12 +1,37 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="PackedScene" path="res://scenes/slime.tscn" id="2_slime"]
+[ext_resource type="PackedScene" path="res://scenes/world.tscn" id="3_world"]
+[ext_resource type="PackedScene" path="res://scenes/ui/game_menus.tscn" id="4_menus"]
+[ext_resource type="AudioStream" path="res://assets/sounds/pop.wav" id="5_pop"]
 
-[node name="Main" type="Node3D"]
+[node name="Main" type="Node3D" node_paths=PackedStringArray("world", "player", "camera", "edibles_root", "mobs_root", "hud_label", "game_menus", "eat_sound")]
 script = ExtResource("1_main")
+world = NodePath("World")
+player = NodePath("Player")
+camera = NodePath("Camera3D")
+edibles_root = NodePath("Edibles")
+mobs_root = NodePath("Mobs")
+hud_label = NodePath("HUD/Label")
+game_menus = NodePath("GameMenus")
+eat_sound = NodePath("EatSound")
+
+[node name="World" parent="." instance=ExtResource("3_world")]
 
 [node name="Player" parent="." instance=ExtResource("2_slime")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.78, 0.625, 0, -0.625, 0.78, 0, 7, 7)
+current = true
+fov = 68.0
+near = 0.1
+far = 160.0
+
+[node name="Edibles" type="Node3D" parent="."]
+
+[node name="Mobs" type="Node3D" parent="."]
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
@@ -19,14 +44,20 @@ theme_override_colors/font_color = Color(1, 0.98, 0.9, 1)
 theme_override_font_sizes/font_size = 22
 
 [node name="Hint" type="Label" parent="HUD"]
+anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 24.0
 offset_top = -40.0
-offset_right = 520.0
+offset_right = 760.0
 offset_bottom = -16.0
+grow_vertical = 0
 theme_override_colors/font_color = Color(1, 1, 1, 0.75)
 theme_override_font_sizes/font_size = 15
-text = "WASD move · Space jump · R restart"
+text = "WASD move · Space jump · R restart · Esc pause · F6 save · F9 load"
+
+[node name="GameMenus" parent="." instance=ExtResource("4_menus")]
 
 [node name="EatSound" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("5_pop")
+volume_db = -6.0

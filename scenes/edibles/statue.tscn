@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/models/statue.glb" id="1_model"]
+
+[node name="StatueVisual" type="Node3D"]
+
+[node name="Model" parent="." instance=ExtResource("1_model")]
+transform = Transform3D(0.9881, 0, 0, 0, 0.9881, 0, 0, 0, 0.9881, 0, -0.5, 0)

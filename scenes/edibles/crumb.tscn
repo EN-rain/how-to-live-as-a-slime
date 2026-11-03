@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/models/crumb.glb" id="1_model"]
+
+[node name="CrumbVisual" type="Node3D"]
+
+[node name="Model" parent="." instance=ExtResource("1_model")]
+transform = Transform3D(2.0936, 0, 0, 0, 2.0936, 0, 0, 0, 2.0936, 0, -0.2027, 0)

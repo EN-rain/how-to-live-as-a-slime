@@ -7,8 +7,10 @@ extends Resource
 
 ## Stable identifier. Also the mesh-cache key, so keep it unique.
 @export var id: StringName = &"berry"
-## Primitive built at runtime until real models arrive.
+## Primitive shape configured on the `.tscn` nodes unless `visual_scene` is set.
 @export_enum("sphere", "box", "capsule", "cylinder", "house") var shape: String = "sphere"
+## Optional custom `.tscn` visual prefab to instance inside the Edible.
+@export var visual_scene: PackedScene
 ## Visual diameter in metres. The size gate compares this with the slime.
 @export_range(0.05, 10.0, 0.01) var size: float = 0.3
 ## Nutrition added when eaten.

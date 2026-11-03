@@ -1,15 +1,37 @@
 class_name Mob
 extends CharacterBody3D
 
-## Reusable mob with a tiny state machine: wander -> flee (when the slime is
+## Reusable mob with a state machine: wander -> flee (when the slime is
 ## bigger) / chase + bite (when the slime is smaller).
 ##
-## Plan note: the plan suggests NavigationAgent3D. The prototype map is flat and
-## hand-placed, so steering avoids a navmesh bake at runtime; swap in
-## NavigationAgent3D when the map gains real obstacles.
+## Uses `NavigationAgent3D` on the World's obstacle-carved `NavigationMesh` plus
+## a zero-allocation reusable raycast feeler to pathfind around trees and rocks.
+
+static var _shape_cache: Dictionary = {}
+
+const DEFAULT_GROUND_SCENE: PackedScene = preload("res://scenes/mobs/villager.tscn")
+const DEFAULT_FLY_SCENE: PackedScene = preload("res://scenes/mobs/bird.tscn")
+const DETECTION_RANGE := 28.0
+const FLEE_SIZE_RATIO := 1.05
+const CHASE_SIZE_RATIO := 0.95
+const MAP_BOUND := 27.5
+const GRAVITY := 24.0
+const FLY_ACCEL := 8.0
+const GROUND_ACCEL := 14.0
+const TURN_SPEED := 8.0
+const BASE_HOVER_HEIGHT := 2.3
+const ABSORB_DURATION := 0.35
+const OBSTACLE_RAY_LENGTH := 2.2
+const VISIBILITY_END := 85.0
+const REPATH_INTERVAL := 0.25
 
 ## Which mob this is. Assign a .tres from resources/mobs/ in the Inspector.
 @export var data: MobData
+
+@export_group("Nodes")
+@export var visual_root: Node3D
+@export var collision_node: CollisionShape3D
+@export var nav_agent: NavigationAgent3D
 
 var size := 1.0
 var nutrition := 20.0
@@ -27,17 +49,23 @@ var _state := "wander"
 var _wander_center := Vector3.ZERO
 var _wander_target := Vector3.ZERO
 var _wander_timer := 0.0
+var _repath_timer := 0.0
 var _hover_phase := 0.0
 var _player: Node3D
 var _rng := RandomNumberGenerator.new()
-var _mesh: MeshInstance3D
+var _visual_root: Node3D
+var _collision: CollisionShape3D
+var _nav_agent: NavigationAgent3D
 var _parts: Array[MeshInstance3D] = []
+var _ray_query: PhysicsRayQueryParameters3D
 
 
 func _ready() -> void:
 	add_to_group("edible")
 	_rng.randomize()
 	_hover_phase = _rng.randf() * TAU
+	# Stagger initial repath timers across mobs so path queries don't spike on the same frame.
+	_repath_timer = _rng.randf_range(0.0, REPATH_INTERVAL)
 	# Sensible fallback so a freshly placed Mob still runs unset.
 	if data == null:
 		data = MobData.new()
@@ -50,144 +78,191 @@ func _ready() -> void:
 	_attack_range = data.attack_range
 	_bite_damage = data.bite_damage
 	_bite_cooldown = data.bite_cooldown
-	_mesh = $Mesh
-	_build_visuals()
-	_build_collision()
+
+	_visual_root = visual_root if visual_root != null else ($VisualRoot as Node3D)
+	_collision = collision_node if collision_node != null else ($Collision as CollisionShape3D)
+	_nav_agent = nav_agent if nav_agent != null else (get_node_or_null("NavigationAgent3D") as NavigationAgent3D)
+
+	# Pre-allocate ray query once per mob to avoid per-frame allocations in _physics_process.
+	_ray_query = PhysicsRayQueryParameters3D.new()
+	_ray_query.collision_mask = 1
+	_ray_query.exclude = [get_rid()]
+
+	_instantiate_visual_scene()
+	_configure_collision()
 	_wander_center = global_position
 	_player = get_tree().get_first_node_in_group("player")
 	_pick_wander_target()
 
 
-func _build_visuals() -> void:
-	var mat := ToonMaterial.shared(color, size * 0.025)
-	_mesh.material_override = mat
-	_mesh.visibility_range_end = 85.0
-	_parts.append(_mesh)
-	if _flies:
-		var body := SphereMesh.new()
-		body.radius = size * 0.5
-		body.height = size
-		_mesh.mesh = body
-		var wing_mat := ToonMaterial.shared(color.lightened(0.12), size * 0.015)
-		for side in [-1.0, 1.0]:
-			var wing := MeshInstance3D.new()
-			var wing_mesh := BoxMesh.new()
-			wing_mesh.size = Vector3(size * 0.9, 0.03, size * 0.35)
-			wing.mesh = wing_mesh
-			wing.material_override = wing_mat
-			wing.position = Vector3(side * size * 0.65, 0.0, 0.0)
-			wing.visibility_range_end = 85.0
-			_mesh.add_child(wing)
-			_parts.append(wing)
-		_add_eyes(_mesh, size * 0.5)
-	else:
-		var body := CapsuleMesh.new()
-		body.radius = size * 0.32
-		body.height = size * 0.75
-		_mesh.mesh = body
-		var head := MeshInstance3D.new()
-		var head_mesh := SphereMesh.new()
-		head_mesh.radius = size * 0.26
-		head_mesh.height = size * 0.52
-		head.mesh = head_mesh
-		head.material_override = ToonMaterial.shared(color.lightened(0.14), size * 0.02)
-		head.position = Vector3(0, size * 0.62, 0)
-		head.visibility_range_end = 85.0
-		_mesh.add_child(head)
-		_parts.append(head)
-		_add_eyes(head, size * 0.26)
-
-
-func _add_eyes(parent: Node3D, head_radius: float) -> void:
-	var eye_mat := ToonMaterial.flat(Color(1, 1, 1))
-	var pupil_mat := ToonMaterial.flat(Color(0.05, 0.04, 0.08))
-	for side in [-1.0, 1.0]:
-		var eye := MeshInstance3D.new()
-		var eye_mesh := SphereMesh.new()
-		eye_mesh.radius = head_radius * 0.28
-		eye_mesh.height = head_radius * 0.56
-		eye.mesh = eye_mesh
-		eye.material_override = eye_mat
-		eye.position = Vector3(head_radius * 0.42 * side, head_radius * 0.12, head_radius * 0.82)
-		parent.add_child(eye)
-		var pupil := MeshInstance3D.new()
-		var pupil_mesh := SphereMesh.new()
-		pupil_mesh.radius = head_radius * 0.13
-		pupil_mesh.height = head_radius * 0.26
-		pupil.mesh = pupil_mesh
-		pupil.material_override = pupil_mat
-		pupil.position = Vector3(0, 0, head_radius * 0.22)
-		eye.add_child(pupil)
-
-
-func _build_collision() -> void:
-	if _flies:
+static func _shape_for(mob: MobData) -> Shape3D:
+	var key := String(mob.id)
+	if _shape_cache.has(key):
+		return _shape_cache[key]
+	var shape: Shape3D
+	if mob.flies:
 		var sphere := SphereShape3D.new()
-		sphere.radius = size * 0.5
-		$Collision.shape = sphere
+		sphere.radius = mob.size * 0.5
+		shape = sphere
 	else:
 		var capsule := CapsuleShape3D.new()
-		capsule.radius = size * 0.35
-		capsule.height = maxf(size * 1.6, capsule.radius * 2.0)
-		$Collision.shape = capsule
+		capsule.radius = mob.size * 0.35
+		capsule.height = maxf(mob.size * 1.6, capsule.radius * 2.0)
+		shape = capsule
+	_shape_cache[key] = shape
+	return shape
+
+
+func _instantiate_visual_scene() -> void:
+	_parts.clear()
+	if _visual_root == null:
+		return
+	for child in _visual_root.get_children():
+		child.queue_free()
+
+	var scene_to_spawn: PackedScene = data.visual_scene
+	if scene_to_spawn == null:
+		scene_to_spawn = DEFAULT_FLY_SCENE if _flies else DEFAULT_GROUND_SCENE
+	if scene_to_spawn == null:
+		return
+
+	var instance := scene_to_spawn.instantiate()
+	_visual_root.add_child(instance)
+	_visual_root.scale = Vector3.ONE * size
+
+	var mat := ToonMaterial.shared(color, size * 0.025)
+	var shadow_mode := (
+		GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		if size >= 1.0
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	)
+	_collect_mesh_parts(instance, mat, shadow_mode)
+
+
+func _collect_mesh_parts(
+		node: Node,
+		mat: ShaderMaterial,
+		shadow_mode: GeometryInstance3D.ShadowCastingSetting
+	) -> void:
+	var mi := node as MeshInstance3D
+	if mi != null:
+		mi.material_override = mat
+		mi.visibility_range_end = VISIBILITY_END
+		mi.cast_shadow = shadow_mode
+		_parts.append(mi)
+	for child in node.get_children():
+		_collect_mesh_parts(child, mat, shadow_mode)
+
+
+func _configure_collision() -> void:
+	if _collision != null:
+		_collision.shape = _shape_for(data)
+	if _nav_agent != null:
+		_nav_agent.radius = maxf(size * 0.45, 0.25)
+		_nav_agent.max_speed = _flee_speed * 1.5
 
 
 func _physics_process(delta: float) -> void:
 	if is_dead:
 		return
 	_bite_cd = maxf(_bite_cd - delta, 0.0)
+	_repath_timer = maxf(_repath_timer - delta, 0.0)
 
 	var player_size := 0.0
-	var dist := INF
+	var dist_sq := INF
 	var to_player := Vector3.ZERO
+	if not is_instance_valid(_player):
+		_player = get_tree().get_first_node_in_group("player")
 	if is_instance_valid(_player):
 		to_player = _player.global_position - global_position
-		dist = to_player.length()
+		dist_sq = to_player.length_squared()
 		var raw_size = _player.get("size")
 		if raw_size != null:
 			player_size = float(raw_size)
 
-	if dist < 28.0 and player_size > 0.0:
-		if player_size > size * 1.05:
+	if dist_sq < DETECTION_RANGE * DETECTION_RANGE and player_size > 0.0:
+		if player_size > size * FLEE_SIZE_RATIO:
 			_state = "flee"
-		elif player_size < size * 0.95:
+		elif player_size < size * CHASE_SIZE_RATIO:
 			_state = "chase"
 		else:
 			_state = "wander"
 	else:
 		_state = "wander"
 
-	var dir := Vector3.ZERO
+	var goal := _wander_target
+	var move_speed := _speed
 	match _state:
 		"flee":
-			dir = -to_player
-			dir.y = 0.0
-			dir = dir.normalized()
+			var away := -to_player
+			away.y = 0.0
+			away = away.normalized() if away.length_squared() > 0.001 else Vector3.FORWARD
+			goal = global_position + away * 9.0
+			goal.x = clampf(goal.x, -MAP_BOUND, MAP_BOUND)
+			goal.z = clampf(goal.z, -MAP_BOUND, MAP_BOUND)
 			var boost := 1.0 + clampf((player_size - size) / maxf(size, 0.01), 0.0, 1.5) * 0.3
-			_steer(dir, _flee_speed * boost, delta)
+			move_speed = _flee_speed * boost
 		"chase":
-			dir = to_player
-			dir.y = 0.0
-			dir = dir.normalized()
-			_steer(dir, _speed * 1.2, delta)
-			if dist < _attack_range + size * 0.6 and _bite_cd <= 0.0:
+			if is_instance_valid(_player):
+				goal = _player.global_position
+			move_speed = _speed * 1.2
+			var bite_reach := _attack_range + size * 0.6
+			if dist_sq < bite_reach * bite_reach and _bite_cd <= 0.0:
 				_bite()
 		_:
 			_wander_timer -= delta
-			if _wander_timer <= 0.0 or global_position.distance_to(_wander_target) < 0.8:
+			if _wander_timer <= 0.0 or global_position.distance_squared_to(_wander_target) < 0.64:
 				_pick_wander_target()
-			dir = _wander_target - global_position
-			dir.y = 0.0
-			dir = dir.normalized()
-			_steer(dir, _speed, delta)
+			goal = _wander_target
+			move_speed = _speed
+
+	var dir := _compute_navigation_direction(goal)
+	_steer(dir, move_speed, delta)
+
+
+## Queries `NavigationAgent3D` for the next waypoint around trees and rocks on
+## the World's NavigationMesh, and blends with a zero-allocation physics feeler.
+func _compute_navigation_direction(goal: Vector3) -> Vector3:
+	var target_point := goal
+	if not _flies and _nav_agent != null and is_inside_tree():
+		if _repath_timer <= 0.0:
+			_nav_agent.target_position = goal
+			_repath_timer = REPATH_INTERVAL
+		var nav_map := _nav_agent.get_navigation_map()
+		if NavigationServer3D.map_get_iteration_id(nav_map) > 0 and not _nav_agent.is_navigation_finished():
+			var next_pos := _nav_agent.get_next_path_position()
+			if next_pos.distance_squared_to(global_position) > 0.01:
+				target_point = next_pos
+
+	var dir := target_point - global_position
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001:
+		return Vector3.ZERO
+	dir = dir.normalized()
+
+	# Zero-allocation raycast feeler for grounded mobs around static World obstacles (layer 1).
+	if not _flies and _ray_query != null and is_inside_tree():
+		var space := get_world_3d().direct_space_state
+		if space != null:
+			var from := global_position + Vector3(0.0, 0.5, 0.0)
+			_ray_query.from = from
+			_ray_query.to = from + dir * (OBSTACLE_RAY_LENGTH + size * 0.4)
+			var hit := space.intersect_ray(_ray_query)
+			if not hit.is_empty():
+				var normal: Vector3 = hit["normal"]
+				normal.y = 0.0
+				var slide := (dir + normal * 1.45).normalized()
+				if slide.length_squared() > 0.01:
+					dir = slide
+	return dir
 
 
 func _steer(dir: Vector3, speed: float, delta: float) -> void:
-	var accel := 8.0 if _flies else 14.0
+	var accel := FLY_ACCEL if _flies else GROUND_ACCEL
 	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
 	velocity.z = move_toward(velocity.z, dir.z * speed, accel * delta)
 	if _flies:
-		var hover := 2.3
+		var hover := BASE_HOVER_HEIGHT
 		if _state == "chase" and is_instance_valid(_player):
 			hover = maxf(_player.global_position.y + 0.9, 0.7)
 		hover += sin(Time.get_ticks_msec() * 0.002 + _hover_phase) * 0.25
@@ -195,12 +270,12 @@ func _steer(dir: Vector3, speed: float, delta: float) -> void:
 	elif is_on_floor():
 		velocity.y = 0.0
 	else:
-		velocity.y -= 24.0 * delta
+		velocity.y -= GRAVITY * delta
 	move_and_slide()
-	global_position.x = clampf(global_position.x, -28.0, 28.0)
-	global_position.z = clampf(global_position.z, -28.0, 28.0)
+	global_position.x = clampf(global_position.x, -MAP_BOUND, MAP_BOUND)
+	global_position.z = clampf(global_position.z, -MAP_BOUND, MAP_BOUND)
 	if dir.length_squared() > 0.01:
-		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), 8.0 * delta)
+		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), TURN_SPEED * delta)
 
 
 func _pick_wander_target() -> void:
@@ -208,8 +283,10 @@ func _pick_wander_target() -> void:
 	_wander_target = _wander_center + Vector3(
 		_rng.randf_range(-6.0, 6.0), 0.0, _rng.randf_range(-6.0, 6.0)
 	)
-	_wander_target.x = clampf(_wander_target.x, -28.0, 28.0)
-	_wander_target.z = clampf(_wander_target.z, -28.0, 28.0)
+	_wander_target.x = clampf(_wander_target.x, -MAP_BOUND, MAP_BOUND)
+	_wander_target.z = clampf(_wander_target.z, -MAP_BOUND, MAP_BOUND)
+	if _nav_agent != null and is_inside_tree():
+		_nav_agent.target_position = _wander_target
 
 
 func _bite() -> void:
@@ -236,20 +313,22 @@ func absorb(target: Node3D) -> void:
 	# Deferred: absorb() may run inside a physics signal callback.
 	set_deferred("collision_layer", 0)
 	set_deferred("collision_mask", 0)
-	$Collision.set_deferred("disabled", true)
+	if _collision != null:
+		_collision.set_deferred("disabled", true)
 
 	var tween := create_tween()
 	tween.set_parallel(true)
-	tween.tween_property(self, "global_position", target.global_position, 0.35) \
+	tween.tween_property(self, "global_position", target.global_position, ABSORB_DURATION) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	tween.tween_property(self, "scale", Vector3.ONE * 0.05, 0.35) \
+	tween.tween_property(self, "scale", Vector3.ONE * 0.05, ABSORB_DURATION) \
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-	tween.tween_property(self, "rotation:y", rotation.y + 6.0, 0.35)
-	tween.tween_method(_set_dissolve, 0.0, 1.0, 0.35)
+	tween.tween_property(self, "rotation:y", rotation.y + 6.0, ABSORB_DURATION)
+	tween.tween_method(_set_dissolve, 0.0, 1.0, ABSORB_DURATION)
 	tween.chain().tween_callback(queue_free)
 
 
 ## Instance-level dissolve, so the material stays shared between mobs.
 func _set_dissolve(value: float) -> void:
 	for part in _parts:
-		part.set_instance_shader_parameter("dissolve", value)
+		if is_instance_valid(part):
+			part.set_instance_shader_parameter("dissolve", value)

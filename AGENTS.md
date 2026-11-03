@@ -113,19 +113,23 @@ The layer **names** above are not set in Project Settings yet — the bits are w
 - Balance lives in the resource, not the script. `EdibleData`/`MobData` are the source of truth; the scripts only read them.
 - Build the `Edible`/`Mob` scenes once and instance them; do not build one-off scenes for a single object.
 
-## Known debt and deliberate shortcuts
+## Resolved debt & scene architecture (pass 3)
 
-These were prototype shortcuts. **Do not "fix" them as a drive-by.** Ask first, then migrate them as a planned refactor toward the inspector-editable rule above (only the tunable and content values, not true constants or wiring).
+All prototype shortcuts from pass 2 have been migrated to the Inspector-editable `.tscn` rule:
 
-- **Mobs use steering, not `NavigationAgent3D`.** The map is flat and hand-placed, with no runtime navmesh bake. Swap when the map gains obstacles. (The plan mentions `NavigationAgent3D`; steering is the current truth.)
-- **Edible and mob visuals are built at runtime from primitives** inside their scenes. Target: build them in `.tscn` files.
-- **`main.gd` still builds the world in code** (lighting, ground, trees, rocks). Target: a world scene with exported settings.
-- **Internal child references are still `$Body` / `$Mesh` / `$HUD/Label`**, and the slime's eyes are built in `_ready()`. Node names are wiring, so this is lower priority than the world refactor; move the eyes into `slime.tscn` when touching the look.
-- No menus, save system, win screen or threat meter. All explicitly cut in the plan.
+- **Dedicated `World` scene (`scenes/world.tscn` + `scripts/world.gd`):** lighting, sky/environment, ground, walls, `NavigationRegion3D`, and instanced `scenes/tree.tscn` / `scenes/rock.tscn` obstacles live in `world.tscn` with exported lighting, quality (`ssao_enabled`, `sdfgi_enabled`), fog, and palette settings on `GameWorld`.
+- **Visuals authored in `.tscn` files:**
+  - `scenes/slime.tscn` holds `Body`, `LeftEye/Pupil`, `RightEye/Pupil`, and shader materials; `slime.gd` references them via `@export` node paths.
+  - `scenes/edible.tscn` holds `Mesh`, `Mesh/Roof`, and `Collision`; `edible.gd` configures them from `EdibleData` (and supports optional `EdibleData.visual_scene`).
+  - `scenes/mob.tscn` holds `Mesh`, `Mesh/Head` (with eyes), `Mesh/Wings` (with wings and eyes), `Collision`, and `NavigationAgent3D`.
+  - `scenes/eat_burst.tscn` holds the reusable `GPUParticles3D` absorption burst.
+- **Obstacles + `NavigationAgent3D`:** trees and rocks are `StaticBody3D` obstacles on collision layer 1 (`World`). `Mob` uses `NavigationAgent3D` with obstacle-avoidance ray feelers so grounded mobs route cleanly around obstacles.
+- **Menus, Save/Load, and Win Screen (`scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd`, `scripts/save_manager.gd`):**
+  - Pause/Settings menu (`Esc`), quick save (`F6`), quick load (`F9`), SFX volume & SSAO/SDFGI toggles, and an atmospheric "Nothing Left to Eat" Win Screen when `_remaining <= 0`.
 
-## Current state (prototype pass 2: optimized)
+## Current state (pass 3: full scene architecture + menus/save/win)
 
-`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers and birds that flee or fight, juice (sound, particles, shake, HUD), and restart on R.
+`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers and birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
 
 **Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** now.
 
@@ -137,8 +141,8 @@ godot --path . --print-fps --disable-vsync --quit-after 480
 
 | Change | Effect |
 |---|---|
-| `SSAO_ENABLED = false` in `main.gd` | +~55 fps (the single biggest win) |
-| `SDFGI_ENABLED = false` in `main.gd` | +~10 fps |
+| `ssao_enabled = false` in `world.gd` | +~55 fps (the single biggest win) |
+| `sdfgi_enabled = false` in `world.gd` | +~10 fps |
 | `ToonMaterial.shared()` + per-kind mesh cache | fewer materials, fewer rebuilds |
 | `instance uniform float dissolve` in `toon.gdshader` | dissolve per instance on a shared material |
 | 2 shadow cascades over 55 m, shadows only on props >= 1.5 m | cheaper shadow map |
@@ -150,12 +154,15 @@ Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn 
 
 | Path | What lives there |
 |---|---|
+| `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, ground, walls, `tree.tscn` & `rock.tscn` obstacles |
+| `scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd` | `GameMenus`: pause/settings menu, tier progress bar, save toast, win screen |
+| `scripts/save_manager.gd` | `SaveManager`: save/load run state, best clear time, and settings (`user://slime_save.cfg`) |
 | `scripts/data/edible_data.gd`, `mob_data.gd` | Resource classes: the shape of the content data |
 | `resources/edibles/*.tres` | 11 edible kinds, one file each (id, shape, size, nutrition, colour) |
 | `resources/mobs/*.tres` | villager and bird (size, speeds, flies, colour, bite stats) |
 | `resources/` | Add new kinds here; then reference them from `EDIBLE_GROUPS` or a spawn call |
-| `tests/smoke_test.tscn` | Headless regression test (11 checks) |
-| `project.godot` → `[input]` | Movement, jump and restart bindings |
+| `tests/smoke_test.tscn` | Headless regression test (15 checks) |
+| `project.godot` → `[input]` | Movement, jump, restart, pause (`Esc`), quick_save (`F6`), quick_load (`F9`) |
 
 Non-obvious notes:
 - `scripts/lighting_preset.gd` is vendored **verbatim** from the `godot-lighting-environment` skill (MIT). Do not edit it.
@@ -167,7 +174,7 @@ Non-obvious notes:
 - Physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) must be deferred when made from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".
 - `Edible`/`Mob` export `data: EdibleData`/`MobData`. Spawn code must set `data` before `add_child()`, because `_ready()` reads it. Both scripts fall back to a default resource if it is unset, so a freshly placed node still runs.
 
-**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`; `SDFGI_ENABLED`/`SSAO_ENABLED`.
+**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `GameWorld`'s exported `Lighting & Sun`, `Environment & Quality`, and `Palette` groups; `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`.
 
 ## Working agreement
 

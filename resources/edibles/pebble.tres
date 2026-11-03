@@ -1,9 +1,11 @@
 [gd_resource type="Resource" script_class="EdibleData" format=3]
 
 [ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_mxvm3"]
+[ext_resource type="PackedScene" path="res://scenes/edibles/pebble.tscn" id="2_vis"]
 
 [resource]
 script = ExtResource("1_mxvm3")
 id = &"pebble"
+visual_scene = ExtResource("2_vis")
 size = 0.32
 color = Color(0.55, 0.58, 0.62, 1)

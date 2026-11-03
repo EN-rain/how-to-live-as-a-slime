@@ -11,6 +11,12 @@ signal ate(nutrition: float, meal_color: Color, world_position: Vector3)
 signal size_changed(new_size: float)
 signal hurt
 
+const GROUND_ACCEL := 30.0
+const AIR_ACCEL := 12.0
+const TURN_SPEED := 12.0
+const COLOR_SHIFT_RATE := 0.06
+const HURT_FLASH_STRENGTH := 0.75
+
 @export_group("Movement")
 @export var base_speed: float = 5.2
 @export var base_jump: float = 7.0
@@ -44,6 +50,12 @@ signal hurt
 @export_range(0.0, 0.2, 0.005) var wobble_move: float = 0.05
 @export var flash_decay: float = 3.0
 
+@export_group("Nodes")
+@export var body_mesh: MeshInstance3D
+@export var left_pupil: MeshInstance3D
+@export var right_pupil: MeshInstance3D
+@export var eat_area: Area3D
+
 var nutrition := 0.0
 var size := 0.0
 var eaten_count := 0
@@ -68,53 +80,45 @@ func _ready() -> void:
 	_target_size = base_size
 	_base_color = body_color
 	scale = Vector3.ONE * size
-	_mesh = $Body
+
+	_mesh = body_mesh if body_mesh != null else ($Body as MeshInstance3D)
+	if left_pupil == null:
+		left_pupil = get_node_or_null("Body/LeftEye/Pupil") as MeshInstance3D
+	if right_pupil == null:
+		right_pupil = get_node_or_null("Body/RightEye/Pupil") as MeshInstance3D
+	_eat_area = eat_area if eat_area != null else ($EatArea as Area3D)
+
 	# Plan §8: an icosphere wobbles evenly; a UV sphere pinches at the poles.
 	_mesh.mesh = Icosphere.build(0.5, 3)
-	_build_material()
-	_add_eyes()
-	_eat_area = $EatArea
+	_setup_materials()
+	_update_eyes()
 	_eat_area.area_entered.connect(_on_area_entered)
 	_eat_area.body_entered.connect(_on_body_entered)
 	size_changed.emit(size)
 
 
-func _build_material() -> void:
-	_material = ShaderMaterial.new()
-	_material.shader = preload("res://shaders/slime.gdshader")
+func _setup_materials() -> void:
+	var existing_mat := _mesh.material_override as ShaderMaterial
+	if existing_mat != null:
+		_material = existing_mat.duplicate() as ShaderMaterial
+		if _material.next_pass != null:
+			_material.next_pass = _material.next_pass.duplicate()
+	else:
+		_material = ShaderMaterial.new()
+		_material.shader = preload("res://shaders/slime.gdshader")
+		var outline := ShaderMaterial.new()
+		outline.shader = preload("res://shaders/outline.gdshader")
+		outline.set_shader_parameter("outline_width", 0.03)
+		_material.next_pass = outline
 	_material.set_shader_parameter("base_color", _base_color)
 	_material.set_shader_parameter("wobble_amplitude", wobble_idle)
-	var outline := ShaderMaterial.new()
-	outline.shader = preload("res://shaders/outline.gdshader")
-	outline.set_shader_parameter("outline_width", 0.03)
-	_material.next_pass = outline
 	_mesh.material_override = _material
 
-
-func _add_eyes() -> void:
-	var eye_mat := ToonMaterial.flat(Color(1, 1, 1))
 	_pupil_mat = ToonMaterial.flat(pupil_color)
-	for side in [-1.0, 1.0]:
-		var eye := MeshInstance3D.new()
-		var eye_mesh := SphereMesh.new()
-		eye_mesh.radius = 0.1
-		eye_mesh.height = 0.2
-		eye_mesh.radial_segments = 12
-		eye_mesh.rings = 6
-		eye.mesh = eye_mesh
-		eye.material_override = eye_mat
-		eye.position = Vector3(0.17 * side, 0.1, 0.42)
-		_mesh.add_child(eye)
-		var pupil := MeshInstance3D.new()
-		var pupil_mesh := SphereMesh.new()
-		pupil_mesh.radius = 0.05
-		pupil_mesh.height = 0.1
-		pupil_mesh.radial_segments = 10
-		pupil_mesh.rings = 5
-		pupil.mesh = pupil_mesh
-		pupil.material_override = _pupil_mat
-		pupil.position = Vector3(0.0, 0.0, 0.06)
-		eye.add_child(pupil)
+	if left_pupil != null:
+		left_pupil.material_override = _pupil_mat
+	if right_pupil != null:
+		right_pupil.material_override = _pupil_mat
 
 
 ## Plan §7: the eyes go blank at the top tier.
@@ -134,7 +138,7 @@ func _physics_process(delta: float) -> void:
 		dir = dir.normalized()
 
 	var speed := _current_speed()
-	var accel := 30.0 if is_on_floor() else 12.0
+	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
 	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
 	velocity.z = move_toward(velocity.z, dir.z * speed, accel * delta)
 
@@ -151,7 +155,7 @@ func _physics_process(delta: float) -> void:
 	_was_on_floor = is_on_floor()
 
 	if dir.length_squared() > 0.01:
-		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), 12.0 * delta)
+		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), TURN_SPEED * delta)
 
 	# Wobble harder while moving, and spring the squash back to rest.
 	var move_ratio := clampf(Vector2(velocity.x, velocity.z).length() / maxf(speed, 0.01), 0.0, 1.0)
@@ -188,8 +192,34 @@ func add_nutrition(amount: float) -> void:
 func take_damage(amount: float) -> void:
 	nutrition = maxf(nutrition - amount, min_nutrition)
 	_refresh_size()
-	_flash = 0.75
+	_flash = HURT_FLASH_STRENGTH
 	hurt.emit()
+
+
+func get_base_color() -> Color:
+	return _base_color
+
+
+func apply_save_state(saved_nutrition: float, saved_eaten: int, saved_color: Color, saved_pos: Vector3) -> void:
+	nutrition = maxf(saved_nutrition, min_nutrition)
+	eaten_count = maxi(saved_eaten, 0)
+	_base_color = saved_color
+	if _material != null:
+		_material.set_shader_parameter("base_color", _base_color)
+	global_position = saved_pos
+	velocity = Vector3.ZERO
+	_target_size = clampf(
+		base_size * pow(nutrition / start_nutrition, growth_exponent),
+		min_size,
+		max_size
+	)
+	size = _target_size
+	if _size_tween and _size_tween.is_valid():
+		_size_tween.kill()
+	scale = Vector3.ONE * size
+	_update_eyes()
+	size_changed.emit(size)
+	_queue_eat_sweep()
 
 
 func _refresh_size() -> void:
@@ -267,7 +297,7 @@ func _eat(target: Node3D) -> void:
 	add_nutrition(meal_nutrition)
 
 	# The slime takes on a hint of everything it eats.
-	_base_color = _base_color.lerp(meal_color, 0.06)
+	_base_color = _base_color.lerp(meal_color, COLOR_SHIFT_RATE)
 	_material.set_shader_parameter("base_color", _base_color)
 
 	ate.emit(meal_nutrition, meal_color, target.global_position)
