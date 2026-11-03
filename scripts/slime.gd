@@ -133,7 +133,7 @@ func _update_eyes() -> void:
 func _physics_process(delta: float) -> void:
 	var horizontal := Input.get_axis("move_left", "move_right")
 	var forward := Input.get_axis("move_back", "move_forward")
-	var dir := Vector3(horizontal, 0.0, -forward)
+	var dir := _camera_relative(horizontal, forward)
 	if dir.length_squared() > 1.0:
 		dir = dir.normalized()
 
@@ -162,6 +162,21 @@ func _physics_process(delta: float) -> void:
 	_material.set_shader_parameter("wobble_amplitude", wobble_idle + move_ratio * wobble_move)
 	_visual_scale = _visual_scale.lerp(Vector3.ONE, clampf(squash_recover * delta, 0.0, 1.0))
 	_mesh.scale = _visual_scale
+
+
+## WASD is camera-relative, so "forward" always means away from the camera
+## even after the third-person camera orbits around the slime.
+func _camera_relative(horizontal: float, forward: float) -> Vector3:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return Vector3(horizontal, 0.0, -forward).limit_length(1.0)
+	var cam_forward := -cam.global_basis.z
+	cam_forward.y = 0.0
+	cam_forward = cam_forward.normalized()
+	var cam_right := cam.global_basis.x
+	cam_right.y = 0.0
+	cam_right = cam_right.normalized()
+	return (cam_right * horizontal + cam_forward * forward).limit_length(1.0)
 
 
 func _process(delta: float) -> void:

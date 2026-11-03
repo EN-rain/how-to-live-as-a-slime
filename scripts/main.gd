@@ -10,6 +10,12 @@ const SAFE_SPAWN_PUSH := 5.5
 const SHAKE_FREQUENCY := 32.0
 const HURT_TRAUMA := 0.4
 const BURST_POOL_INITIAL_SIZE := 6
+const WORLD_COLLISION_LAYER := 1
+const CAMERA_WALL_MARGIN := 0.3
+const CAMERA_MIN_DISTANCE := 0.9
+const CAMERA_MIN_PITCH := 0.05
+const CAMERA_MAX_PITCH := 1.2
+const CAMERA_ZOOM_STEP := 0.1
 
 ## Deterministic edible clusters: resource, amount, centre and spread.
 ## Adding food = adding a .tres here (or a new line pointing at one).
@@ -45,11 +51,18 @@ static var _burst_mat_cache: Dictionary = {}
 @export var tier_medium: float = 1.7
 
 @export_group("Camera & Shake")
-@export var camera_base_distance: float = 3.4
-@export var camera_size_distance: float = 4.6
-@export var camera_height_ratio: float = 0.85
+## Third-person orbit: distance behind the slime at the smallest size.
+@export var camera_base_distance: float = 3.3
+## Extra orbit distance per unit of slime size, so big slimes stay framed.
+@export var camera_size_distance: float = 1.7
+## Camera elevation above the look target. ~20-25 degrees reads as third person.
+@export_range(-5.0, 75.0, 1.0) var camera_pitch_deg: float = 22.0
+@export_range(0.01, 1.0, 0.01) var camera_orbit_sensitivity: float = 0.22
+## Look target height above the slime's origin, per unit of size.
 @export var camera_look_height: float = 0.9
-@export var camera_smooth: float = 5.0
+@export var camera_smooth: float = 8.0
+@export_range(0.5, 1.0, 0.05) var camera_zoom_min: float = 0.65
+@export_range(1.0, 3.0, 0.05) var camera_zoom_max: float = 1.8
 @export var trauma_decay: float = 1.6
 
 @export_group("Spawning")
@@ -69,6 +82,9 @@ static var _burst_mat_cache: Dictionary = {}
 var _trauma := 0.0
 var _shake_time := 0.0
 var _camera_ready := false
+var _camera_yaw := PI
+var _camera_pitch := 0.0
+var _camera_zoom := 1.0
 var _remaining := 0
 var _total_spawned := 0
 var _elapsed_time := 0.0
@@ -100,6 +116,7 @@ func _ready() -> void:
 		eat_sound = get_node_or_null("EatSound") as AudioStreamPlayer
 
 	player.position = Vector3(0, 1.0, 0)
+	_camera_pitch = deg_to_rad(camera_pitch_deg)
 	_prewarm_burst_pool()
 	_spawn_edibles()
 	_spawn_mobs()
@@ -136,6 +153,23 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event.is_action_pressed("restart"):
 		restart_game()
+
+	# Third-person orbit: right/middle-drag to look around, wheel to zoom.
+	if event is InputEventMouseMotion and event.button_mask & (MOUSE_BUTTON_MASK_RIGHT | MOUSE_BUTTON_MASK_MIDDLE):
+		_camera_yaw -= event.relative.x * deg_to_rad(camera_orbit_sensitivity)
+		_camera_pitch = clampf(
+			_camera_pitch + event.relative.y * deg_to_rad(camera_orbit_sensitivity),
+			CAMERA_MIN_PITCH,
+			CAMERA_MAX_PITCH
+		)
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_camera_zoom = maxf(camera_zoom_min, _camera_zoom - CAMERA_ZOOM_STEP)
+			get_viewport().set_input_as_handled()
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_camera_zoom = minf(camera_zoom_max, _camera_zoom + CAMERA_ZOOM_STEP)
+			get_viewport().set_input_as_handled()
 
 
 func _wire_menus() -> void:
@@ -352,7 +386,7 @@ func _create_fallback_camera() -> Camera3D:
 	var cam := Camera3D.new()
 	cam.fov = 68.0
 	cam.near = 0.1
-	cam.far = 160.0
+	cam.far = 220.0
 	add_child(cam)
 	cam.current = true
 	return cam
@@ -361,14 +395,22 @@ func _create_fallback_camera() -> Camera3D:
 func _update_camera(delta: float) -> void:
 	if not is_instance_valid(player) or camera == null:
 		return
-	var distance := camera_base_distance + camera_size_distance * player.size
+	var distance := (camera_base_distance + camera_size_distance * player.size) * _camera_zoom
 	var target := player.global_position + Vector3(0, camera_look_height * player.size, 0)
-	var desired := player.global_position + Vector3(0, distance * camera_height_ratio, distance)
+	var pitch := clampf(_camera_pitch, CAMERA_MIN_PITCH, CAMERA_MAX_PITCH)
+	var offset := Vector3(
+		sin(_camera_yaw) * cos(pitch),
+		sin(pitch),
+		cos(_camera_yaw) * cos(pitch)
+	) * distance
+	var desired := _clamp_camera_to_world(target, target + offset)
 	if not _camera_ready:
 		camera.global_position = desired
 		_camera_ready = true
 	else:
-		camera.global_position = camera.global_position.lerp(desired, clampf(camera_smooth * delta, 0.0, 1.0))
+		# Pull in fast (never let a wall cover the player), ease out normally.
+		var follow := camera_smooth * (2.0 if desired.distance_to(target) < camera.global_position.distance_to(target) else 1.0)
+		camera.global_position = camera.global_position.lerp(desired, clampf(follow * delta, 0.0, 1.0))
 	camera.look_at(target, Vector3.UP)
 	if _trauma > 0.0:
 		_shake_time += delta * SHAKE_FREQUENCY
@@ -378,6 +420,24 @@ func _update_camera(delta: float) -> void:
 			sin(_shake_time * 1.7), sin(_shake_time * 2.3), sin(_shake_time * 1.3)
 		) * shake * 0.45
 		camera.rotate_object_local(Vector3(0, 0, 1), sin(_shake_time * 1.1) * shake * 0.03)
+
+
+## Keeps the camera out of walls, trees, and rocks by raycasting from the
+## slime's look target outward and pulling the camera in front of the hit.
+func _clamp_camera_to_world(target: Vector3, desired: Vector3) -> Vector3:
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		return desired
+	var query := PhysicsRayQueryParameters3D.create(target, desired, WORLD_COLLISION_LAYER)
+	if is_instance_valid(player):
+		query.exclude = [player.get_rid()]
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return desired
+	var pos: Vector3 = hit["position"] + (target - desired).normalized() * CAMERA_WALL_MARGIN
+	if pos.distance_to(target) < CAMERA_MIN_DISTANCE:
+		pos = target + (desired - target).normalized() * CAMERA_MIN_DISTANCE
+	return pos
 
 
 func _add_trauma(amount: float) -> void:
