@@ -23,7 +23,7 @@
 3. If you changed gameplay, say what you tested by hand (F5/F6) and what you could not test.
 4. If a change breaks the smoke test, fix the change, not the test, unless the test itself is wrong. Say so if you edit it.
 
-Last validated with **Godot 4.6.stable**: import, a 480-frame rendered run, and the smoke test at 11/11 (exit 0).
+Last validated with **Godot 4.6.stable**: import, windowed runs (terrain/animations, ~166–194 fps), and the smoke test at 21/21 (exit 0).
 
 **Adding a new `class_name` needs a rescan first.** A fresh class is not in the global class cache until `--headless --import` (or opening the editor) runs; scripts referencing it fail to compile before that. `--headless` does not compile shaders, so also do one windowed run for look changes.
 
@@ -78,7 +78,7 @@ Not installed on purpose: the `awesome-gamedev-agent-skills` router (it expects 
 - **The slime:** `CharacterBody3D` + vertex-wobble `spatial` shader + squash and stretch. Get the feel right first.
 - **Reusable scenes:** build `Edible` (Area3D trigger; size, nutrition, color) and `Mob` (state machine) **once** and reuse them everywhere.
 - **Placeholders:** primitives and free CC0 models. No custom world art until the loop works. The slime itself is built in code and shader, not from a model.
-- **Map:** small and hand-placed. **No procedural generation.**
+- **Map:** small and hand-placed. **No procedural generation.** Exception: the ground itself is a deterministic analytic height field (`GameWorld.terrain_height()`: waves + named mounds) so the arena is not a flat plane. Props, edibles, and mobs are still hand-placed/spawned from fixed tables.
 - **Scope:** 3 size tiers (bugs, critters, people), about 10-12 edibles, 2-3 enemy types for the prototype. Cut the rest for now.
 - **Growth:** scale player, camera distance, speed, jump and physics together. Keep a size gate (you can only eat things smaller than you).
 - **Darkness:** comes from the world's reactions and visual tone, not from story.
@@ -125,21 +125,21 @@ All prototype shortcuts from pass 2 have been migrated to the Inspector-editable
   - `scenes/edibles/*.tscn` and `scenes/mobs/*.tscn` are thin wrappers that instance a GLB from `assets/models/`.
   - `scenes/eat_burst.tscn` holds the reusable `GPUParticles3D` absorption burst.
 - **Obstacles + `NavigationAgent3D`:** trees and rocks are `StaticBody3D` obstacles on collision layer 1 (`World`). `Mob` uses `NavigationAgent3D` with obstacle-avoidance ray feelers so grounded mobs route cleanly around obstacles.
-- **Third-person camera + camera-relative input:** `Main` owns the orbit (`_camera_yaw`, `_camera_pitch`, `_camera_zoom`), raycasts layer 1 to pull the camera in front of walls, and follows at a low height. `Slime._camera_relative()` reads `get_viewport().get_camera_3d()`, so W is always "away from the camera" even after orbiting. Right-drag orbit and wheel zoom are raw mouse events, not `InputMap` actions.
+- **Third-person camera + camera-relative input:** `Main` owns the orbit (`_camera_yaw`, `_camera_pitch`, `_camera_zoom`), raycasts layer 1 to pull the camera in front of walls, and follows at a low height. `Slime._camera_relative()` reads `get_viewport().get_camera_3d()`, so W is always "away from the camera" even after orbiting. **Drag with any mouse button** to orbit; wheel zoom. Both are raw mouse events, not `InputMap` actions.
 - **Translucent slime:** `slime.gdshader` writes `ALPHA` from the `alpha` uniform; `slime_outline.gdshader` discards everything except the silhouette band so the dark inverted hull does not show through the jelly. `ShadowProxy` is a shadows-only sphere: the transparent `Body` casts a hollow ring shadow, so body/eye shadow casting is off and the proxy provides the ground shadow.
 - **Menus, Save/Load, and Win Screen (`scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd`, `scripts/save_manager.gd`):**
   - Pause/Settings menu (`Esc`), quick save (`F6`), quick load (`F9`), SFX volume & SSAO/SDFGI toggles, and an atmospheric "Nothing Left to Eat" Win Screen when `_remaining <= 0`.
 
 ## Current state (pass 3: full scene architecture + menus/save/win)
 
-`scenes/main.tscn` is playable: eat, grow, a third-person orbit camera, a **100 × 100 m** arena, a translucent slime, toon look, 11 edible kinds (85 instances) in 3 tiers, 9 villagers and 10 birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
+`scenes/main.tscn` is playable: eat, grow, a third-person orbit camera, a **100 × 100 m** arena with **rolling terrain**, a translucent slime, toon look, 11 edible kinds (85 instances) in 3 tiers, 9 villagers and 10 birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R. Mobs only react while they can see the slime (line-of-sight raycast) and play the animation clips baked into their GLBs.
 
-**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** in pass 2, **~165-185 fps** after pass 3, **~250-260 fps** now with the third-person camera and the larger arena.
+**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** in pass 2, **~165-185 fps** after pass 3, **~250-260 fps** after the third-person camera and larger arena, **~170-190 fps** now with rolling terrain, line-of-sight and mob animations.
 
 Frame-rate check (read the tail of the `Project FPS` lines; the first few include load hitches):
 
 ```
-godot --path . --print-fps --disable-vsync --quit-after 600
+godot --path . --print-fps --disable-vsync --quit-after 1800
 ```
 
 | Change | Effect |
@@ -157,16 +157,16 @@ Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn 
 
 | Path | What lives there |
 |---|---|
-| `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, 100 × 100 m ground, walls, `tree.tscn` & `rock.tscn` obstacles |
+| `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, generated hilly 100 × 100 m ground, walls, `tree.tscn` & `rock.tscn` obstacles |
 | `scenes/edibles/*.tscn`, `scenes/mobs/*.tscn` | Per-kind visual prefabs that instance a GLB from `assets/models/` |
-| `assets/models/*.glb` | 15 exported models (UnityGLTF); `Textures/colormap.png` is a placeholder for the contributor's missing atlas |
+| `assets/models/*.glb` | 15 exported models (UnityGLTF); villager/bird/chicken/bug/critter include animation clips; `Textures/colormap.png` is a placeholder for the contributor's missing atlas |
 | `scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd` | `GameMenus`: pause/settings menu, tier progress bar, save toast, win screen |
 | `scripts/save_manager.gd` | `SaveManager`: save/load run state, best clear time, and settings (`user://slime_save.cfg`) |
 | `scripts/data/edible_data.gd`, `mob_data.gd` | Resource classes: the shape of the content data |
 | `resources/edibles/*.tres` | 11 edible kinds, one file each (id, shape, size, nutrition, colour) |
 | `resources/mobs/*.tres` | villager and bird (size, speeds, flies, colour, bite stats) |
 | `resources/` | Add new kinds here; then reference them from `EDIBLE_GROUPS` or a spawn call |
-| `tests/smoke_test.tscn` | Headless regression test (18 checks) |
+| `tests/smoke_test.tscn` | Headless regression test (21 checks) |
 | `project.godot` → `[input]` | Movement, jump, restart, pause (`Esc`), quick_save (`F6`), quick_load (`F9`) |
 
 Non-obvious notes:
@@ -177,6 +177,9 @@ Non-obvious notes:
 - **Icosphere winding:** Godot treats *clockwise* triangles as front-facing. `Icosphere.build()` emits `(a, c, b)`; emitting `(a, b, c)` renders the body inside-out and the `cull_front` outline `next_pass` covers the whole slime.
 - **Navmesh carving:** `GameWorld._ready()` rebuilds the grid `NavigationMesh`; `_is_cell_blocked()` tests the obstacle circle against the whole cell *square*. Centre-only tests miss obstacles that sit on a grid line, and paths then run straight through rocks. `NAV_HALF_EXTENT` (48) must stay just inside the ground half-size (50).
 - **Spawn clearance:** `main.gd::_spawn_edibles()` and `_spawn_mobs()` reject spots within 1.6-2.6 m of a tree/rock. A prop buried in a `StaticBody3D` can never be eaten, which would make a 100% clear impossible; keep the clearance check when adding spawn types.
+- **Hilly terrain:** `GameWorld._apply_terrain()` builds an `ArrayMesh` plus a `ConcavePolygonShape3D` from `terrain_height()` (waves + named Gaussian mounds, flattened inside `terrain_flat_radius`). Winding must be `i0,i1,i2` + `i0,i2,i3`; the reverse order renders the ground backface-culled/black and mobs sit half-buried. The navmesh and every spawn/load path sample the same height function (`Main._ground_height()`), so new content must be snapped too; trees/rocks are snapped in `_snap_props_to_terrain()`.
+- **Line of sight:** `Mob._has_line_of_sight()` raycasts from an eye point (`size * 0.85`) to the slime's low centre (slime Y + 0.35) on collision mask 1, excluding only the mob's own RID. Terrain, trees, rocks, and walls all block it, so hiding behind cover drops a mob back to `wander`; chase/flee and bites require sight. Keep new cover on layer 1 or hiding will stop working.
+- **Mob animation:** the GLBs ship the clips, but they only play because `Mob._setup_animations()` finds the imported `AnimationPlayer`, loops `idle`/`walk`/`run`, and `_update_animation()` switches by state and speed (bite/death are timed one-shots). The villager uses `sprint` (it has no `run`); the bird has no skeleton and animates node transforms. Keep the clip-name fallbacks when adding a mob GLB.
 - **Nav agent distances:** mobs stand ~0.88 m above the navmesh. `path_desired_distance` must be larger than that vertical gap (keep `>= 1.2`); at `0.65` the first path point is never reached, so `get_next_path_position()` returns the spawn point forever and the mob stands still.
 - `assets/models/Textures/colormap.png` is a generated 4×4 white placeholder for the contributor's missing texture atlas. Every GLB references it, but `ToonMaterial` overrides the imported material, so it has no visual effect. Keep it (deleting it restores 15 import errors) until the models are re-exported with the real atlas.
 - Shared eat contract: `Edible` and `Mob` use the same eat/absorb interface (`try_eat`, `absorb`); keep it consistent.
@@ -184,7 +187,7 @@ Non-obvious notes:
 - Physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) must be deferred when made from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".
 - `Edible`/`Mob` export `data: EdibleData`/`MobData`. Spawn code must set `data` before `add_child()`, because `_ready()` reads it. Both scripts fall back to a default resource if it is unset, so a freshly placed node still runs.
 
-**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `GameWorld`'s exported `Lighting & Sun`, `Environment & Quality`, `Navigation`, and `Palette` groups; `Main`'s `Camera & Shake` and `Spawning` groups (orbit distance/pitch/sensitivity, counts); `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`.
+**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `GameWorld`'s exported `Lighting & Sun`, `Environment & Quality`, `Navigation`, `Terrain`, and `Palette` groups; `Main`'s `Camera & Shake` and `Spawning` groups (orbit distance/pitch/sensitivity, counts); `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`.
 
 ## Working agreement
 

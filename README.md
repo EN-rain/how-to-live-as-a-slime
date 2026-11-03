@@ -15,7 +15,7 @@ Built from [`how-to-live-as-a-slime-plan.md`](how-to-live-as-a-slime-plan.md) �
 |---|---|
 | WASD / arrows | Move (relative to the camera) |
 | Space | Jump |
-| Right-drag mouse | Orbit the third-person camera |
+| Drag a mouse button | Orbit the third-person camera |
 | Mouse wheel | Zoom the camera |
 | R | Restart |
 | Esc | Pause / Settings / Save Menu |
@@ -26,9 +26,11 @@ Built from [`how-to-live-as-a-slime-plan.md`](how-to-live-as-a-slime-plan.md) �
 
 - You can only eat things **smaller than you** (`size <= your size`). Touch an edible with the slime's eat `Area3D` to swallow it.
 - Each meal adds nutrition. Size = `0.8 * (nutrition / 27)^0.4`, so early bugs grow you visibly and late tiers need houses and statues.
-- Movement speed and jump scale with size; the third-person camera pulls back as you grow. WASD is camera-relative, so right-drag orbit then move where you are looking.
-- A **100 × 100 m** arena holds 85 edibles (11 kinds) and 19 mobs (9 villagers, 10 birds), with trees and rocks spread across the whole map.
+- Movement speed and jump scale with size; the third-person camera pulls back as you grow. WASD is camera-relative, so drag to orbit, then move where you are looking.
+- A **100 × 100 m** arena of **rolling hills** holds 85 edibles (11 kinds) and 19 mobs (9 villagers, 10 birds), with trees and rocks spread across the whole map. The spawn area stays flat so the opening is safe; the named mounds rise to about 4 m.
 - Two mobs: **villagers** and **birds**. Bigger than you → they chase and bite (shrinking you). Smaller than you → they flee. Either can be eaten once you outgrow them. Grounded mobs use `NavigationAgent3D` and obstacle-avoidance feelers to navigate around trees and rocks.
+- **Hiding works.** A mob only chases or flees while it can actually see you; trees, rocks, walls, and hills break the line of sight, so ducking behind an object drops it back to wandering.
+- Mobs **animate**: the GLBs ship `idle`, `walk`, `run`/`sprint`, attack, and death clips, and `mob.gd` switches between them by state and speed (bite and death clips play as one-shots).
 - Two tone beats from the plan: past size **2.6** the pupils go pale, and once the map is empty the HUD reads **Nothing left to eat.** and opens the **World Eaten** summary overlay with your final size, time, and best record.
 - Save or load your run anytime via **Esc** or **F6 / F9** (`user://slime_save.cfg`).
 
@@ -44,6 +46,7 @@ Target: a locked 60 fps on integrated graphics. Measured on **Intel Iris Xe (D3D
 | + shared materials/meshes, instance-uniform dissolve, shadow & distance budgets | **~85–100** |
 | + pass-3 world/nav GLB props | **~165–185** |
 | + third-person camera, translucent slime, 100 × 100 m world | **~250–260** |
+| + rolling terrain, mob line-of-sight, GLB animations | **~170–190** |
 
 What produced most of it, in order of cost:
 
@@ -56,7 +59,7 @@ What produced most of it, in order of cost:
 7. **Icosphere slime body.** 642 evenly distributed vertices instead of a pole-pinched UV sphere: smoother wobble and less overdraw at top size.
 8. **GLB prop models.** The world, edibles, and mobs instance shared `.glb` scenes (`assets/models/`) through per-kind prefabs, replacing per-object primitive builds.
 
-The latest figure (259–260 fps) is from a 1200-frame windowed run on the same machine with the larger arena; ignore the first few `Project FPS` lines, which include load hitches.
+The latest figure (~170–190 fps) is from 1200- and 1800-frame windowed runs on the same machine with the hilly arena and animating mobs. Ignore the first and last `Project FPS` lines, which include load/quit hitches; the middle samples sat at 166–194 fps.
 
 Scaling up later: flip `ssao_enabled`/`sdfgi_enabled` on for a discrete GPU, then add real LOD tiers and chunk streaming (both cut from the prototype).
 
@@ -88,7 +91,7 @@ Checked against `how-to-live-as-a-slime-plan.md` after the scene architecture & 
 
 ## Test
 
-A headless smoke test (18 checks) boots the world and exercises scene architecture, navigation-mesh carving, GLB visuals, the pause menu, eat → grow → dissolve → damage → save/load:
+A headless smoke test (21 checks) boots the world and exercises scene architecture, navigation-mesh carving, terrain relief, mob animations, GLB visuals, the pause menu, eat → grow → dissolve → damage → save/load:
 
 ```sh
 godot --headless --path . res://tests/smoke_test.tscn
@@ -113,11 +116,11 @@ scenes/
   eat_burst.tscn               Reusable GPUParticles3D absorption burst
   ui/game_menus.tscn           Pause/Settings menu, Tier progress bar, Save toast, Win screen
 scripts/
-  main.gd                      Third-person orbit camera, spawns, shake, HUD, save/load wiring, exported refs
-  world.gd                     GameWorld: exported lighting, sun, fog, SSAO/SDFGI, palette & navmesh setup
+  main.gd                      Third-person orbit camera (drag any button), terrain-aware spawns, shake, HUD, save/load wiring
+  world.gd                     GameWorld: exported lighting, sun, fog, SSAO/SDFGI, palette, generated hilly ground + navmesh setup
   slime.gd                     Camera-relative movement, exported growth/feel/look, squash, blank eyes
   edible.gd                    EdibleData-driven props, size gate, absorb/dissolve, mesh/shape cache
-  mob.gd                       MobData-driven villager/bird FSM + NavigationAgent3D & obstacle feelers
+  mob.gd                       MobData-driven villager/bird FSM, line-of-sight, GLB animation, NavigationAgent3D feelers
   save_manager.gd              SaveManager: run state, world completion records & settings persistence
   ui/game_menus.gd             GameMenus: pause/settings UI, progression indicator, and win overlay
   data/edible_data.gd          EdibleData resource: id, shape, visual_scene, size, nutrition, colour
@@ -136,7 +139,7 @@ shaders/
 assets/models/                15 GLB models (UnityGLTF exports) + Textures/colormap.png placeholder
 assets/sounds/pop.wav          Procedurally generated eat pop
 tests/
-  smoke_test.tscn              Headless boot + world/nav/visuals/eat/grow/dissolve/input/save checks (18)
+  smoke_test.tscn              Headless boot + world/nav/terrain/animations/eat/grow/dissolve/input/save checks (21)
   smoke_test.gd
 .agents/skills/                19 Godot 3D agent skills (see AGENTS.md)
 ```
