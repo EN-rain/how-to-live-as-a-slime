@@ -14,17 +14,17 @@ const BURST_POOL_INITIAL_SIZE := 6
 ## Deterministic edible clusters: resource, amount, centre and spread.
 ## Adding food = adding a .tres here (or a new line pointing at one).
 const EDIBLE_GROUPS := [
-	{"data": preload("res://resources/edibles/bug.tres"), "count": 10, "center": Vector3(0, 0, 4), "radius": 8.0},
-	{"data": preload("res://resources/edibles/berry.tres"), "count": 8, "center": Vector3(-6, 0, -4), "radius": 7.0},
-	{"data": preload("res://resources/edibles/crumb.tres"), "count": 8, "center": Vector3(7, 0, 0), "radius": 7.0},
-	{"data": preload("res://resources/edibles/pebble.tres"), "count": 6, "center": Vector3(0, 0, -8), "radius": 6.0},
-	{"data": preload("res://resources/edibles/fruit.tres"), "count": 8, "center": Vector3(-14, 0, 8), "radius": 8.0},
-	{"data": preload("res://resources/edibles/critter.tres"), "count": 7, "center": Vector3(14, 0, -6), "radius": 8.0},
-	{"data": preload("res://resources/edibles/chicken.tres"), "count": 6, "center": Vector3(2, 0, 16), "radius": 7.0},
-	{"data": preload("res://resources/edibles/barrel.tres"), "count": 5, "center": Vector3(-16, 0, -14), "radius": 6.0},
-	{"data": preload("res://resources/edibles/cart.tres"), "count": 3, "center": Vector3(16, 0, 14), "radius": 6.0},
-	{"data": preload("res://resources/edibles/statue.tres"), "count": 3, "center": Vector3(0, 0, -18), "radius": 5.0},
-	{"data": preload("res://resources/edibles/house.tres"), "count": 2, "center": Vector3(-18, 0, 18), "radius": 4.0},
+	{"data": preload("res://resources/edibles/bug.tres"), "count": 12, "center": Vector3(0, 0, 6), "radius": 12.0},
+	{"data": preload("res://resources/edibles/berry.tres"), "count": 10, "center": Vector3(-12, 0, -8), "radius": 12.0},
+	{"data": preload("res://resources/edibles/crumb.tres"), "count": 10, "center": Vector3(12, 0, 0), "radius": 12.0},
+	{"data": preload("res://resources/edibles/pebble.tres"), "count": 8, "center": Vector3(0, 0, -14), "radius": 10.0},
+	{"data": preload("res://resources/edibles/fruit.tres"), "count": 10, "center": Vector3(-22, 0, 14), "radius": 12.0},
+	{"data": preload("res://resources/edibles/critter.tres"), "count": 9, "center": Vector3(22, 0, -12), "radius": 12.0},
+	{"data": preload("res://resources/edibles/chicken.tres"), "count": 8, "center": Vector3(4, 0, 26), "radius": 11.0},
+	{"data": preload("res://resources/edibles/barrel.tres"), "count": 7, "center": Vector3(-26, 0, -22), "radius": 11.0},
+	{"data": preload("res://resources/edibles/cart.tres"), "count": 4, "center": Vector3(26, 0, 24), "radius": 10.0},
+	{"data": preload("res://resources/edibles/statue.tres"), "count": 4, "center": Vector3(0, 0, -30), "radius": 9.0},
+	{"data": preload("res://resources/edibles/house.tres"), "count": 3, "center": Vector3(-30, 0, 28), "radius": 8.0},
 ]
 
 const VILLAGER_DATA := preload("res://resources/mobs/villager.tres")
@@ -53,8 +53,8 @@ static var _burst_mat_cache: Dictionary = {}
 @export var trauma_decay: float = 1.6
 
 @export_group("Spawning")
-@export var villager_count: int = 6
-@export var bird_count: int = 7
+@export var villager_count: int = 9
+@export var bird_count: int = 10
 
 @export_group("Nodes")
 @export var world: GameWorld
@@ -180,19 +180,26 @@ func _spawn_edibles() -> void:
 	for group in EDIBLE_GROUPS:
 		var data: EdibleData = group["data"]
 		var y := data.size * 0.55
+		var centre: Vector3 = group["center"]
+		var reach: float = group["radius"]
 		for i in int(group["count"]):
-			var angle := rng.randf() * TAU
-			var radius := sqrt(rng.randf()) * float(group["radius"])
-			var centre: Vector3 = group["center"]
+			var spot := Vector3.ZERO
+			# Resample until the meal is reachable: a prop buried in a tree
+			# trunk or rock can never be eaten, which would block 100% clears.
+			for attempt in 24:
+				var angle := rng.randf() * TAU
+				var radius := sqrt(rng.randf()) * reach
+				spot = Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
+				# Never spawn a free meal inside the player's starting eat radius.
+				var flat := Vector2(spot.x, spot.z)
+				if flat.length() < SAFE_SPAWN_RADIUS:
+					var outward := flat.normalized() if flat.length() > 0.01 else Vector2.RIGHT
+					spot.x = outward.x * SAFE_SPAWN_PUSH
+					spot.z = outward.y * SAFE_SPAWN_PUSH
+				if _is_spot_clear(spot.x, spot.z, 1.6):
+					break
 			var edible := edible_scene.instantiate() as Edible
 			edible.data = data
-			var spot := Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
-			# Never spawn a free meal inside the player's starting eat radius.
-			var flat := Vector2(spot.x, spot.z)
-			if flat.length() < SAFE_SPAWN_RADIUS:
-				var outward := flat.normalized() if flat.length() > 0.01 else Vector2.RIGHT
-				spot.x = outward.x * SAFE_SPAWN_PUSH
-				spot.z = outward.y * SAFE_SPAWN_PUSH
 			# Position before add_child: _ready() must not run at the origin.
 			edible.position = spot
 			parent.add_child(edible)
@@ -205,17 +212,43 @@ func _spawn_mobs() -> void:
 	for i in villager_count:
 		var villager := mob_scene.instantiate() as Mob
 		villager.data = VILLAGER_DATA
-		var angle := TAU * float(i) / float(maxi(villager_count, 1)) + rng.randf_range(-0.25, 0.25)
-		var radius := rng.randf_range(11.0, 22.0)
-		villager.position = Vector3(cos(angle) * radius, 1.2, sin(angle) * radius)
+		var spot := _mob_spawn_point(rng, 12.0, 44.0, 2.6)
+		spot.y = 1.2
+		villager.position = spot
 		parent.add_child(villager)
 	for i in bird_count:
 		var bird := mob_scene.instantiate() as Mob
 		bird.data = BIRD_DATA
-		var angle := rng.randf() * TAU
-		var radius := rng.randf_range(5.0, 25.0)
-		bird.position = Vector3(cos(angle) * radius, rng.randf_range(1.5, 3.5), sin(angle) * radius)
+		var spot := _mob_spawn_point(rng, 6.0, 46.0, 2.6)
+		spot.y = rng.randf_range(1.5, 3.5)
+		bird.position = spot
 		parent.add_child(bird)
+
+
+func _mob_spawn_point(rng: RandomNumberGenerator, inner: float, outer: float, clearance: float) -> Vector3:
+	var spot := Vector3.ZERO
+	for attempt in 24:
+		var angle := rng.randf() * TAU
+		var radius := rng.randf_range(inner, outer)
+		spot = Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+		if _is_spot_clear(spot.x, spot.z, clearance):
+			break
+	return spot
+
+
+## True when (x, z) is clear of tree and rock obstacles by `clearance` metres.
+## World props are on StaticBody3D collision, so a spawn inside them is stuck.
+func _is_spot_clear(x: float, z: float, clearance: float) -> bool:
+	if world == null:
+		return true
+	for root in [world.trees_root, world.rocks_root]:
+		if root == null:
+			continue
+		for prop in root.get_children():
+			var p := prop as Node3D
+			if p != null and Vector2(x - p.position.x, z - p.position.z).length() < clearance:
+				return false
+	return true
 
 
 # --- Save & Load ------------------------------------------------------------

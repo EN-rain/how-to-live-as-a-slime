@@ -11,10 +11,10 @@ static var _shape_cache: Dictionary = {}
 
 const DEFAULT_GROUND_SCENE: PackedScene = preload("res://scenes/mobs/villager.tscn")
 const DEFAULT_FLY_SCENE: PackedScene = preload("res://scenes/mobs/bird.tscn")
-const DETECTION_RANGE := 28.0
+const DETECTION_RANGE := 30.0
 const FLEE_SIZE_RATIO := 1.05
 const CHASE_SIZE_RATIO := 0.95
-const MAP_BOUND := 27.5
+const MAP_BOUND := 47.5
 const GRAVITY := 24.0
 const FLY_ACCEL := 8.0
 const GROUND_ACCEL := 14.0
@@ -22,7 +22,7 @@ const TURN_SPEED := 8.0
 const BASE_HOVER_HEIGHT := 2.3
 const ABSORB_DURATION := 0.35
 const OBSTACLE_RAY_LENGTH := 2.2
-const VISIBILITY_END := 85.0
+const VISIBILITY_END := 100.0
 const REPATH_INTERVAL := 0.25
 
 ## Which mob this is. Assign a .tres from resources/mobs/ in the Inspector.

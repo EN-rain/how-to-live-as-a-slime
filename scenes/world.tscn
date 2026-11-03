@@ -30,20 +30,20 @@ fog_light_color = Color(0.78, 0.74, 0.66, 1)
 fog_density = 0.55
 fog_aerial_perspective = 0.5
 fog_sky_affect = 0.0
-fog_depth_begin = 26.0
-fog_depth_end = 80.0
+fog_depth_begin = 42.0
+fog_depth_end = 150.0
 
 [sub_resource type="BoxMesh" id="BoxMesh_ground"]
-size = Vector3(60, 1, 60)
+size = Vector3(100, 1, 100)
 
 [sub_resource type="BoxShape3D" id="BoxShape_ground"]
-size = Vector3(60, 1, 60)
+size = Vector3(100, 1, 100)
 
 [sub_resource type="BoxShape3D" id="BoxShape_wall_ns"]
-size = Vector3(60, 8, 1)
+size = Vector3(100, 8, 1)
 
 [sub_resource type="BoxShape3D" id="BoxShape_wall_ew"]
-size = Vector3(1, 8, 60)
+size = Vector3(1, 8, 100)
 
 [node name="World" type="Node3D" node_paths=PackedStringArray("world_environment", "sun_light", "nav_region", "ground_mesh", "trees_root", "rocks_root")]
 script = ExtResource("1_world")
@@ -82,7 +82,7 @@ shape = SubResource("BoxShape_ground")
 [node name="Walls" type="Node3D" parent="NavigationRegion3D"]
 
 [node name="NorthWall" type="StaticBody3D" parent="NavigationRegion3D/Walls"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, -30)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, -50)
 collision_layer = 1
 collision_mask = 0
 
@@ -90,7 +90,7 @@ collision_mask = 0
 shape = SubResource("BoxShape_wall_ns")
 
 [node name="SouthWall" type="StaticBody3D" parent="NavigationRegion3D/Walls"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 30)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 50)
 collision_layer = 1
 collision_mask = 0
 
@@ -98,7 +98,7 @@ collision_mask = 0
 shape = SubResource("BoxShape_wall_ns")
 
 [node name="WestWall" type="StaticBody3D" parent="NavigationRegion3D/Walls"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -30, 4, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -50, 4, 0)
 collision_layer = 1
 collision_mask = 0
 
@@ -106,7 +106,7 @@ collision_mask = 0
 shape = SubResource("BoxShape_wall_ew")
 
 [node name="EastWall" type="StaticBody3D" parent="NavigationRegion3D/Walls"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 30, 4, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 50, 4, 0)
 collision_layer = 1
 collision_mask = 0
 
@@ -151,6 +151,45 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0, -22)
 [node name="Tree12" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 0, -20)
 
+[node name="Tree13" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -38, 0, -18)
+
+[node name="Tree14" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -34, 0, 10)
+
+[node name="Tree15" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -30, 0, 30)
+
+[node name="Tree16" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14, 0, 34)
+
+[node name="Tree17" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 0, 38)
+
+[node name="Tree18" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 26, 0, 32)
+
+[node name="Tree19" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 38, 0, 18)
+
+[node name="Tree20" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 40, 0, -6)
+
+[node name="Tree21" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 30, 0, -30)
+
+[node name="Tree22" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0, -38)
+
+[node name="Tree23" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -16, 0, -36)
+
+[node name="Tree24" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -38, 0, -4)
+
+[node name="Tree25" parent="NavigationRegion3D/Trees" instance=ExtResource("2_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 34, 0, -18)
+
 [node name="Rocks" type="Node3D" parent="NavigationRegion3D"]
 
 [node name="Rock1" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
@@ -176,3 +215,27 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -24, 0, 4)
 
 [node name="Rock8" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16, 0, -24)
+
+[node name="Rock9" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 32, 0, 8)
+
+[node name="Rock10" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 0, 26)
+
+[node name="Rock11" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 0, 28)
+
+[node name="Rock12" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -34, 0, -10)
+
+[node name="Rock13" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -26, 0, 18)
+
+[node name="Rock14" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0, -32)
+
+[node name="Rock15" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 0, -28)
+
+[node name="Rock16" parent="NavigationRegion3D/Rocks" instance=ExtResource("3_rock")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 36, 0, -24)

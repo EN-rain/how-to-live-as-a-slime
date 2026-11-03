@@ -9,10 +9,10 @@ const LightingPreset := preload("res://scripts/lighting_preset.gd")
 
 const OUTLINE_WIDTH := 0.02
 const GROUND_OUTLINE_COLOR := Color(0.09, 0.07, 0.12)
-const TREE_VISIBILITY_END := 95.0
-const ROCK_VISIBILITY_END := 80.0
-const NAV_HALF_EXTENT := 28.0
-const NAV_GRID_STEPS := 28
+const TREE_VISIBILITY_END := 130.0
+const ROCK_VISIBILITY_END := 110.0
+const NAV_HALF_EXTENT := 48.0
+const NAV_GRID_STEPS := 48
 
 @export_group("Lighting & Sun")
 @export_range(10.0, 80.0, 1.0) var sun_elevation_deg: float = 32.0
@@ -29,8 +29,8 @@ const NAV_GRID_STEPS := 28
 @export_range(0.5, 2.0, 0.05) var tonemap_exposure: float = 1.0
 @export_range(0.5, 2.0, 0.05) var tonemap_saturation: float = 1.1
 @export var fog_enabled: bool = true
-@export_range(5.0, 80.0, 1.0) var fog_depth_begin: float = 26.0
-@export_range(20.0, 200.0, 1.0) var fog_depth_end: float = 80.0
+@export_range(5.0, 120.0, 1.0) var fog_depth_begin: float = 42.0
+@export_range(20.0, 300.0, 1.0) var fog_depth_end: float = 150.0
 @export_range(0.0, 1.0, 0.05) var fog_density: float = 0.55
 
 @export_group("Navigation")
