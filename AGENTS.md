@@ -120,8 +120,9 @@ All prototype shortcuts from pass 2 have been migrated to the Inspector-editable
 - **Dedicated `World` scene (`scenes/world.tscn` + `scripts/world.gd`):** lighting, sky/environment, ground, walls, `NavigationRegion3D`, and instanced `scenes/tree.tscn` / `scenes/rock.tscn` obstacles live in `world.tscn` with exported lighting, quality (`ssao_enabled`, `sdfgi_enabled`), fog, and palette settings on `GameWorld`.
 - **Visuals authored in `.tscn` files:**
   - `scenes/slime.tscn` holds `Body`, `LeftEye/Pupil`, `RightEye/Pupil`, and shader materials; `slime.gd` references them via `@export` node paths.
-  - `scenes/edible.tscn` holds `Mesh`, `Mesh/Roof`, and `Collision`; `edible.gd` configures them from `EdibleData` (and supports optional `EdibleData.visual_scene`).
-  - `scenes/mob.tscn` holds `Mesh`, `Mesh/Head` (with eyes), `Mesh/Wings` (with wings and eyes), `Collision`, and `NavigationAgent3D`.
+  - `scenes/edible.tscn` holds an empty `VisualRoot` (the per-kind model is instanced there) and `Collision`; `edible.gd` reads `EdibleData.visual_scene` from `scenes/edibles/*.tscn`, applies `size`, and overrides the model materials with `ToonMaterial`.
+  - `scenes/mob.tscn` holds an empty `VisualRoot` (per-kind model from `scenes/mobs/*.tscn`), `Collision`, and `NavigationAgent3D`.
+  - `scenes/edibles/*.tscn` and `scenes/mobs/*.tscn` are thin wrappers that instance a GLB from `assets/models/`.
   - `scenes/eat_burst.tscn` holds the reusable `GPUParticles3D` absorption burst.
 - **Obstacles + `NavigationAgent3D`:** trees and rocks are `StaticBody3D` obstacles on collision layer 1 (`World`). `Mob` uses `NavigationAgent3D` with obstacle-avoidance ray feelers so grounded mobs route cleanly around obstacles.
 - **Menus, Save/Load, and Win Screen (`scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd`, `scripts/save_manager.gd`):**
@@ -129,14 +130,14 @@ All prototype shortcuts from pass 2 have been migrated to the Inspector-editable
 
 ## Current state (pass 3: full scene architecture + menus/save/win)
 
-`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers and birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
+`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edible kinds (66 instances) in 3 tiers, villagers and birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
 
-**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** now.
+**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** in pass 2, **~165-185 fps** now (GLB props for the world and mobs cost less than the old runtime primitive builds).
 
 Frame-rate check (read the tail of the `Project FPS` lines; the first few include load hitches):
 
 ```
-godot --path . --print-fps --disable-vsync --quit-after 480
+godot --path . --print-fps --disable-vsync --quit-after 600
 ```
 
 | Change | Effect |
@@ -155,13 +156,15 @@ Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn 
 | Path | What lives there |
 |---|---|
 | `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, ground, walls, `tree.tscn` & `rock.tscn` obstacles |
+| `scenes/edibles/*.tscn`, `scenes/mobs/*.tscn` | Per-kind visual prefabs that instance a GLB from `assets/models/` |
+| `assets/models/*.glb` | 15 exported models (UnityGLTF); `Textures/colormap.png` is a placeholder for the contributor's missing atlas |
 | `scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd` | `GameMenus`: pause/settings menu, tier progress bar, save toast, win screen |
 | `scripts/save_manager.gd` | `SaveManager`: save/load run state, best clear time, and settings (`user://slime_save.cfg`) |
 | `scripts/data/edible_data.gd`, `mob_data.gd` | Resource classes: the shape of the content data |
 | `resources/edibles/*.tres` | 11 edible kinds, one file each (id, shape, size, nutrition, colour) |
 | `resources/mobs/*.tres` | villager and bird (size, speeds, flies, colour, bite stats) |
 | `resources/` | Add new kinds here; then reference them from `EDIBLE_GROUPS` or a spawn call |
-| `tests/smoke_test.tscn` | Headless regression test (15 checks) |
+| `tests/smoke_test.tscn` | Headless regression test (18 checks) |
 | `project.godot` → `[input]` | Movement, jump, restart, pause (`Esc`), quick_save (`F6`), quick_load (`F9`) |
 
 Non-obvious notes:
@@ -169,6 +172,10 @@ Non-obvious notes:
 - `assets/sounds/pop.wav` was generated procedurally; there is no external audio asset.
 - `scripts/toon_material.gd` is the cel material factory; the outline is an inverted-hull `next_pass`.
 - `scripts/icosphere.gd` builds the slime body mesh (plan §8: an icosphere wobbles evenly, a UV sphere pinches at the poles).
+- **Icosphere winding:** Godot treats *clockwise* triangles as front-facing. `Icosphere.build()` emits `(a, c, b)`; emitting `(a, b, c)` renders the body inside-out and the `cull_front` outline `next_pass` covers the whole slime.
+- **Navmesh carving:** `GameWorld._ready()` rebuilds the grid `NavigationMesh`; `_is_cell_blocked()` tests the obstacle circle against the whole cell *square*. Centre-only tests miss obstacles that sit on a grid line, and paths then run straight through rocks.
+- **Nav agent distances:** mobs stand ~0.88 m above the navmesh. `path_desired_distance` must be larger than that vertical gap (keep `>= 1.2`); at `0.65` the first path point is never reached, so `get_next_path_position()` returns the spawn point forever and the mob stands still.
+- `assets/models/Textures/colormap.png` is a generated 4×4 white placeholder for the contributor's missing texture atlas. Every GLB references it, but `ToonMaterial` overrides the imported material, so it has no visual effect. Keep it (deleting it restores 15 import errors) until the models are re-exported with the real atlas.
 - Shared eat contract: `Edible` and `Mob` use the same eat/absorb interface (`try_eat`, `absorb`); keep it consistent.
 - `area_entered` fires once, so `Slime._sweep_eat_overlaps()` re-checks the eat area after every size change. Without it you cannot eat something you grew past while standing still. Keep the sweep if you replace the eat area.
 - Physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) must be deferred when made from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".

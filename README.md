@@ -39,6 +39,7 @@ Target: a locked 60 fps on integrated graphics. Measured on **Intel Iris Xe (D3D
 | SDFGI off | 24–28 |
 | SSAO off | **85** |
 | + shared materials/meshes, instance-uniform dissolve, shadow & distance budgets | **~85–100** |
+| + pass-3 world/nav GLB props | **~165–185** |
 
 What produced most of it, in order of cost:
 
@@ -49,6 +50,9 @@ What produced most of it, in order of cost:
 5. **Shadow budget.** Two cascade splits over 55 m instead of four over 300 m; only props ≥ 1.5 m cast shadows.
 6. **Distance culling.** Edibles cull at 32–75 m by size, mobs at 85 m, camera far plane 160 m.
 7. **Icosphere slime body.** 642 evenly distributed vertices instead of a pole-pinched UV sphere: smoother wobble and less overdraw at top size.
+8. **GLB prop models.** The world, edibles, and mobs instance shared `.glb` scenes (`assets/models/`) through per-kind prefabs, replacing per-object primitive builds.
+
+The 165–185 fps figure comes from a 600-frame windowed run on the same machine after the world/navigation pass; ignore the first few `Project FPS` lines, which include load hitches.
 
 Scaling up later: flip `ssao_enabled`/`sdfgi_enabled` on for a discrete GPU, then add real LOD tiers and chunk streaming (both cut from the prototype).
 
@@ -75,12 +79,12 @@ Checked against `how-to-live-as-a-slime-plan.md` after the scene architecture & 
 | §8 `NavigationAgent3D` | Done | `NavigationRegion3D` in `world.tscn` + `NavigationAgent3D` and obstacle feelers in `mob.tscn` |
 | §8 LOD / chunk streaming | Partial | Distance culling + shadow budget; real LOD is post-prototype |
 | §8 Scripted collapse instead of physics | Done | Absorb tween into the slime |
-| §9 Prototype scope table | Done | 11 edibles, 2 mob types, 3 tiers, one toon shader |
+| §9 Prototype scope table | Done | 11 edible kinds (66 instances), 2 mob types, 3 tiers, one toon shader |
 | §10 Build order 1–8 | Done | Shipped in order, all at low quality first (§12) |
 
 ## Test
 
-A headless smoke test boots the world and exercises eat → grow → dissolve → damage → save/load:
+A headless smoke test (18 checks) boots the world and exercises scene architecture, navigation-mesh carving, GLB visuals, the pause menu, eat → grow → dissolve → damage → save/load:
 
 ```sh
 godot --headless --path . res://tests/smoke_test.tscn
@@ -96,8 +100,10 @@ scenes/
   main.tscn                    Main + World + Player + Camera3D + HUD + GameMenus + EatSound
   world.tscn                   WorldEnvironment + Sun + NavigationRegion3D + Ground + Walls + Trees + Rocks
   slime.tscn                   CharacterBody3D + Body mesh + LeftEye/RightEye & Pupils + EatArea
-  edible.tscn                  Area3D + Mesh + Roof + Collision (EdibleData drives the look)
-  mob.tscn                     CharacterBody3D + Mesh + Head/Wings/Eyes + Collision + NavigationAgent3D
+  edible.tscn                  Area3D + VisualRoot + Collision (EdibleData picks the model)
+  mob.tscn                     CharacterBody3D + VisualRoot + Collision + NavigationAgent3D
+  edibles/*.tscn               Per-kind edible prefabs wrapping assets/models/*.glb
+  mobs/*.tscn                  villager and bird prefabs wrapping assets/models/*.glb
   tree.tscn                    Reusable StaticBody3D tree obstacle
   rock.tscn                    Reusable StaticBody3D rock obstacle
   eat_burst.tscn               Reusable GPUParticles3D absorption burst
@@ -122,12 +128,15 @@ shaders/
   slime.gdshader               Wobble + cel bands + jelly highlight
   toon.gdshader                Cel bands + per-instance dissolve
   outline.gdshader             Inverted-hull outline
+assets/models/                15 GLB models (UnityGLTF exports) + Textures/colormap.png placeholder
 assets/sounds/pop.wav          Procedurally generated eat pop
 tests/
-  smoke_test.tscn              Headless boot + world/visuals/eat/grow/dissolve/input/save checks
+  smoke_test.tscn              Headless boot + world/nav/visuals/eat/grow/dissolve/input/save checks (18)
   smoke_test.gd
 .agents/skills/                19 Godot 3D agent skills (see AGENTS.md)
 ```
+
+`assets/models/Textures/colormap.png` is a generated 4×4 white placeholder: the exported GLBs reference a texture atlas that was not included. Every edible and mob overrides the imported material with `ToonMaterial`, so the placeholder is never visible. Keep the file (removing it restores 15 import errors) until the source models are re-exported with the real atlas.
 
 ## Skills & licenses
 
