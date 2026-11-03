@@ -1,0 +1,13 @@
+{
+  "skill_name": "godot-lights-camera-post",
+  "evals": [
+    {"id": 1, "name": "character-unreadable-in-shade",
+     "prompt": "Third-person game in Godot 4.7. Since I improved the lighting (real shadows, fog), my player character basically disappears when walking through shaded streets. I don't want to brighten the whole level or the walls around him. Write player_fill_light.gd that I can attach to my Player (CharacterBody3D with a MeshInstance3D child) to fix it.",
+     "expected_output": "Script adds a small low-energy OmniLight3D following the player, no shadows, restricted with light_cull_mask to a dedicated render layer that is added to the player's VisualInstance3D layers (keeping layer 1). Compiles in Godot 4.7.",
+     "files": []},
+    {"id": 2, "name": "vignette-grain-aa-finish",
+     "prompt": "Final polish pass on my godot 4.7 3D game: I want a subtle vignette, some film grain, and the roof edges are jagged + the foliage shimmers when the camera moves. Give me the files and tell me where to put them. Keep it subtle.",
+     "expected_output": "A canvas_item post shader (CanvasLayer + full-rect ColorRect, hint_screen_texture) for vignette + animated grain (no non-existent Environment vignette property), anti-aliasing via MSAA (2x) + TAA or screen-space AA on the viewport/project settings, setup instructions, subtle defaults. Compiles in Godot 4.7.",
+     "files": []}
+  ]
+}

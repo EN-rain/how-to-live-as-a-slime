@@ -1,0 +1,13 @@
+{
+  "skill_name": "godot-vegetation-shaders",
+  "evals": [
+    {"id": 1, "name": "grass-wind-and-scatter",
+     "prompt": "I need a wind shader for grass in Godot 4.7. My grass tuft model already has vertex colors (dark at the root, light at the tips). When I tried offsetting vertices with sin(TIME) the whole tuft just slides around on the ground which looks awful. Also I want ~15000 tufts over a 40x40m meadow without killing performance. Please write grass_wind.gdshader and a scatter_grass.gd (GDScript) that places them.",
+     "expected_output": "Shader weights displacement by vertex colour (root fixed, tip bends) with spatial noise/gust variation; works with MultiMesh instances. Scatter uses one MultiMeshInstance3D (transform_format 3D set before instance_count), shadows off on grass, a visibility range/draw distance. Both compile in Godot 4.7.",
+     "files": []},
+    {"id": 2, "name": "blotchy-leaf-card-canopy",
+     "prompt": "my trees are made of leaf cards (flat quads w/ an alpha leaf texture, material is double sided) and in godot 4.7 they look like a pile of flat planes with blotchy random light and dark patches. I'd like the canopy to read as one round volume. I can't remodel the trees. what should I do? give me the shader file + how to set it up",
+     "expected_output": "A spatial shader that overrides leaf normals to point away from the canopy centre (configurable centre/radius), alpha scissor with the leaf texture, and handles the double-sided back-face normal flip (e.g. normal computed in vertex() passed as varying and written in fragment()). Setup instructions. Compiles in Godot 4.7.",
+     "files": []}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "skill_name": "godot-lighting-environment",
+  "evals": [
+    {"id": 1, "name": "fix-flat-village-scene",
+     "prompt": "my godot 4.7 village scene looks super flat and washed out, like every godot demo lol. project is attached (flat_village, main.tscn). can you fix the lighting / environment directly in the scene so it feels like a warm afternoon, buildings have volume, there's some depth in the distance and stuff doesn't look like it floats? don't change the models. write a short notes.md explaining what you changed and why",
+     "expected_output": "Modified main.tscn: low side sun with warm colour and shadows, procedural sky as ambient source, AgX tonemap with small adjustment, SSAO, fog that keeps the foreground readable (depth mode or low density). Project still loads. notes.md explains the order/why.",
+     "files": ["evals/files/flat_village"]},
+    {"id": 2, "name": "black-shadows-blown-roofs-script",
+     "prompt": "Players complain that in my Godot 4.7 (Forward+) outdoor level the shadowed side of buildings is basically pitch black, and the light-coloured roofs blow out to pure white when the sun hits them. I don't want to just crank all the lights up. Give me a GDScript (env_fix.gd) I can attach to my WorldEnvironment node that fixes both problems, with comments explaining each setting.",
+     "expected_output": "env_fix.gd that uses the sky as ambient fill (AMBIENT_SOURCE_SKY + sky) instead of only raising energies, switches to AgX tone mapping (with exposure/adjustment), keeps shadows on, compiles in Godot 4.7.",
+     "files": []}
+  ]
+}
