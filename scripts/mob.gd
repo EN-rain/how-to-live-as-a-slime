@@ -24,6 +24,8 @@ const ABSORB_DURATION := 0.35
 const OBSTACLE_RAY_LENGTH := 2.2
 const VISIBILITY_END := 100.0
 const REPATH_INTERVAL := 0.25
+const ANIM_BLEND := 0.15
+const SIGHT_HEIGHT := 0.85
 
 ## Which mob this is. Assign a .tres from resources/mobs/ in the Inspector.
 @export var data: MobData
@@ -58,6 +60,15 @@ var _collision: CollisionShape3D
 var _nav_agent: NavigationAgent3D
 var _parts: Array[MeshInstance3D] = []
 var _ray_query: PhysicsRayQueryParameters3D
+var _sight_query: PhysicsRayQueryParameters3D
+var _anim_player: AnimationPlayer
+var _anim_idle := ""
+var _anim_walk := ""
+var _anim_run := ""
+var _anim_attack := ""
+var _anim_die := ""
+var _anim_current := ""
+var _anim_override_time := 0.0
 
 
 func _ready() -> void:
@@ -87,6 +98,9 @@ func _ready() -> void:
 	_ray_query = PhysicsRayQueryParameters3D.new()
 	_ray_query.collision_mask = 1
 	_ray_query.exclude = [get_rid()]
+	_sight_query = PhysicsRayQueryParameters3D.new()
+	_sight_query.collision_mask = 1
+	_sight_query.exclude = [get_rid()]
 
 	_instantiate_visual_scene()
 	_configure_collision()
@@ -137,6 +151,85 @@ func _instantiate_visual_scene() -> void:
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	)
 	_collect_mesh_parts(instance, mat, shadow_mode)
+	_setup_animations(instance)
+
+
+## The GLBs ship idle/walk/run/attack/die clips; nothing played them before.
+## Pick clips by name so both the villager and bird rigs work unchanged.
+func _setup_animations(instance: Node) -> void:
+	_anim_player = _find_animation_player(instance)
+	_anim_idle = ""
+	_anim_walk = ""
+	_anim_run = ""
+	_anim_attack = ""
+	_anim_die = ""
+	_anim_current = ""
+	if _anim_player == null:
+		return
+	var names := _anim_player.get_animation_list()
+	_anim_idle = _pick_anim(names, ["idle", "static"])
+	_anim_walk = _pick_anim(names, ["walk", "run"])
+	_anim_run = _pick_anim(names, ["run", "sprint", "walk"])
+	_anim_attack = _pick_anim(names, ["attack-melee-left", "eat", "gesture-negative"])
+	_anim_die = _pick_anim(names, ["die", "fall", "crouch"])
+	for anim_name in [_anim_idle, _anim_walk, _anim_run]:
+		if anim_name != "":
+			var anim := _anim_player.get_animation(anim_name)
+			if anim != null:
+				anim.loop_mode = Animation.LOOP_LINEAR
+	_anim_player.playback_default_blend_time = ANIM_BLEND
+	_play_anim(_anim_idle)
+
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer:
+		return node as AnimationPlayer
+	for child in node.get_children():
+		var found := _find_animation_player(child)
+		if found != null:
+			return found
+	return null
+
+
+func _pick_anim(names: PackedStringArray, candidates: Array) -> String:
+	for candidate in candidates:
+		if names.has(candidate):
+			return candidate
+	return ""
+
+
+func _play_anim(anim_name: String) -> void:
+	if _anim_player == null or anim_name == "" or anim_name == _anim_current:
+		return
+	_anim_current = anim_name
+	_anim_player.play(anim_name)
+
+
+## One-shot clip (bite / death) that falls back to locomotion when it ends.
+func _play_override(anim_name: String, duration: float) -> void:
+	if _anim_player == null or anim_name == "":
+		return
+	_anim_current = anim_name
+	_anim_override_time = duration
+	_anim_player.speed_scale = 1.0
+	_anim_player.play(anim_name)
+
+
+func _update_animation(delta: float, speed: float) -> void:
+	if _anim_player == null:
+		return
+	if _anim_override_time > 0.0:
+		_anim_override_time = maxf(_anim_override_time - delta, 0.0)
+		if _anim_override_time > 0.0:
+			return
+	var desired := _anim_idle
+	if _state == "chase" or _state == "flee":
+		desired = _anim_run
+	elif speed > 0.2:
+		desired = _anim_walk
+	_play_anim(desired)
+	if _anim_current != "":
+		_anim_player.speed_scale = 1.0 if desired == _anim_idle else clampf(speed / maxf(_speed, 0.1), 0.7, 1.8)
 
 
 func _collect_mesh_parts(
@@ -180,7 +273,14 @@ func _physics_process(delta: float) -> void:
 		if raw_size != null:
 			player_size = float(raw_size)
 
-	if dist_sq < DETECTION_RANGE * DETECTION_RANGE and player_size > 0.0:
+	# Only react to the player when nothing solid (tree, rock, hill) blocks the
+	# sight line. Otherwise a mob would chase you straight through an object.
+	var can_see := (
+		dist_sq < DETECTION_RANGE * DETECTION_RANGE
+		and player_size > 0.0
+		and _has_line_of_sight()
+	)
+	if can_see:
 		if player_size > size * FLEE_SIZE_RATIO:
 			_state = "flee"
 		elif player_size < size * CHASE_SIZE_RATIO:
@@ -218,6 +318,22 @@ func _physics_process(delta: float) -> void:
 
 	var dir := _compute_navigation_direction(goal)
 	_steer(dir, move_speed, delta)
+	_update_animation(delta, Vector2(velocity.x, velocity.z).length())
+
+
+## True when the mob's eye can reach the slime without hitting world collision:
+## terrain, trees, rocks, and walls are all layer 1.
+func _has_line_of_sight() -> bool:
+	if not is_instance_valid(_player) or _sight_query == null:
+		return false
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		return true
+	_sight_query.from = global_position + Vector3(0.0, maxf(size, 0.5) * SIGHT_HEIGHT, 0.0)
+	# Aim at the slime's low centre, not its top: a waist-high rock should still
+	# count as cover when the slime hides behind it.
+	_sight_query.to = _player.global_position + Vector3(0.0, 0.35, 0.0)
+	return space.intersect_ray(_sight_query).is_empty()
 
 
 ## Queries `NavigationAgent3D` for the next waypoint around trees and rocks on
@@ -291,6 +407,7 @@ func _pick_wander_target() -> void:
 
 func _bite() -> void:
 	_bite_cd = _bite_cooldown
+	_play_override(_anim_attack, 0.5)
 	if not is_instance_valid(_player):
 		return
 	if _player.has_method("take_damage"):
@@ -310,6 +427,7 @@ func absorb(target: Node3D) -> void:
 		return
 	is_dead = true
 	_state = "absorbed"
+	_play_override(_anim_die, ABSORB_DURATION)
 	# Deferred: absorb() may run inside a physics signal callback.
 	set_deferred("collision_layer", 0)
 	set_deferred("collision_mask", 0)

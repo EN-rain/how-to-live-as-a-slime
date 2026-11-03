@@ -70,6 +70,14 @@ func _run() -> void:
 		mobs.size() >= 10 and mobs[0].get_node_or_null("NavigationAgent3D") != null,
 		"mobs spawn with .tscn visuals and NavigationAgent3D"
 	)
+	var animated := 0
+	for mob in mobs:
+		if mob._anim_player != null and mob._anim_current != "":
+			animated += 1
+	_check(
+		mobs.size() > 0 and animated == mobs.size(),
+		"every mob plays its GLB animation (%d/%d)" % [animated, mobs.size()]
+	)
 
 	var start_size: float = player.size
 	var start_eaten: int = player.eaten_count
