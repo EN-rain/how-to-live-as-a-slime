@@ -5,7 +5,8 @@ shader_type spatial;
 uniform vec4 base_color : source_color = vec4(0.9, 0.4, 0.5, 1.0);
 uniform vec3 rim_color : source_color = vec3(1.0, 0.96, 0.88);
 uniform float rim_strength : hint_range(0.0, 1.0) = 0.18;
-uniform float dissolve : hint_range(0.0, 1.0) = 0.0;
+// Per-instance so one material can be shared by every prop of a kind.
+instance uniform float dissolve : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 dissolve_edge_color : source_color = vec3(1.0, 1.0, 0.85);
 
 void vertex() {

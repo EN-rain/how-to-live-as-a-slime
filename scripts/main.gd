@@ -8,7 +8,14 @@ const EdibleScene: PackedScene = preload("res://scenes/edible.tscn")
 const MobScene: PackedScene = preload("res://scenes/mob.tscn")
 
 const WORLD_SIZE := 60.0
-const MOB_BOUND := 28.0
+
+## SDFGI is the single most expensive environment setting on integrated GPUs.
+## The prototype budget is 60 fps on an Intel Iris Xe, so it stays off; the sky
+## ambient + toon bands carry the fill light. Flip to true on a discrete GPU.
+const SDFGI_ENABLED := false
+## SSAO is a full-screen pass and cost ~55 fps on the Iris Xe. Off by default;
+## turn it on for hero shots on a discrete GPU.
+const SSAO_ENABLED := false
 
 ## Deterministic edible clusters: kind, amount, centre and spread on the ground.
 const EDIBLE_GROUPS := [
@@ -46,6 +53,7 @@ var camera: Camera3D
 var _trauma := 0.0
 var _shake_time := 0.0
 var _camera_ready := false
+var _remaining := 0
 
 
 func _ready() -> void:
@@ -59,6 +67,9 @@ func _ready() -> void:
 	player.position = Vector3(0, 1.0, 0)
 	_spawn_edibles()
 	_spawn_mobs()
+	# Edibles and mobs both register in the "edible" group (plan §7: quiet ending
+	# when there is nothing left to eat).
+	_remaining = get_tree().get_nodes_in_group("edible").size()
 	player.ate.connect(_on_player_ate)
 	player.size_changed.connect(_on_size_changed)
 	player.hurt.connect(func() -> void: _add_trauma(0.4))
@@ -104,10 +115,12 @@ func _build_environment() -> void:
 	var env := Environment.new()
 	LightingPreset.apply_sky(env)
 	LightingPreset.apply_tonemap(env, {"exposure": 1.0, "saturation": 1.1})
-	LightingPreset.apply_ambient_occlusion(env, {"radius": 1.2, "intensity": 1.6})
-	LightingPreset.apply_sdfgi(env, {"min_cell_size": 0.25})
+	if SSAO_ENABLED:
+		LightingPreset.apply_ambient_occlusion(env, {"radius": 1.0, "intensity": 1.4, "ssil": false})
+	if SDFGI_ENABLED:
+		LightingPreset.apply_sdfgi(env, {"min_cell_size": 0.5})
 	LightingPreset.apply_fog(env, {
-		"depth_begin": 26.0, "depth_end": 90.0, "density": 0.55, "sky_affect": 0.0,
+		"depth_begin": 26.0, "depth_end": 80.0, "density": 0.55, "sky_affect": 0.0,
 	})
 	var world_environment := WorldEnvironment.new()
 	world_environment.environment = env
@@ -118,6 +131,12 @@ func _build_environment() -> void:
 	LightingPreset.apply_sun(sun, {
 		"elevation_deg": 32.0, "azimuth_deg": -50.0, "energy": 1.6,
 	})
+	# Two cascades over a 55 m map: same look as four cascades at a fraction of
+	# the shadow cost (see the godot-render-performance method: lower the
+	# sub-setting, keep the look).
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_max_distance = 55.0
+	sun.shadow_bias = 0.04
 
 
 func _build_ground() -> void:
@@ -161,13 +180,20 @@ func _build_walls() -> void:
 
 
 func _build_decor() -> void:
+	# One material per colour, shared by every tree/rock instance.
+	var trunk_mat := ToonMaterial.shared(Color(0.42, 0.29, 0.2), 0.02)
+	var leaf_mats: Array[ShaderMaterial] = [
+		ToonMaterial.shared(Color(0.32, 0.55, 0.3), 0.02),
+		ToonMaterial.shared(Color(0.32, 0.55, 0.3).lightened(0.08), 0.02),
+	]
 	for spot in TREE_SPOTS:
-		_add_tree(spot)
+		_add_tree(spot, trunk_mat, leaf_mats)
+	var rock_mat := ToonMaterial.shared(Color(0.5, 0.52, 0.55), 0.02)
 	for spot in ROCK_SPOTS:
-		_add_rock(spot)
+		_add_rock(spot, rock_mat)
 
 
-func _add_tree(at: Vector3) -> void:
+func _add_tree(at: Vector3, trunk_mat: ShaderMaterial, leaf_mats: Array) -> void:
 	var tree := Node3D.new()
 	var trunk := MeshInstance3D.new()
 	var trunk_mesh := CylinderMesh.new()
@@ -175,7 +201,7 @@ func _add_tree(at: Vector3) -> void:
 	trunk_mesh.bottom_radius = 0.32
 	trunk_mesh.height = 2.4
 	trunk.mesh = trunk_mesh
-	trunk.material_override = ToonMaterial.make(Color(0.42, 0.29, 0.2))
+	trunk.material_override = trunk_mat
 	trunk.position.y = 1.2
 	tree.add_child(trunk)
 	for i in 2:
@@ -184,21 +210,20 @@ func _add_tree(at: Vector3) -> void:
 		leaves_mesh.radius = 1.5 - i * 0.35
 		leaves_mesh.height = (1.5 - i * 0.35) * 2.0
 		leaves.mesh = leaves_mesh
-		var green := Color(0.32, 0.55, 0.3).lightened(i * 0.08)
-		leaves.material_override = ToonMaterial.make(green)
+		leaves.material_override = leaf_mats[i]
 		leaves.position.y = 2.6 + i * 1.1
 		tree.add_child(leaves)
 	tree.position = at
 	add_child(tree)
 
 
-func _add_rock(at: Vector3) -> void:
+func _add_rock(at: Vector3, rock_mat: ShaderMaterial) -> void:
 	var rock := MeshInstance3D.new()
 	var mesh := SphereMesh.new()
 	mesh.radius = 0.7
 	mesh.height = 1.4
 	rock.mesh = mesh
-	rock.material_override = ToonMaterial.make(Color(0.5, 0.52, 0.55))
+	rock.material_override = rock_mat
 	rock.position = at + Vector3(0, 0.45, 0)
 	rock.scale = Vector3(1.2, 0.7, 1.0)
 	add_child(rock)
@@ -219,7 +244,14 @@ func _spawn_edibles() -> void:
 			var edible := EdibleScene.instantiate() as Edible
 			edible.kind = group["kind"]
 			add_child(edible)
-			edible.position = Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
+			var spot := Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
+			# Never spawn a free meal inside the player's starting eat radius.
+			var flat := Vector2(spot.x, spot.z)
+			if flat.length() < 5.0:
+				var outward := flat.normalized() if flat.length() > 0.01 else Vector2.RIGHT
+				spot.x = outward.x * 5.5
+				spot.z = outward.y * 5.5
+			edible.position = spot
 
 
 func _spawn_mobs() -> void:
@@ -247,7 +279,7 @@ func _build_camera() -> void:
 	camera = Camera3D.new()
 	camera.fov = 68.0
 	camera.near = 0.1
-	camera.far = 300.0
+	camera.far = 160.0
 	add_child(camera)
 	camera.current = true
 
@@ -279,6 +311,7 @@ func _add_trauma(amount: float) -> void:
 
 
 func _on_player_ate(meal_nutrition: float, meal_color: Color, at: Vector3) -> void:
+	_remaining = maxi(_remaining - 1, 0)
 	_add_trauma(clampf(0.1 + meal_nutrition / 140.0, 0.1, 0.5))
 	_burst(at, meal_color, 10 + int(meal_nutrition * 0.4))
 	if eat_sound.stream:
@@ -335,3 +368,5 @@ func _update_hud() -> void:
 	elif player.size > 1.05:
 		tier = "Small"
 	hud_label.text = "Size %.2f  ·  %s\nEaten %d" % [player.size, tier, player.eaten_count]
+	if _remaining <= 0:
+		hud_label.text += "\nNothing left to eat."

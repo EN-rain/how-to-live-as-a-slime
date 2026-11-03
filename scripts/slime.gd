@@ -31,12 +31,15 @@ var _size_tween: Tween
 var _visual_scale := Vector3.ONE
 var _was_on_floor := true
 var _flash := 0.0
+var _pupil_mat: StandardMaterial3D
 
 
 func _ready() -> void:
 	add_to_group("player")
 	scale = Vector3.ONE * size
 	_mesh = $Body
+	# Plan §8: an icosphere wobbles evenly; a UV sphere pinches at the poles.
+	_mesh.mesh = Icosphere.build(0.5, 3)
 	_build_material()
 	_add_eyes()
 	_eat_area = $EatArea
@@ -59,7 +62,7 @@ func _build_material() -> void:
 
 func _add_eyes() -> void:
 	var eye_mat := ToonMaterial.flat(Color(1, 1, 1))
-	var pupil_mat := ToonMaterial.flat(Color(0.05, 0.04, 0.08))
+	_pupil_mat = ToonMaterial.flat(Color(0.05, 0.04, 0.08))
 	for side in [-1.0, 1.0]:
 		var eye := MeshInstance3D.new()
 		var eye_mesh := SphereMesh.new()
@@ -78,9 +81,18 @@ func _add_eyes() -> void:
 		pupil_mesh.radial_segments = 10
 		pupil_mesh.rings = 5
 		pupil.mesh = pupil_mesh
-		pupil.material_override = pupil_mat
+		pupil.material_override = _pupil_mat
 		pupil.position = Vector3(0.0, 0.0, 0.06)
 		eye.add_child(pupil)
+
+
+## Plan §7: the eyes go blank at the top tier.
+func _update_eyes() -> void:
+	if _pupil_mat == null:
+		return
+	_pupil_mat.albedo_color = (
+		Color(0.05, 0.04, 0.08) if size < 2.6 else Color(0.87, 0.9, 0.87)
+	)
 
 
 func _physics_process(delta: float) -> void:
@@ -159,6 +171,7 @@ func _refresh_size() -> void:
 
 func _apply_size() -> void:
 	size = _target_size
+	_update_eyes()
 	if _size_tween and _size_tween.is_valid():
 		_size_tween.kill()
 	_size_tween = create_tween()

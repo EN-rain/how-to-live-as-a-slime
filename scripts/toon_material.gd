@@ -28,6 +28,21 @@ static func make(
 	return mat
 
 
+static var _cache: Dictionary = {}
+
+
+## Shared material for a colour/outline pair. Props of the same kind reuse one
+## material, which cuts material instances and state changes. Per-instance
+## effects (the dissolve) use the shader's `instance uniform`, set on the mesh.
+static func shared(color: Color, outline_width: float, with_outline := true) -> ShaderMaterial:
+	var key := "%s|%.4f|%s" % [color.to_html(), outline_width, with_outline]
+	if _cache.has(key):
+		return _cache[key]
+	var mat := make(color, outline_width, Color(0.09, 0.07, 0.12), with_outline)
+	_cache[key] = mat
+	return mat
+
+
 static func flat(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

@@ -55,9 +55,11 @@ var _hover_phase := 0.0
 var _player: Node3D
 var _rng := RandomNumberGenerator.new()
 var _mesh: MeshInstance3D
+var _parts: Array[MeshInstance3D] = []
 
 
 func _ready() -> void:
+	add_to_group("edible")
 	_rng.randomize()
 	_hover_phase = _rng.randf() * TAU
 	var cfg: Dictionary = KINDS.get(kind, KINDS["villager"])
@@ -79,14 +81,16 @@ func _ready() -> void:
 
 
 func _build_visuals() -> void:
-	var mat := ToonMaterial.make(color, size * 0.025)
+	var mat := ToonMaterial.shared(color, size * 0.025)
 	_mesh.material_override = mat
+	_mesh.visibility_range_end = 85.0
+	_parts.append(_mesh)
 	if _flies:
 		var body := SphereMesh.new()
 		body.radius = size * 0.5
 		body.height = size
 		_mesh.mesh = body
-		var wing_mat := ToonMaterial.make(color.lightened(0.12), 0.015)
+		var wing_mat := ToonMaterial.shared(color.lightened(0.12), size * 0.015)
 		for side in [-1.0, 1.0]:
 			var wing := MeshInstance3D.new()
 			var wing_mesh := BoxMesh.new()
@@ -94,7 +98,9 @@ func _build_visuals() -> void:
 			wing.mesh = wing_mesh
 			wing.material_override = wing_mat
 			wing.position = Vector3(side * size * 0.65, 0.0, 0.0)
+			wing.visibility_range_end = 85.0
 			_mesh.add_child(wing)
+			_parts.append(wing)
 		_add_eyes(_mesh, size * 0.5)
 	else:
 		var body := CapsuleMesh.new()
@@ -106,9 +112,11 @@ func _build_visuals() -> void:
 		head_mesh.radius = size * 0.26
 		head_mesh.height = size * 0.52
 		head.mesh = head_mesh
-		head.material_override = ToonMaterial.make(color.lightened(0.14), size * 0.02)
+		head.material_override = ToonMaterial.shared(color.lightened(0.14), size * 0.02)
 		head.position = Vector3(0, size * 0.62, 0)
+		head.visibility_range_end = 85.0
 		_mesh.add_child(head)
+		_parts.append(head)
 		_add_eyes(head, size * 0.26)
 
 
@@ -247,11 +255,11 @@ func absorb(target: Node3D) -> void:
 		return
 	is_dead = true
 	_state = "absorbed"
-	collision_layer = 0
-	collision_mask = 0
+	# Deferred: absorb() may run inside a physics signal callback.
+	set_deferred("collision_layer", 0)
+	set_deferred("collision_mask", 0)
 	$Collision.set_deferred("disabled", true)
 
-	var mat := _mesh.material_override as ShaderMaterial
 	var tween := create_tween()
 	tween.set_parallel(true)
 	tween.tween_property(self, "global_position", target.global_position, 0.35) \
@@ -259,9 +267,11 @@ func absorb(target: Node3D) -> void:
 	tween.tween_property(self, "scale", Vector3.ONE * 0.05, 0.35) \
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
 	tween.tween_property(self, "rotation:y", rotation.y + 6.0, 0.35)
-	if mat:
-		tween.tween_method(
-			func(value: float) -> void: mat.set_shader_parameter("dissolve", value),
-			0.0, 1.0, 0.35
-		)
+	tween.tween_method(_set_dissolve, 0.0, 1.0, 0.35)
 	tween.chain().tween_callback(queue_free)
+
+
+## Instance-level dissolve, so the material stays shared between mobs.
+func _set_dissolve(value: float) -> void:
+	for part in _parts:
+		part.set_instance_shader_parameter("dissolve", value)

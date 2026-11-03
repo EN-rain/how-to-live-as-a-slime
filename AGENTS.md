@@ -13,7 +13,8 @@
 - This **is a git repository** now: `origin` → https://github.com/EN-rain/how-to-live-as-a-slime (public, `main`).
 - Godot is **not on PATH**. Open the project in the Godot 4.6 editor and press F5/F6 to run. If `godot` is added to PATH later, `godot --headless --import` is a cheap sanity check that the project parses.
 - There is a **headless smoke test** at `tests/smoke_test.tscn` (boot + eat/grow/dissolve/damage checks): `godot --headless --path . res://tests/smoke_test.tscn`. Main scene: `res://scenes/main.tscn`.
-- Validated headlessly with **Godot 4.6.stable**: import + 90 rendered frames, plus the smoke test (exit 0).
+- Validated with **Godot 4.6.stable**: import, rendered frames on D3D12 Forward+ (shaders compile), and the smoke test (7/7, exit 0).
+- **Adding a new `class_name` needs a rescan first.** A fresh class is not in the global class cache until `godot --headless --path . --import` (or opening the editor) runs; scripts referencing it fail to compile before that.
 
 ## Agent skills installed in `.agents/skills/`
 
@@ -68,28 +69,49 @@ Not installed (deliberately): the `awesome-gamedev-agent-skills` **router** (it 
 - **Growth:** scale player, camera distance, speed, jump and physics together; add a size gate.
 - **Darkness:** from the world's reactions and visual tone, not from story.
 
-## Current state (prototype pass 1 — all 8 steps, low quality)
+## Current state (prototype pass 2 — optimized)
 
-`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers + birds that flee/fight, juice (sound, particles, shake, HUD), restart on R.
+`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers + birds that flee/fight, juice (sound, particles, shake, HUD), blank eyes at top size, "Nothing left to eat." ending, restart on R.
+
+**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648): **12–17 fps** in pass 1 → **~85–100 fps** now. The two big wins were turning SSAO and SDFGI off by default; do not re-enable them without measuring.
 
 | File | Role |
 |---|---|
-| `scripts/main.gd` | World build (lighting, ground, trees, rocks), spawns, camera, shake, HUD, input map, restart |
-| `scripts/slime.gd` | Movement, squash & stretch, nutrition/size curve, eat detection |
-| `scripts/edible.gd` | 11 kinds (primitive meshes), size gate, absorb + dissolve tween |
+| `scripts/main.gd` | World build (lighting, ground, trees, rocks), spawns, camera, shake, HUD, input map, restart, `SDFGI_ENABLED`/`SSAO_ENABLED` toggles |
+| `scripts/slime.gd` | Movement, squash & stretch, nutrition/size curve, eat detection, colour drift, blank eyes |
+| `scripts/edible.gd` | 11 kinds (cached primitive meshes, shared materials), size gate, absorb + instance-uniform dissolve |
 | `scripts/mob.gd` | Villager/bird FSM: wander / flee / chase+bite. Shared eat contract with `Edible` |
-| `scripts/toon_material.gd` | Cel material factory; inverted-hull outline as `next_pass` |
+| `scripts/toon_material.gd` | Cel material factory; `shared()` caches one material per colour/outline; outline as `next_pass` |
+| `scripts/icosphere.gd` | Even-subdivision icosphere for the slime body (plan §8: wobbles evenly, unlike a UV sphere) |
 | `scripts/lighting_preset.gd` | Vendored **verbatim** from the `godot-lighting-environment` skill (MIT) |
-| `shaders/` | `slime.gdshader` (wobble/cel/jelly), `toon.gdshader` (cel + dissolve), `outline.gdshader` |
+| `shaders/` | `slime.gdshader` (wobble/cel/jelly), `toon.gdshader` (cel + `instance uniform dissolve`), `outline.gdshader` |
 | `assets/sounds/pop.wav` | Generated procedurally (no external asset) |
+| `tests/smoke_test.gd/.tscn` | Headless regression test: spawn, eat ×5, grow, dissolve-free, damage, size floor |
 
 **Deliberate prototype shortcuts** (do not "fix" without asking):
 - Mobs use **steering, not `NavigationAgent3D`** — flat hand-placed map, no runtime navmesh bake. Swap when the map gains obstacles.
 - **Input actions are registered in `main.gd`**, not `project.godot`, to avoid desync during the prototype.
 - Edible/mob visuals are **built at runtime from primitives** inside their scenes; the scenes stay 3–4 nodes.
+- **SSAO and SDFGI are off by default** for the integrated-GPU budget; both are one-line consts in `main.gd`.
+- **Distance culling (`visibility_range_end`) instead of real LOD tiers**, and no chunk streaming — the map is 60×60 m.
 - No menus, save system, win screen, or threat meter — all explicitly cut in the plan.
 
-**Tuning knobs:** `Slime.START_NUTRITION`/growth exponent, `Edible.KINDS`, `Mob.KINDS`, `EDIBLE_GROUPS` in `main.gd`, `BASE_SPEED`/`BASE_JUMP`.
+**Performance rules of thumb for new content:**
+- Reuse `ToonMaterial.shared()`; never call `ToonMaterial.make()` per instance in a loop.
+- Per-object effect → `instance uniform` in the shader + `set_instance_shader_parameter`, not a per-instance material.
+- Cache meshes per kind; do not rebuild `SphereMesh` per spawn.
+- Only props ≥ 1.5 m cast shadows; set `visibility_range_end` on new props.
+- Defer physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".
+
+**Tuning knobs:** `Slime.START_NUTRITION`/growth exponent, `Edible.KINDS`, `Mob.KINDS`, `EDIBLE_GROUPS` in `main.gd`, `BASE_SPEED`/`BASE_JUMP`, `SDFGI_ENABLED`/`SSAO_ENABLED`.
+
+## Frame-rate check
+
+```sh
+godot --path . --print-fps --disable-vsync --quit-after 480
+```
+
+Read the tail of the `Project FPS` lines (the first few include load hitches). Use `--headless` only for logic tests — it does not compile shaders.
 
 ## Working agreement
 

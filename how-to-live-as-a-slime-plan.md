@@ -65,6 +65,29 @@ Enemies are about your size or a bit bigger. As you outgrow a group, it switches
 - **AI:** a lightweight state machine plus `NavigationAgent3D`. Keep crowds cheap with LOD and simple movement.
 - **Destruction:** pre-fractured meshes or a scripted "collapse into the slime" rather than real physics.
 
+### Asset Strategy
+
+**The slime: build it yourself (code and shader).**
+A slime is a sphere with a wobble shader, a toon material and two eyes, so there is little to model. Owning it gives you:
+- Squash and stretch, jiggle and absorb effects, because you control the vertices directly.
+- Clean scaling from tiny to huge with no rig or topology problems.
+- Color that changes based on what it ate.
+- Full control over the feel of the main character.
+
+Setup: an icosphere mesh (it wobbles more evenly than a UV sphere), a spatial shader for wobble and toon look, and eyes as separate small meshes.
+
+**The world: use free models.**
+Edibles, mobs, buildings and trees are where the content volume is, and modeling them all would eat the jam time. Sources:
+- Kenney.nl (CC0, large low-poly packs)
+- Quaternius (CC0, stylized low-poly characters, animals, nature)
+- Poly Pizza and itch.io asset packs (check each license)
+
+Rules:
+- Prefer CC0 so there is no attribution to track.
+- Pick one or two packs with a similar style instead of mixing many.
+- Apply the toon material over all imported models so mismatched assets look consistent.
+- Start with primitives (spheres, cubes) as placeholder edibles, then swap in real models once the loop is fun. The `Edible` scene makes the swap easy.
+
 ---
 
 ## 9. Prototype Scope (Jam-Style)
@@ -97,7 +120,8 @@ After 10 minutes of play, is chasing and eating things still satisfying? If yes,
 
 ## 12. Tips for Small Scope
 
-- Use primitives and free toon assets as placeholders. Don't model custom art until the loop works.
+- Hard-code the slime (shader and mesh) and use free CC0 models for everything else. Don't model custom world art.
+- Use primitives as placeholders until the loop works, then swap in the free models.
 - Build the `Edible` and `Mob` scenes once and reuse them everywhere.
 - Keep the map small and hand-placed. No procedural generation.
 - Finish all 8 steps at low quality before polishing any one of them.
