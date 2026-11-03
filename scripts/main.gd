@@ -154,8 +154,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("restart"):
 		restart_game()
 
-	# Third-person orbit: right/middle-drag to look around, wheel to zoom.
-	if event is InputEventMouseMotion and event.button_mask & (MOUSE_BUTTON_MASK_RIGHT | MOUSE_BUTTON_MASK_MIDDLE):
+	# Third-person orbit: drag with any mouse button to look around, wheel to zoom.
+	if event is InputEventMouseMotion and event.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_RIGHT | MOUSE_BUTTON_MASK_MIDDLE):
 		_camera_yaw -= event.relative.x * deg_to_rad(camera_orbit_sensitivity)
 		_camera_pitch = clampf(
 			_camera_pitch + event.relative.y * deg_to_rad(camera_orbit_sensitivity),

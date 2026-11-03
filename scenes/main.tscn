@@ -54,7 +54,7 @@ offset_bottom = -16.0
 grow_vertical = 0
 theme_override_colors/font_color = Color(1, 1, 1, 0.75)
 theme_override_font_sizes/font_size = 15
-text = "WASD move · Space jump · Right-drag orbit · Wheel zoom · R restart · Esc pause · F6 save · F9 load"
+text = "WASD move · Space jump · Drag to orbit · Wheel zoom · R restart · Esc pause · F6 save · F9 load"
 
 [node name="GameMenus" parent="." instance=ExtResource("4_menus")]
 
