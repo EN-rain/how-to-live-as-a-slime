@@ -13,6 +13,8 @@ const TREE_VISIBILITY_END := 130.0
 const ROCK_VISIBILITY_END := 110.0
 const NAV_HALF_EXTENT := 48.0
 const NAV_GRID_STEPS := 48
+const GROUND_HALF_EXTENT := 50.0
+const NAV_SURFACE_OFFSET := 0.05
 
 @export_group("Lighting & Sun")
 @export_range(10.0, 80.0, 1.0) var sun_elevation_deg: float = 32.0
@@ -38,6 +40,17 @@ const NAV_GRID_STEPS := 48
 @export_range(0.5, 3.0, 0.05) var tree_nav_clearance: float = 1.25
 @export_range(0.5, 3.0, 0.05) var rock_nav_clearance: float = 1.35
 
+@export_group("Terrain")
+## Rolling hills so the arena is not a flat plane. Set false for the old box ground.
+@export var terrain_enabled: bool = true
+## Approximate peak height in metres.
+@export_range(0.0, 8.0, 0.1) var terrain_amplitude: float = 5.0
+## The starting area stays flat inside this radius so nothing spawns on a slope.
+@export_range(2.0, 30.0, 0.5) var terrain_flat_radius: float = 7.0
+@export_range(0.01, 0.2, 0.005) var terrain_frequency: float = 0.075
+## Ground mesh / navmesh resolution. Smaller is smoother and more expensive.
+@export_range(1.0, 4.0, 0.5) var terrain_cell_size: float = 2.0
+
 @export_group("Palette")
 @export var ground_color: Color = Color(0.45, 0.62, 0.32)
 @export var trunk_color: Color = Color(0.42, 0.29, 0.2)
@@ -49,6 +62,7 @@ const NAV_GRID_STEPS := 48
 @export var sun_light: DirectionalLight3D
 @export var nav_region: NavigationRegion3D
 @export var ground_mesh: MeshInstance3D
+@export var ground_collision: CollisionShape3D
 @export var trees_root: Node3D
 @export var rocks_root: Node3D
 
@@ -62,14 +76,111 @@ func _ready() -> void:
 		nav_region = get_node_or_null("NavigationRegion3D") as NavigationRegion3D
 	if ground_mesh == null:
 		ground_mesh = get_node_or_null("NavigationRegion3D/Ground/Mesh") as MeshInstance3D
+	if ground_collision == null:
+		ground_collision = get_node_or_null("NavigationRegion3D/Ground/Collision") as CollisionShape3D
 	if trees_root == null:
 		trees_root = get_node_or_null("NavigationRegion3D/Trees") as Node3D
 	if rocks_root == null:
 		rocks_root = get_node_or_null("NavigationRegion3D/Rocks") as Node3D
 
+	_apply_terrain()
+	_snap_props_to_terrain()
 	apply_lighting_settings()
 	apply_palette_materials()
 	_setup_navigation_mesh()
+
+
+## World-space ground elevation. Terrain is a sum of low-frequency waves, scaled
+## down to zero near the spawn point so the opening area stays flat.
+func terrain_height(x: float, z: float) -> float:
+	if not terrain_enabled:
+		return 0.0
+	var f := terrain_frequency
+	var h := sin(x * f) * cos(z * f * 0.85) * 1.1
+	h += sin((x + z) * f * 1.45) * 0.45
+	h += cos(x * f * 0.55 - z * f * 0.7) * 0.65
+	# Mid-frequency swells give the map a few visible rises without steep walls.
+	h += sin(x * f * 3.1 + z * f * 2.3) * 0.25
+	h += cos(x * f * 2.4 - z * f * 3.0) * 0.18
+	# Named mounds give the map readable landmarks instead of uniform noise.
+	h += 2.20 * _terrain_bump(x, z, 28.0, -30.0, 16.0)
+	h += 1.60 * _terrain_bump(x, z, -32.0, 22.0, 18.0)
+	h -= 1.20 * _terrain_bump(x, z, -20.0, -34.0, 14.0)
+	h += 1.00 * _terrain_bump(x, z, 40.0, 30.0, 12.0)
+	h += 0.90 * _terrain_bump(x, z, -10.0, 42.0, 11.0)
+	var flat := smoothstep(terrain_flat_radius, terrain_flat_radius + 8.0, sqrt(x * x + z * z))
+	return h * flat * (terrain_amplitude / 3.3)
+
+
+## Smooth radial hill used by `terrain_height`.
+func _terrain_bump(x: float, z: float, cx: float, cz: float, radius: float) -> float:
+	var dx := (x - cx) / radius
+	var dz := (z - cz) / radius
+	return exp(-(dx * dx + dz * dz) * 0.5)
+
+
+## Builds the hilly ground mesh and matching concave collision from `terrain_height`.
+func _apply_terrain() -> void:
+	if ground_mesh == null:
+		return
+	if not terrain_enabled:
+		var box := BoxMesh.new()
+		box.size = Vector3(GROUND_HALF_EXTENT * 2.0, 1.0, GROUND_HALF_EXTENT * 2.0)
+		ground_mesh.position = Vector3(0.0, -0.5, 0.0)
+		ground_mesh.mesh = box
+		if ground_collision != null:
+			ground_collision.position = Vector3(0.0, -0.5, 0.0)
+			var shape := BoxShape3D.new()
+			shape.size = box.size
+			ground_collision.shape = shape
+		return
+
+	ground_mesh.position = Vector3.ZERO
+	if ground_collision != null:
+		ground_collision.position = Vector3.ZERO
+
+	var step := terrain_cell_size
+	var count := int(round(GROUND_HALF_EXTENT * 2.0 / step))
+	var stride := count + 1
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for gz in stride:
+		var z := -GROUND_HALF_EXTENT + float(gz) * step
+		for gx in stride:
+			var x := -GROUND_HALF_EXTENT + float(gx) * step
+			st.set_uv(Vector2(float(gx) / float(count), float(gz) / float(count)))
+			st.add_vertex(Vector3(x, terrain_height(x, z), z))
+	for gz in count:
+		for gx in count:
+			var i0 := gz * stride + gx
+			var i1 := i0 + 1
+			var i2 := (gz + 1) * stride + gx + 1
+			var i3 := (gz + 1) * stride + gx
+			# Godot treats clockwise triangles as front-facing; this winding is +Y.
+			st.add_index(i0)
+			st.add_index(i1)
+			st.add_index(i2)
+			st.add_index(i0)
+			st.add_index(i2)
+			st.add_index(i3)
+	st.generate_normals()
+	var mesh := st.commit()
+	ground_mesh.mesh = mesh
+	if ground_collision != null:
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(mesh.get_faces())
+		ground_collision.shape = shape
+
+
+## Trees and rocks are authored at y = 0 in the scene; sit them on the terrain.
+func _snap_props_to_terrain() -> void:
+	for root in [trees_root, rocks_root]:
+		if root == null:
+			continue
+		for prop in root.get_children():
+			var p := prop as Node3D
+			if p != null:
+				p.position.y = terrain_height(p.position.x, p.position.z)
 
 
 func apply_lighting_settings() -> void:
@@ -199,7 +310,7 @@ func _setup_navigation_mesh() -> void:
 		var z := -NAV_HALF_EXTENT + float(gz) * step
 		for gx in stride:
 			var x := -NAV_HALF_EXTENT + float(gx) * step
-			verts[gz * stride + gx] = Vector3(x, 0.0, z)
+			verts[gz * stride + gx] = Vector3(x, terrain_height(x, z) + NAV_SURFACE_OFFSET, z)
 
 	nav_mesh.set_vertices(verts)
 

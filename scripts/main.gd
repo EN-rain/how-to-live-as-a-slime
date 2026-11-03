@@ -115,7 +115,7 @@ func _ready() -> void:
 	if eat_sound == null:
 		eat_sound = get_node_or_null("EatSound") as AudioStreamPlayer
 
-	player.position = Vector3(0, 1.0, 0)
+	player.position = Vector3(0, _ground_height(0.0, 0.0) + 1.0, 0)
 	_camera_pitch = deg_to_rad(camera_pitch_deg)
 	_prewarm_burst_pool()
 	_spawn_edibles()
@@ -213,7 +213,6 @@ func _spawn_edibles() -> void:
 	var parent: Node = edibles_root if edibles_root != null else self
 	for group in EDIBLE_GROUPS:
 		var data: EdibleData = group["data"]
-		var y := data.size * 0.55
 		var centre: Vector3 = group["center"]
 		var reach: float = group["radius"]
 		for i in int(group["count"]):
@@ -223,7 +222,7 @@ func _spawn_edibles() -> void:
 			for attempt in 24:
 				var angle := rng.randf() * TAU
 				var radius := sqrt(rng.randf()) * reach
-				spot = Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
+				spot = Vector3(centre.x + cos(angle) * radius, 0.0, centre.z + sin(angle) * radius)
 				# Never spawn a free meal inside the player's starting eat radius.
 				var flat := Vector2(spot.x, spot.z)
 				if flat.length() < SAFE_SPAWN_RADIUS:
@@ -232,6 +231,8 @@ func _spawn_edibles() -> void:
 					spot.z = outward.y * SAFE_SPAWN_PUSH
 				if _is_spot_clear(spot.x, spot.z, 1.6):
 					break
+			# Sit the meal on the terrain rather than on the old y = 0 plane.
+			spot.y = _ground_height(spot.x, spot.z) + data.size * 0.55
 			var edible := edible_scene.instantiate() as Edible
 			edible.data = data
 			# Position before add_child: _ready() must not run at the origin.
@@ -247,14 +248,14 @@ func _spawn_mobs() -> void:
 		var villager := mob_scene.instantiate() as Mob
 		villager.data = VILLAGER_DATA
 		var spot := _mob_spawn_point(rng, 12.0, 44.0, 2.6)
-		spot.y = 1.2
+		spot.y = _ground_height(spot.x, spot.z) + 1.2
 		villager.position = spot
 		parent.add_child(villager)
 	for i in bird_count:
 		var bird := mob_scene.instantiate() as Mob
 		bird.data = BIRD_DATA
 		var spot := _mob_spawn_point(rng, 6.0, 46.0, 2.6)
-		spot.y = rng.randf_range(1.5, 3.5)
+		spot.y = _ground_height(spot.x, spot.z) + rng.randf_range(1.5, 3.5)
 		bird.position = spot
 		parent.add_child(bird)
 
@@ -283,6 +284,13 @@ func _is_spot_clear(x: float, z: float, clearance: float) -> bool:
 			if p != null and Vector2(x - p.position.x, z - p.position.z).length() < clearance:
 				return false
 	return true
+
+
+## Terrain elevation at (x, z); falls back to the old flat plane before World._ready.
+func _ground_height(x: float, z: float) -> float:
+	if world == null:
+		return 0.0
+	return world.terrain_height(x, z)
 
 
 # --- Save & Load ------------------------------------------------------------
@@ -337,7 +345,12 @@ func load_game() -> bool:
 			if ResourceLoader.exists(path):
 				var ed := edible_scene.instantiate() as Edible
 				ed.data = load(path) as EdibleData
-				ed.position = item.get("position", Vector3.ZERO)
+				var saved_pos: Vector3 = item.get("position", Vector3.ZERO)
+				ed.position = Vector3(
+					saved_pos.x,
+					_ground_height(saved_pos.x, saved_pos.z) + ed.data.size * 0.55,
+					saved_pos.z
+				)
 				ed_parent.add_child(ed)
 
 	var mob_parent: Node = mobs_root if mobs_root != null else self
@@ -348,18 +361,22 @@ func load_game() -> bool:
 			if ResourceLoader.exists(path):
 				var mb := mob_scene.instantiate() as Mob
 				mb.data = load(path) as MobData
-				mb.position = item.get("position", Vector3.ZERO)
+				var saved_pos: Vector3 = item.get("position", Vector3.ZERO)
+				var hover := 2.4 if mb.data.flies else 1.2
+				mb.position = Vector3(saved_pos.x, _ground_height(saved_pos.x, saved_pos.z) + hover, saved_pos.z)
 				mob_parent.add_child(mb)
 
 	_elapsed_time = float(state.get("elapsed_time", 0.0))
 	_remaining = saved_edibles.size() + saved_mobs.size()
 	_win_recorded = (_remaining <= 0)
 
+	var saved_player: Vector3 = state.get("position", Vector3(0.0, 1.0, 0.0))
+	saved_player.y = _ground_height(saved_player.x, saved_player.z) + 1.0
 	player.apply_save_state(
 		float(state.get("nutrition", player.start_nutrition)),
 		int(state.get("eaten_count", 0)),
 		state.get("base_color", player.body_color),
-		state.get("position", Vector3(0.0, 1.0, 0.0))
+		saved_player
 	)
 	_camera_ready = false
 	_update_hud()

@@ -34,6 +34,19 @@ func _run() -> void:
 		world != null and world.nav_region != null and world.nav_region.navigation_mesh != null and world.nav_region.navigation_mesh.get_polygon_count() > 100,
 		"world builds an obstacle-carved NavigationMesh around trees and rocks"
 	)
+	if world != null:
+		var flat_h := world.terrain_height(0.0, 0.0)
+		var hill_h := world.terrain_height(28.0, -30.0)
+		_check(
+			absf(flat_h) < 0.01 and absf(hill_h) > 0.5,
+			"world ground is hilly away from a flat spawn (center %.2f, hill %.2f)" % [flat_h, hill_h]
+		)
+		var nav_min := INF
+		var nav_max := -INF
+		for v in world.nav_region.navigation_mesh.get_vertices():
+			nav_min = minf(nav_min, v.y)
+			nav_max = maxf(nav_max, v.y)
+		_check(nav_max - nav_min > 1.0, "navmesh follows the terrain height (y range %.2f)" % (nav_max - nav_min))
 	_check(
 		player.get_node_or_null("Body/LeftEye/Pupil") != null,
 		"slime visuals (eyes and pupils) are authored in slime.tscn"
