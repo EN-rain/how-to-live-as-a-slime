@@ -95,23 +95,28 @@ project.godot                  Godot 4.6, Forward+, Jolt
 scenes/
   main.tscn                    Main + Player instance + HUD + audio
   slime.tscn                   CharacterBody3D + body mesh + eat Area3D
-  edible.tscn                  Area3D + mesh + collision (kind drives the look)
-  mob.tscn                     CharacterBody3D + mesh + collision (kind drives the look)
+  edible.tscn                  Area3D + mesh + collision (assigned EdibleData drives the look)
+  mob.tscn                     CharacterBody3D + mesh + collision (assigned MobData drives the look)
 scripts/
-  main.gd                      World build, spawns, camera, shake, HUD, restart
-  slime.gd                     Movement, squash & stretch, growth, eaten-colour, blank eyes
-  edible.gd                    11 edible kinds, size gate, absorb/dissolve, mesh cache
-  mob.gd                       Villager/bird state machine (wander/flee/chase)
+  main.gd                      World build, spawns, camera, shake, HUD, restart, exported scene/audio refs
+  slime.gd                     Exported movement/growth/feel groups, squash, eaten-colour, blank eyes
+  edible.gd                    EdibleData-driven props, size gate, absorb/dissolve, mesh cache
+  mob.gd                       MobData-driven villager/bird FSM (wander/flee/chase)
+  data/edible_data.gd          EdibleData resource: id, shape, size, nutrition, colour
+  data/mob_data.gd             MobData resource: size, speeds, flies, bite stats
   toon_material.gd             Cel-shaded material factory + `shared()` cache
   icosphere.gd                 Even-subdivision sphere for the slime body
   lighting_preset.gd           Vendored from godot-skill-quality (MIT)
+resources/
+  edibles/*.tres               11 edible kinds, editable in the Inspector
+  mobs/*.tres                  villager, bird, editable in the Inspector
 shaders/
   slime.gdshader               Wobble + cel bands + jelly highlight
   toon.gdshader                Cel bands + per-instance dissolve
   outline.gdshader             Inverted-hull outline
 assets/sounds/pop.wav          Procedurally generated eat pop
 tests/
-  smoke_test.tscn              Headless boot + eat/grow/dissolve/damage checks
+  smoke_test.tscn              Headless boot + resource/eat/grow/dissolve/input checks
   smoke_test.gd
 .agents/skills/                19 Godot 3D agent skills (see AGENTS.md)
 ```
@@ -119,9 +124,10 @@ tests/
 ## Prototype notes (deliberate shortcuts)
 
 - **Mobs steer instead of using `NavigationAgent3D`** — the map is flat and hand-placed, so there is no navmesh to bake. `mob.gd` has the swap-in note.
-- **Input actions are registered in code** (`main.gd`) rather than in `project.godot`, so they cannot desync from the scripts during the prototype.
+- **Input actions live in Project Settings → Input Map**, not in code, so rebinding is a settings change.
+- **Food and mobs are `.tres` resources** (`resources/edibles/`, `resources/mobs/`): a new kind is a duplicated resource plus a spawn-table line, not a code edit.
 - **No win screen, no menus, no saves** — per the prototype cut list.
-- Edible/mob meshes are built at runtime from primitives; swap in real low-poly scenes when the loop is proven.
+- Edible/mob meshes are still built at runtime from primitives; swap in real low-poly scenes when the loop is proven.
 
 ## Skills & licenses
 

@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="EdibleData" format=3]
+
+[ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_4jhfg"]
+
+[resource]
+script = ExtResource("1_4jhfg")
+id = &"chicken"
+shape = "capsule"
+size = 0.7
+nutrition = 9.0
+color = Color(0.95, 0.93, 0.85, 1)

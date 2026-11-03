@@ -8,32 +8,8 @@ extends CharacterBody3D
 ## hand-placed, so steering avoids a navmesh bake at runtime; swap in
 ## NavigationAgent3D when the map gains real obstacles.
 
-const KINDS := {
-	"villager": {
-		"size": 1.1,
-		"nutrition": 30.0,
-		"speed": 2.2,
-		"flee_speed": 4.4,
-		"flies": false,
-		"color": Color(0.55, 0.36, 0.45),
-		"attack_range": 1.6,
-		"bite_damage": 9.0,
-		"bite_cooldown": 1.1,
-	},
-	"bird": {
-		"size": 0.35,
-		"nutrition": 8.0,
-		"speed": 3.0,
-		"flee_speed": 6.5,
-		"flies": true,
-		"color": Color(0.25, 0.32, 0.55),
-		"attack_range": 1.2,
-		"bite_damage": 3.0,
-		"bite_cooldown": 0.8,
-	},
-}
-
-@export var kind := "villager"
+## Which mob this is. Assign a .tres from resources/mobs/ in the Inspector.
+@export var data: MobData
 
 var size := 1.0
 var nutrition := 20.0
@@ -62,16 +38,18 @@ func _ready() -> void:
 	add_to_group("edible")
 	_rng.randomize()
 	_hover_phase = _rng.randf() * TAU
-	var cfg: Dictionary = KINDS.get(kind, KINDS["villager"])
-	size = float(cfg["size"])
-	nutrition = float(cfg["nutrition"])
-	color = cfg["color"]
-	_speed = float(cfg["speed"])
-	_flee_speed = float(cfg["flee_speed"])
-	_flies = bool(cfg["flies"])
-	_attack_range = float(cfg["attack_range"])
-	_bite_damage = float(cfg["bite_damage"])
-	_bite_cooldown = float(cfg["bite_cooldown"])
+	# Sensible fallback so a freshly placed Mob still runs unset.
+	if data == null:
+		data = MobData.new()
+	size = data.size
+	nutrition = data.nutrition
+	color = data.color
+	_speed = data.speed
+	_flee_speed = data.flee_speed
+	_flies = data.flies
+	_attack_range = data.attack_range
+	_bite_damage = data.bite_damage
+	_bite_cooldown = data.bite_cooldown
 	_mesh = $Mesh
 	_build_visuals()
 	_build_collision()

@@ -4,6 +4,8 @@ extends Node
 ## Run: godot --headless --path . res://tests/smoke_test.tscn
 ## Exit code is 0 when every check passes.
 
+const STATUE: EdibleData = preload("res://resources/edibles/statue.tres")
+
 var _failures := 0
 
 
@@ -25,6 +27,10 @@ func _run() -> void:
 
 	var edibles := _find_edibles(main)
 	_check(edibles.size() >= 50, "world spawns >= 50 edibles (got %d)" % edibles.size())
+	_check(
+		edibles[0].data != null and edibles[0].size > 0.0,
+		"edibles get their kind from an EdibleData resource"
+	)
 
 	var start_size: float = player.size
 	var start_eaten: int = player.eaten_count
@@ -47,23 +53,21 @@ func _run() -> void:
 	player.take_damage(12.0)
 	_check(player.size <= grown_size, "damage shrinks the slime")
 	player.take_damage(99999.0)
-	_check(player.size >= Slime.MIN_SIZE - 0.001, "size never drops below MIN_SIZE")
+	_check(player.size >= player.min_size - 0.001, "size never drops below min_size")
 
-	# Restart reloads the scene, so _setup_input() runs again on a live InputMap.
-	# Re-registering must not pile up duplicate key bindings.
-	var jump_events := InputMap.action_get_events("jump").size()
-	main._setup_input()
-	main._setup_input()
-	_check(
-		InputMap.action_get_events("jump").size() == jump_events,
-		"re-running input setup does not duplicate bindings"
-	)
+	# Input actions must come from Project Settings, not runtime registration.
+	var actions := ["move_forward", "move_back", "move_left", "move_right", "jump", "restart"]
+	var missing := 0
+	for action in actions:
+		if not InputMap.has_action(action):
+			missing += 1
+	_check(missing == 0, "input actions exist in Project Settings (missing %d)" % missing)
 
 	# Growing into a prop you are already standing on must eat it. The prop only
 	# sends `area_entered` once (while it is still too big), so the slime has to
 	# re-check its overlaps after a size change.
 	var big_meal := (load("res://scenes/edible.tscn") as PackedScene).instantiate() as Edible
-	big_meal.kind = "statue"
+	big_meal.data = STATUE
 	main.add_child(big_meal)
 	big_meal.global_position = player.global_position
 	await get_tree().physics_frame

@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="EdibleData" format=3]
+
+[ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_ph2ia"]
+
+[resource]
+script = ExtResource("1_ph2ia")
+id = &"crumb"
+shape = "box"
+size = 0.2
+nutrition = 2.0
+color = Color(0.9, 0.75, 0.5, 1)

@@ -4,10 +4,14 @@ extends Node3D
 ## at runtime so the .tscn files stay tiny and editable.
 
 const LightingPreset := preload("res://scripts/lighting_preset.gd")
-const EdibleScene: PackedScene = preload("res://scenes/edible.tscn")
-const MobScene: PackedScene = preload("res://scenes/mob.tscn")
 
 const WORLD_SIZE := 60.0
+
+## Scene and audio references are exported (with sensible defaults) so they can
+## be swapped in the Inspector instead of edited in code.
+@export var edible_scene: PackedScene = preload("res://scenes/edible.tscn")
+@export var mob_scene: PackedScene = preload("res://scenes/mob.tscn")
+@export var eat_sound_stream: AudioStream = preload("res://assets/sounds/pop.wav")
 
 ## HUD tier boundaries. The top one lives on Slime (`top_tier_size`) because
 ## the eye colour depends on it too; these two only drive the label.
@@ -22,20 +26,24 @@ const SDFGI_ENABLED := false
 ## turn it on for hero shots on a discrete GPU.
 const SSAO_ENABLED := false
 
-## Deterministic edible clusters: kind, amount, centre and spread on the ground.
+## Deterministic edible clusters: resource, amount, centre and spread.
+## Adding food = adding a .tres here (or a new line pointing at one).
 const EDIBLE_GROUPS := [
-	{"kind": "bug", "count": 10, "center": Vector3(0, 0, 4), "radius": 8.0},
-	{"kind": "berry", "count": 8, "center": Vector3(-6, 0, -4), "radius": 7.0},
-	{"kind": "crumb", "count": 8, "center": Vector3(7, 0, 0), "radius": 7.0},
-	{"kind": "pebble", "count": 6, "center": Vector3(0, 0, -8), "radius": 6.0},
-	{"kind": "fruit", "count": 8, "center": Vector3(-14, 0, 8), "radius": 8.0},
-	{"kind": "critter", "count": 7, "center": Vector3(14, 0, -6), "radius": 8.0},
-	{"kind": "chicken", "count": 6, "center": Vector3(2, 0, 16), "radius": 7.0},
-	{"kind": "barrel", "count": 5, "center": Vector3(-16, 0, -14), "radius": 6.0},
-	{"kind": "cart", "count": 3, "center": Vector3(16, 0, 14), "radius": 6.0},
-	{"kind": "statue", "count": 3, "center": Vector3(0, 0, -18), "radius": 5.0},
-	{"kind": "house", "count": 2, "center": Vector3(-18, 0, 18), "radius": 4.0},
+	{"data": preload("res://resources/edibles/bug.tres"), "count": 10, "center": Vector3(0, 0, 4), "radius": 8.0},
+	{"data": preload("res://resources/edibles/berry.tres"), "count": 8, "center": Vector3(-6, 0, -4), "radius": 7.0},
+	{"data": preload("res://resources/edibles/crumb.tres"), "count": 8, "center": Vector3(7, 0, 0), "radius": 7.0},
+	{"data": preload("res://resources/edibles/pebble.tres"), "count": 6, "center": Vector3(0, 0, -8), "radius": 6.0},
+	{"data": preload("res://resources/edibles/fruit.tres"), "count": 8, "center": Vector3(-14, 0, 8), "radius": 8.0},
+	{"data": preload("res://resources/edibles/critter.tres"), "count": 7, "center": Vector3(14, 0, -6), "radius": 8.0},
+	{"data": preload("res://resources/edibles/chicken.tres"), "count": 6, "center": Vector3(2, 0, 16), "radius": 7.0},
+	{"data": preload("res://resources/edibles/barrel.tres"), "count": 5, "center": Vector3(-16, 0, -14), "radius": 6.0},
+	{"data": preload("res://resources/edibles/cart.tres"), "count": 3, "center": Vector3(16, 0, 14), "radius": 6.0},
+	{"data": preload("res://resources/edibles/statue.tres"), "count": 3, "center": Vector3(0, 0, -18), "radius": 5.0},
+	{"data": preload("res://resources/edibles/house.tres"), "count": 2, "center": Vector3(-18, 0, 18), "radius": 4.0},
 ]
+
+const VILLAGER_DATA := preload("res://resources/mobs/villager.tres")
+const BIRD_DATA := preload("res://resources/mobs/bird.tres")
 
 const TREE_SPOTS := [
 	Vector3(-22, 0, -6), Vector3(-19, 0, 2), Vector3(-24, 0, 12),
@@ -63,7 +71,6 @@ var _remaining := 0
 
 func _ready() -> void:
 	randomize()
-	_setup_input()
 	_build_environment()
 	_build_ground()
 	_build_walls()
@@ -78,8 +85,8 @@ func _ready() -> void:
 	player.ate.connect(_on_player_ate)
 	player.size_changed.connect(_on_size_changed)
 	player.hurt.connect(func() -> void: _add_trauma(0.4))
-	if ResourceLoader.exists("res://assets/sounds/pop.wav"):
-		eat_sound.stream = load("res://assets/sounds/pop.wav")
+	if eat_sound_stream:
+		eat_sound.stream = eat_sound_stream
 		eat_sound.volume_db = -6.0
 	_update_hud()
 
@@ -92,26 +99,6 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("restart"):
 		get_tree().reload_current_scene()
-
-
-# --- Input ------------------------------------------------------------------
-
-func _setup_input() -> void:
-	_add_action("move_forward", [KEY_W, KEY_UP])
-	_add_action("move_back", [KEY_S, KEY_DOWN])
-	_add_action("move_left", [KEY_A, KEY_LEFT])
-	_add_action("move_right", [KEY_D, KEY_RIGHT])
-	_add_action("jump", [KEY_SPACE])
-	_add_action("restart", [KEY_R])
-
-
-func _add_action(action: StringName, keys: Array) -> void:
-	if not InputMap.has_action(action):
-		InputMap.add_action(action)
-	for key in keys:
-		var event := InputEventKey.new()
-		event.physical_keycode = key
-		InputMap.action_add_event(action, event)
 
 
 # --- World ------------------------------------------------------------------
@@ -240,14 +227,14 @@ func _spawn_edibles() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20261103
 	for group in EDIBLE_GROUPS:
-		var cfg: Dictionary = Edible.KINDS[group["kind"]]
-		var y := float(cfg["size"]) * 0.55
+		var data: EdibleData = group["data"]
+		var y := data.size * 0.55
 		for i in int(group["count"]):
 			var angle := rng.randf() * TAU
 			var radius := sqrt(rng.randf()) * float(group["radius"])
 			var centre: Vector3 = group["center"]
-			var edible := EdibleScene.instantiate() as Edible
-			edible.kind = group["kind"]
+			var edible := edible_scene.instantiate() as Edible
+			edible.data = data
 			var spot := Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
 			# Never spawn a free meal inside the player's starting eat radius.
 			var flat := Vector2(spot.x, spot.z)
@@ -264,15 +251,15 @@ func _spawn_mobs() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 424242
 	for i in 6:
-		var villager := MobScene.instantiate() as Mob
-		villager.kind = "villager"
+		var villager := mob_scene.instantiate() as Mob
+		villager.data = VILLAGER_DATA
 		var angle := TAU * float(i) / 6.0 + rng.randf_range(-0.25, 0.25)
 		var radius := rng.randf_range(11.0, 22.0)
 		villager.position = Vector3(cos(angle) * radius, 1.2, sin(angle) * radius)
 		add_child(villager)
 	for i in 7:
-		var bird := MobScene.instantiate() as Mob
-		bird.kind = "bird"
+		var bird := mob_scene.instantiate() as Mob
+		bird.data = BIRD_DATA
 		var angle := rng.randf() * TAU
 		var radius := rng.randf_range(5.0, 25.0)
 		bird.position = Vector3(cos(angle) * radius, rng.randf_range(1.5, 3.5), sin(angle) * radius)

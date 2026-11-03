@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="EdibleData" format=3]
+
+[ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_is8mk"]
+
+[resource]
+script = ExtResource("1_is8mk")
+id = &"critter"
+shape = "capsule"
+size = 0.85
+nutrition = 12.0
+color = Color(0.55, 0.42, 0.3, 1)

@@ -19,11 +19,11 @@
 ## Verify every change
 
 1. The project must open in the Godot 4.6 editor without errors or warnings you introduced.
-2. Run the headless smoke test (`res://tests/smoke_test.tscn`: boot, eat/grow/dissolve/damage, input de-duplication and overlap-growth checks). It must exit 0.
+2. Run the headless smoke test (`res://tests/smoke_test.tscn`: boot, resource wiring, eat/grow/dissolve/damage, input map, overlap growth). It must exit 0.
 3. If you changed gameplay, say what you tested by hand (F5/F6) and what you could not test.
 4. If a change breaks the smoke test, fix the change, not the test, unless the test itself is wrong. Say so if you edit it.
 
-Last validated with **Godot 4.6.stable**: import, a 480-frame rendered run, and the smoke test at 10/10 (exit 0).
+Last validated with **Godot 4.6.stable**: import, a 480-frame rendered run, and the smoke test at 11/11 (exit 0).
 
 **Adding a new `class_name` needs a rescan first.** A fresh class is not in the global class cache until `--headless --import` (or opening the editor) runs; scripts referencing it fail to compile before that. `--headless` does not compile shaders, so also do one windowed run for look changes.
 
@@ -108,20 +108,19 @@ The layer **names** above are not set in Project Settings yet — the bits are w
 
 ## Adding content
 
-- **Target workflow (after the data-driven refactor):** create a new `EdibleData` or `MobData` `.tres` in the Inspector, assign it to an instanced `Edible` or `Mob` scene, and place it in the level. No code edits.
-- **Current workflow (until the refactor):** add a kind to `Edible.KINDS` or `Mob.KINDS` and its group in `EDIBLE_GROUPS` (`main.gd`). Do not build one-off scenes for a single object.
+- **Edibles and mobs are resources.** Duplicate a `.tres` in `resources/edibles/` or `resources/mobs/`, edit it in the Inspector, then reference it from `EDIBLE_GROUPS` (edibles) or a spawn call. No script edits.
+- Keep `id` unique: it is the mesh-cache key, so two kinds sharing an id share a mesh.
+- Balance lives in the resource, not the script. `EdibleData`/`MobData` are the source of truth; the scripts only read them.
+- Build the `Edible`/`Mob` scenes once and instance them; do not build one-off scenes for a single object.
 
 ## Known debt and deliberate shortcuts
 
 These were prototype shortcuts. **Do not "fix" them as a drive-by.** Ask first, then migrate them as a planned refactor toward the inspector-editable rule above (only the tunable and content values, not true constants or wiring).
 
 - **Mobs use steering, not `NavigationAgent3D`.** The map is flat and hand-placed, with no runtime navmesh bake. Swap when the map gains obstacles. (The plan mentions `NavigationAgent3D`; steering is the current truth.)
-- **Input actions are registered in `main.gd`**, not the Input Map. Target: move them to Project Settings. (Godot de-duplicates identical key events, so scene reloads do not stack bindings — there is a smoke check for this.)
 - **Edible and mob visuals are built at runtime from primitives** inside their scenes. Target: build them in `.tscn` files.
-- **`Edible.KINDS`, `Mob.KINDS` and `EDIBLE_GROUPS` are code dictionaries.** Target: `EdibleData` and `MobData` resources.
-- **`main.gd` builds the world in code** (lighting, ground, trees, rocks). Target: a world scene with exported settings.
-- **Node and asset references are hard-wired**: `$Player`, `$HUD/Label`, `$EatSound`, `$Mesh`, `$Collision`, `preload()` scene constants and `load("res://assets/sounds/pop.wav")`. Target: `@export` references. Not a drive-by fix.
-- **Most tuning values are still `const`s or inline literals** (camera pull-back, shake, burst, fog, spawn radii, HUD boundaries, growth curve). Target: `@export`/`@export_group` per script. `Slime.top_tier_size` is the first migrated one; migrate the rest when touching each file.
+- **`main.gd` still builds the world in code** (lighting, ground, trees, rocks). Target: a world scene with exported settings.
+- **Internal child references are still `$Body` / `$Mesh` / `$HUD/Label`**, and the slime's eyes are built in `_ready()`. Node names are wiring, so this is lower priority than the world refactor; move the eyes into `slime.tscn` when touching the look.
 - No menus, save system, win screen or threat meter. All explicitly cut in the plan.
 
 ## Current state (prototype pass 2: optimized)
@@ -147,6 +146,17 @@ godot --path . --print-fps --disable-vsync --quit-after 480
 
 Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn loop), cache meshes per kind, set `visibility_range_end`, and use `instance uniform` + `set_instance_shader_parameter` for per-object effects instead of per-instance materials. Do not flip SSAO/SDFGI back on without measuring.
 
+## Project map (content and data)
+
+| Path | What lives there |
+|---|---|
+| `scripts/data/edible_data.gd`, `mob_data.gd` | Resource classes: the shape of the content data |
+| `resources/edibles/*.tres` | 11 edible kinds, one file each (id, shape, size, nutrition, colour) |
+| `resources/mobs/*.tres` | villager and bird (size, speeds, flies, colour, bite stats) |
+| `resources/` | Add new kinds here; then reference them from `EDIBLE_GROUPS` or a spawn call |
+| `tests/smoke_test.tscn` | Headless regression test (11 checks) |
+| `project.godot` → `[input]` | Movement, jump and restart bindings |
+
 Non-obvious notes:
 - `scripts/lighting_preset.gd` is vendored **verbatim** from the `godot-lighting-environment` skill (MIT). Do not edit it.
 - `assets/sounds/pop.wav` was generated procedurally; there is no external audio asset.
@@ -155,8 +165,9 @@ Non-obvious notes:
 - Shared eat contract: `Edible` and `Mob` use the same eat/absorb interface (`try_eat`, `absorb`); keep it consistent.
 - `area_entered` fires once, so `Slime._sweep_eat_overlaps()` re-checks the eat area after every size change. Without it you cannot eat something you grew past while standing still. Keep the sweep if you replace the eat area.
 - Physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) must be deferred when made from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".
+- `Edible`/`Mob` export `data: EdibleData`/`MobData`. Spawn code must set `data` before `add_child()`, because `_ready()` reads it. Both scripts fall back to a default resource if it is unset, so a freshly placed node still runs.
 
-**Tuning knobs (to be exported, see Known debt):** `Slime.top_tier_size` (exported), `Slime.START_NUTRITION` and the growth exponent, `Edible.KINDS`, `Mob.KINDS`, `EDIBLE_GROUPS` in `main.gd`, `BASE_SPEED`, `BASE_JUMP`, `SDFGI_ENABLED`, `SSAO_ENABLED`.
+**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`; `SDFGI_ENABLED`/`SSAO_ENABLED`.
 
 ## Working agreement
 

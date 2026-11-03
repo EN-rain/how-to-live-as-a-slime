@@ -1,31 +1,18 @@
 class_name Edible
 extends Area3D
 
-## A chewable prop. The spawner sets `kind` before adding the node to the tree;
-## _ready() builds the mesh, collision and colour for that kind.
+## A chewable prop. Assign an `EdibleData` resource (`resources/edibles/*.tres`)
+## in the Inspector; _ready() builds the mesh, collision and colour from it.
 ##
 ## Eating contract used by Slime:
 ##   try_eat(player_size) -> bool   (size gate)
 ##   absorb(target)                 (dissolve animation, then free)
 
-## Every edible kind: primitive shape, visual size (metres), nutrition, colour.
-const KINDS := {
-	"bug": {"shape": "sphere", "size": 0.22, "nutrition": 3.0, "color": Color(0.45, 0.3, 0.22)},
-	"berry": {"shape": "sphere", "size": 0.28, "nutrition": 4.0, "color": Color(0.85, 0.16, 0.3)},
-	"crumb": {"shape": "box", "size": 0.2, "nutrition": 2.0, "color": Color(0.9, 0.75, 0.5)},
-	"pebble": {"shape": "sphere", "size": 0.32, "nutrition": 3.0, "color": Color(0.55, 0.58, 0.62)},
-	"fruit": {"shape": "sphere", "size": 0.75, "nutrition": 10.0, "color": Color(0.95, 0.6, 0.15)},
-	"critter": {"shape": "capsule", "size": 0.85, "nutrition": 12.0, "color": Color(0.55, 0.42, 0.3)},
-	"barrel": {"shape": "cylinder", "size": 1.0, "nutrition": 14.0, "color": Color(0.55, 0.35, 0.18)},
-	"chicken": {"shape": "capsule", "size": 0.7, "nutrition": 9.0, "color": Color(0.95, 0.93, 0.85)},
-	"statue": {"shape": "capsule", "size": 2.4, "nutrition": 55.0, "color": Color(0.62, 0.63, 0.68)},
-	"cart": {"shape": "box", "size": 2.0, "nutrition": 40.0, "color": Color(0.6, 0.42, 0.2)},
-	"house": {"shape": "house", "size": 3.0, "nutrition": 90.0, "color": Color(0.82, 0.75, 0.62)},
-}
-
 static var _mesh_cache: Dictionary = {}
 
-@export var kind := "berry"
+## Which food this is. Assigning a .tres makes a new edible a data change, not
+## a code change.
+@export var data: EdibleData
 
 var size := 0.3
 var nutrition := 3.0
@@ -38,22 +25,25 @@ var _being_eaten := false
 
 func _ready() -> void:
 	add_to_group("edible")
-	var cfg: Dictionary = KINDS.get(kind, KINDS["berry"])
-	size = float(cfg["size"])
-	nutrition = float(cfg["nutrition"])
-	color = cfg["color"]
+	# Sensible fallback so a freshly placed Edible still runs unset.
+	if data == null:
+		data = EdibleData.new()
+	size = data.size
+	nutrition = data.nutrition
+	color = data.color
 	rotation.y = randf() * TAU
 	_mesh = $Mesh
-	_build_visuals(cfg)
+	_build_visuals()
 	_build_collision()
 
 
-static func _mesh_for(edible_kind: String, cfg: Dictionary) -> Mesh:
-	if _mesh_cache.has(edible_kind):
-		return _mesh_cache[edible_kind]
-	var mesh_size := float(cfg["size"])
+static func _mesh_for(edible: EdibleData) -> Mesh:
+	var key := String(edible.id)
+	if _mesh_cache.has(key):
+		return _mesh_cache[key]
+	var mesh_size := edible.size
 	var mesh: Mesh
-	match String(cfg["shape"]):
+	match edible.shape:
 		"sphere":
 			var sphere := SphereMesh.new()
 			sphere.radius = mesh_size * 0.5
@@ -85,14 +75,14 @@ static func _mesh_for(edible_kind: String, cfg: Dictionary) -> Mesh:
 			fallback.radius = mesh_size * 0.5
 			fallback.height = mesh_size
 			mesh = fallback
-	_mesh_cache[edible_kind] = mesh
+	_mesh_cache[key] = mesh
 	return mesh
 
 
-func _build_visuals(cfg: Dictionary) -> void:
+func _build_visuals() -> void:
 	# Shared per kind: one material for all 10 bugs, 8 berries, ...
 	var mat := ToonMaterial.shared(color, size * 0.03)
-	_mesh.mesh = _mesh_for(kind, cfg)
+	_mesh.mesh = _mesh_for(data)
 	_mesh.material_override = mat
 	# Only big props cast shadows; 66 tiny props would just cost shadow-map time.
 	_mesh.cast_shadow = (
@@ -102,7 +92,7 @@ func _build_visuals(cfg: Dictionary) -> void:
 	)
 	_mesh.visibility_range_end = clampf(32.0 + size * 14.0, 32.0, 75.0)
 	_parts.append(_mesh)
-	if String(cfg["shape"]) == "house":
+	if data.shape == "house":
 		var roof := MeshInstance3D.new()
 		var prism := PrismMesh.new()
 		prism.size = Vector3(size * 1.1, size * 0.5, size * 0.9)

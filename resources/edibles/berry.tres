@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="EdibleData" format=3]
+
+[ext_resource type="Script" path="res://scripts/data/edible_data.gd" id="1_rfimg"]
+
+[resource]
+script = ExtResource("1_rfimg")
+size = 0.28
+nutrition = 4.0
+color = Color(0.85, 0.16, 0.3, 1)
