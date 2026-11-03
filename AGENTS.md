@@ -117,22 +117,24 @@ The layer **names** above are not set in Project Settings yet — the bits are w
 
 All prototype shortcuts from pass 2 have been migrated to the Inspector-editable `.tscn` rule:
 
-- **Dedicated `World` scene (`scenes/world.tscn` + `scripts/world.gd`):** lighting, sky/environment, ground, walls, `NavigationRegion3D`, and instanced `scenes/tree.tscn` / `scenes/rock.tscn` obstacles live in `world.tscn` with exported lighting, quality (`ssao_enabled`, `sdfgi_enabled`), fog, and palette settings on `GameWorld`.
+- **Dedicated `World` scene (`scenes/world.tscn` + `scripts/world.gd`):** lighting, sky/environment, a 100 × 100 m ground and walls, `NavigationRegion3D`, and instanced `scenes/tree.tscn` / `scenes/rock.tscn` obstacles live in `world.tscn` with exported lighting, quality (`ssao_enabled`, `sdfgi_enabled`), fog, and palette settings on `GameWorld`.
 - **Visuals authored in `.tscn` files:**
-  - `scenes/slime.tscn` holds `Body`, `LeftEye/Pupil`, `RightEye/Pupil`, and shader materials; `slime.gd` references them via `@export` node paths.
+  - `scenes/slime.tscn` holds `Body` (translucent shader), `ShadowProxy` (shadows-only sphere so the jelly casts a clean shadow), `LeftEye/Pupil`, `RightEye/Pupil`, and shader materials; `slime.gd` references them via `@export` node paths.
   - `scenes/edible.tscn` holds an empty `VisualRoot` (the per-kind model is instanced there) and `Collision`; `edible.gd` reads `EdibleData.visual_scene` from `scenes/edibles/*.tscn`, applies `size`, and overrides the model materials with `ToonMaterial`.
   - `scenes/mob.tscn` holds an empty `VisualRoot` (per-kind model from `scenes/mobs/*.tscn`), `Collision`, and `NavigationAgent3D`.
   - `scenes/edibles/*.tscn` and `scenes/mobs/*.tscn` are thin wrappers that instance a GLB from `assets/models/`.
   - `scenes/eat_burst.tscn` holds the reusable `GPUParticles3D` absorption burst.
 - **Obstacles + `NavigationAgent3D`:** trees and rocks are `StaticBody3D` obstacles on collision layer 1 (`World`). `Mob` uses `NavigationAgent3D` with obstacle-avoidance ray feelers so grounded mobs route cleanly around obstacles.
+- **Third-person camera + camera-relative input:** `Main` owns the orbit (`_camera_yaw`, `_camera_pitch`, `_camera_zoom`), raycasts layer 1 to pull the camera in front of walls, and follows at a low height. `Slime._camera_relative()` reads `get_viewport().get_camera_3d()`, so W is always "away from the camera" even after orbiting. Right-drag orbit and wheel zoom are raw mouse events, not `InputMap` actions.
+- **Translucent slime:** `slime.gdshader` writes `ALPHA` from the `alpha` uniform; `slime_outline.gdshader` discards everything except the silhouette band so the dark inverted hull does not show through the jelly. `ShadowProxy` is a shadows-only sphere: the transparent `Body` casts a hollow ring shadow, so body/eye shadow casting is off and the proxy provides the ground shadow.
 - **Menus, Save/Load, and Win Screen (`scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd`, `scripts/save_manager.gd`):**
   - Pause/Settings menu (`Esc`), quick save (`F6`), quick load (`F9`), SFX volume & SSAO/SDFGI toggles, and an atmospheric "Nothing Left to Eat" Win Screen when `_remaining <= 0`.
 
 ## Current state (pass 3: full scene architecture + menus/save/win)
 
-`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edible kinds (66 instances) in 3 tiers, villagers and birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
+`scenes/main.tscn` is playable: eat, grow, a third-person orbit camera, a **100 × 100 m** arena, a translucent slime, toon look, 11 edible kinds (85 instances) in 3 tiers, 9 villagers and 10 birds that flee or fight with `NavigationAgent3D` around physical trees/rocks, juice (sound, particles, shake, HUD + tier progress bar), pause/settings menu, save/load (`user://slime_save.cfg`), win screen, and restart on R.
 
-**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** in pass 2, **~165-185 fps** now (GLB props for the world and mobs cost less than the old runtime primitive builds).
+**Performance budget: 60 fps on integrated graphics.** Measured on Intel Iris Xe (D3D12, Forward+, 1152×648) with `--print-fps --disable-vsync`: **12-17 fps** in pass 1, **~85-100 fps** in pass 2, **~165-185 fps** after pass 3, **~250-260 fps** now with the third-person camera and the larger arena.
 
 Frame-rate check (read the tail of the `Project FPS` lines; the first few include load hitches):
 
@@ -147,7 +149,7 @@ godot --path . --print-fps --disable-vsync --quit-after 600
 | `ToonMaterial.shared()` + per-kind mesh cache | fewer materials, fewer rebuilds |
 | `instance uniform float dissolve` in `toon.gdshader` | dissolve per instance on a shared material |
 | 2 shadow cascades over 55 m, shadows only on props >= 1.5 m | cheaper shadow map |
-| `visibility_range_end` on props/mobs, camera far 160 m | less overdraw |
+| `visibility_range_end` on props/mobs, camera far 220 m | less overdraw |
 
 Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn loop), cache meshes per kind, set `visibility_range_end`, and use `instance uniform` + `set_instance_shader_parameter` for per-object effects instead of per-instance materials. Do not flip SSAO/SDFGI back on without measuring.
 
@@ -155,7 +157,7 @@ Rules for new content: reuse `ToonMaterial.shared()` (never `make()` in a spawn 
 
 | Path | What lives there |
 |---|---|
-| `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, ground, walls, `tree.tscn` & `rock.tscn` obstacles |
+| `scenes/world.tscn`, `scripts/world.gd` | `GameWorld`: environment, sun, `NavigationRegion3D`, 100 × 100 m ground, walls, `tree.tscn` & `rock.tscn` obstacles |
 | `scenes/edibles/*.tscn`, `scenes/mobs/*.tscn` | Per-kind visual prefabs that instance a GLB from `assets/models/` |
 | `assets/models/*.glb` | 15 exported models (UnityGLTF); `Textures/colormap.png` is a placeholder for the contributor's missing atlas |
 | `scenes/ui/game_menus.tscn`, `scripts/ui/game_menus.gd` | `GameMenus`: pause/settings menu, tier progress bar, save toast, win screen |
@@ -173,7 +175,8 @@ Non-obvious notes:
 - `scripts/toon_material.gd` is the cel material factory; the outline is an inverted-hull `next_pass`.
 - `scripts/icosphere.gd` builds the slime body mesh (plan §8: an icosphere wobbles evenly, a UV sphere pinches at the poles).
 - **Icosphere winding:** Godot treats *clockwise* triangles as front-facing. `Icosphere.build()` emits `(a, c, b)`; emitting `(a, b, c)` renders the body inside-out and the `cull_front` outline `next_pass` covers the whole slime.
-- **Navmesh carving:** `GameWorld._ready()` rebuilds the grid `NavigationMesh`; `_is_cell_blocked()` tests the obstacle circle against the whole cell *square*. Centre-only tests miss obstacles that sit on a grid line, and paths then run straight through rocks.
+- **Navmesh carving:** `GameWorld._ready()` rebuilds the grid `NavigationMesh`; `_is_cell_blocked()` tests the obstacle circle against the whole cell *square*. Centre-only tests miss obstacles that sit on a grid line, and paths then run straight through rocks. `NAV_HALF_EXTENT` (48) must stay just inside the ground half-size (50).
+- **Spawn clearance:** `main.gd::_spawn_edibles()` and `_spawn_mobs()` reject spots within 1.6-2.6 m of a tree/rock. A prop buried in a `StaticBody3D` can never be eaten, which would make a 100% clear impossible; keep the clearance check when adding spawn types.
 - **Nav agent distances:** mobs stand ~0.88 m above the navmesh. `path_desired_distance` must be larger than that vertical gap (keep `>= 1.2`); at `0.65` the first path point is never reached, so `get_next_path_position()` returns the spawn point forever and the mob stands still.
 - `assets/models/Textures/colormap.png` is a generated 4×4 white placeholder for the contributor's missing texture atlas. Every GLB references it, but `ToonMaterial` overrides the imported material, so it has no visual effect. Keep it (deleting it restores 15 import errors) until the models are re-exported with the real atlas.
 - Shared eat contract: `Edible` and `Mob` use the same eat/absorb interface (`try_eat`, `absorb`); keep it consistent.
@@ -181,7 +184,7 @@ Non-obvious notes:
 - Physics-state changes (`monitorable`, `collision_layer`, `CollisionShape3D.disabled`) must be deferred when made from inside `area_entered`/`body_entered` callbacks, or Godot errors with "Function blocked during in/out signal".
 - `Edible`/`Mob` export `data: EdibleData`/`MobData`. Spawn code must set `data` before `add_child()`, because `_ready()` reads it. Both scripts fall back to a default resource if it is unset, so a freshly placed node still runs.
 
-**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `GameWorld`'s exported `Lighting & Sun`, `Environment & Quality`, and `Palette` groups; `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`.
+**Tuning knobs:** `Slime`'s exported `Movement`, `Growth`, `Feel` and `Look` groups (Inspector); `GameWorld`'s exported `Lighting & Sun`, `Environment & Quality`, `Navigation`, and `Palette` groups; `Main`'s `Camera & Shake` and `Spawning` groups (orbit distance/pitch/sensitivity, counts); `resources/edibles/*.tres`; `resources/mobs/*.tres`; the `EDIBLE_GROUPS` spawn table in `main.gd`.
 
 ## Working agreement
 

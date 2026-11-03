@@ -13,8 +13,10 @@ Built from [`how-to-live-as-a-slime-plan.md`](how-to-live-as-a-slime-plan.md) �
 
 | Input | Action |
 |---|---|
-| WASD / arrows | Move |
+| WASD / arrows | Move (relative to the camera) |
 | Space | Jump |
+| Right-drag mouse | Orbit the third-person camera |
+| Mouse wheel | Zoom the camera |
 | R | Restart |
 | Esc | Pause / Settings / Save Menu |
 | F6 | Quick Save |
@@ -22,9 +24,10 @@ Built from [`how-to-live-as-a-slime-plan.md`](how-to-live-as-a-slime-plan.md) �
 
 ## How it plays
 
-- You can only eat things **smaller than you** (`size <= your size`). Hover the camera over an edible; the slime's eat `Area3D` swallows it on touch.
+- You can only eat things **smaller than you** (`size <= your size`). Touch an edible with the slime's eat `Area3D` to swallow it.
 - Each meal adds nutrition. Size = `0.8 * (nutrition / 27)^0.4`, so early bugs grow you visibly and late tiers need houses and statues.
-- Movement speed and jump scale with size; the camera pulls back as you grow.
+- Movement speed and jump scale with size; the third-person camera pulls back as you grow. WASD is camera-relative, so right-drag orbit then move where you are looking.
+- A **100 × 100 m** arena holds 85 edibles (11 kinds) and 19 mobs (9 villagers, 10 birds), with trees and rocks spread across the whole map.
 - Two mobs: **villagers** and **birds**. Bigger than you → they chase and bite (shrinking you). Smaller than you → they flee. Either can be eaten once you outgrow them. Grounded mobs use `NavigationAgent3D` and obstacle-avoidance feelers to navigate around trees and rocks.
 - Two tone beats from the plan: past size **2.6** the pupils go pale, and once the map is empty the HUD reads **Nothing left to eat.** and opens the **World Eaten** summary overlay with your final size, time, and best record.
 - Save or load your run anytime via **Esc** or **F6 / F9** (`user://slime_save.cfg`).
@@ -40,6 +43,7 @@ Target: a locked 60 fps on integrated graphics. Measured on **Intel Iris Xe (D3D
 | SSAO off | **85** |
 | + shared materials/meshes, instance-uniform dissolve, shadow & distance budgets | **~85–100** |
 | + pass-3 world/nav GLB props | **~165–185** |
+| + third-person camera, translucent slime, 100 × 100 m world | **~250–260** |
 
 What produced most of it, in order of cost:
 
@@ -48,11 +52,11 @@ What produced most of it, in order of cost:
 3. **Shared materials and meshes.** `ToonMaterial.shared()` caches one material per kind/colour, and each edible kind builds and caches its mesh once instead of 66 times.
 4. **Instance-uniform dissolve.** `toon.gdshader` declares `instance uniform float dissolve`, so the dissolve is set per mesh instance via `set_instance_shader_parameter` — one material stays shared across all props of a kind. (This also removed a runtime bug.)
 5. **Shadow budget.** Two cascade splits over 55 m instead of four over 300 m; only props ≥ 1.5 m cast shadows.
-6. **Distance culling.** Edibles cull at 32–75 m by size, mobs at 85 m, camera far plane 160 m.
+6. **Distance culling.** Edibles cull at 32–75 m by size, mobs at 100 m, camera far plane 220 m.
 7. **Icosphere slime body.** 642 evenly distributed vertices instead of a pole-pinched UV sphere: smoother wobble and less overdraw at top size.
 8. **GLB prop models.** The world, edibles, and mobs instance shared `.glb` scenes (`assets/models/`) through per-kind prefabs, replacing per-object primitive builds.
 
-The 165–185 fps figure comes from a 600-frame windowed run on the same machine after the world/navigation pass; ignore the first few `Project FPS` lines, which include load hitches.
+The latest figure (259–260 fps) is from a 1200-frame windowed run on the same machine with the larger arena; ignore the first few `Project FPS` lines, which include load hitches.
 
 Scaling up later: flip `ssao_enabled`/`sdfgi_enabled` on for a discrete GPU, then add real LOD tiers and chunk streaming (both cut from the prototype).
 
@@ -72,14 +76,14 @@ Checked against `how-to-live-as-a-slime-plan.md` after the scene architecture & 
 | §7 Cute pastel blob, bouncy audio | Done | Pink-green jelly, procedural `pop.wav` |
 | §7 Blank eyes at top tier | Done | `_update_eyes()` swaps pupils to pale at size ≥ 2.6 |
 | §7 Quiet ending | Done | "Nothing left to eat." + World Eaten overlay once every edible and mob is gone |
-| §8 Cel shader + outline | Done | `toon.gdshader` + `outline.gdshader` as `next_pass` |
-| §8 Wobble + squash & stretch | Done | `slime.gdshader` vertex wobble, volume-preserving squash |
+| §8 Cel shader + outline | Done | `toon.gdshader` + `outline.gdshader` for props; the slime uses `slime_outline.gdshader` (rim-only, because its body is translucent) |
+| §8 Wobble + squash & stretch | Done | `slime.gdshader` vertex wobble, translucency + rim, volume-preserving squash |
 | §8 Area3D + reusable Edible | Done | One `Area3D` on the slime, one `edible.tscn` for all kinds |
 | §8 Icosphere slime body | Done | `scripts/icosphere.gd`, eyes & materials authored in `slime.tscn` |
 | §8 `NavigationAgent3D` | Done | `NavigationRegion3D` in `world.tscn` + `NavigationAgent3D` and obstacle feelers in `mob.tscn` |
 | §8 LOD / chunk streaming | Partial | Distance culling + shadow budget; real LOD is post-prototype |
 | §8 Scripted collapse instead of physics | Done | Absorb tween into the slime |
-| §9 Prototype scope table | Done | 11 edible kinds (66 instances), 2 mob types, 3 tiers, one toon shader |
+| §9 Prototype scope table | Done | 11 edible kinds (85 instances), 2 mob types, 3 tiers, one toon shader |
 | §10 Build order 1–8 | Done | Shipped in order, all at low quality first (§12) |
 
 ## Test
@@ -99,7 +103,7 @@ project.godot                  Godot 4.6, Forward+, Jolt
 scenes/
   main.tscn                    Main + World + Player + Camera3D + HUD + GameMenus + EatSound
   world.tscn                   WorldEnvironment + Sun + NavigationRegion3D + Ground + Walls + Trees + Rocks
-  slime.tscn                   CharacterBody3D + Body mesh + LeftEye/RightEye & Pupils + EatArea
+  slime.tscn                   CharacterBody3D + Body mesh + ShadowProxy + Eyes/Pupils + EatArea
   edible.tscn                  Area3D + VisualRoot + Collision (EdibleData picks the model)
   mob.tscn                     CharacterBody3D + VisualRoot + Collision + NavigationAgent3D
   edibles/*.tscn               Per-kind edible prefabs wrapping assets/models/*.glb
@@ -109,9 +113,9 @@ scenes/
   eat_burst.tscn               Reusable GPUParticles3D absorption burst
   ui/game_menus.tscn           Pause/Settings menu, Tier progress bar, Save toast, Win screen
 scripts/
-  main.gd                      Spawns, camera, shake, HUD, save/load wiring, exported scene/audio refs
+  main.gd                      Third-person orbit camera, spawns, shake, HUD, save/load wiring, exported refs
   world.gd                     GameWorld: exported lighting, sun, fog, SSAO/SDFGI, palette & navmesh setup
-  slime.gd                     Exported movement/growth/feel/look/node groups, squash, blank eyes
+  slime.gd                     Camera-relative movement, exported growth/feel/look, squash, blank eyes
   edible.gd                    EdibleData-driven props, size gate, absorb/dissolve, mesh/shape cache
   mob.gd                       MobData-driven villager/bird FSM + NavigationAgent3D & obstacle feelers
   save_manager.gd              SaveManager: run state, world completion records & settings persistence
@@ -125,9 +129,10 @@ resources/
   edibles/*.tres               11 edible kinds, editable in the Inspector
   mobs/*.tres                  villager, bird, editable in the Inspector
 shaders/
-  slime.gdshader               Wobble + cel bands + jelly highlight
+  slime.gdshader               Wobble + cel bands + translucent jelly body
+  slime_outline.gdshader       Rim-only outline (the body is see-through)
   toon.gdshader                Cel bands + per-instance dissolve
-  outline.gdshader             Inverted-hull outline
+  outline.gdshader             Inverted-hull outline for opaque props
 assets/models/                15 GLB models (UnityGLTF exports) + Textures/colormap.png placeholder
 assets/sounds/pop.wav          Procedurally generated eat pop
 tests/
