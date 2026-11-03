@@ -207,7 +207,7 @@ func _setup_navigation_mesh() -> void:
 		for gx in NAV_GRID_STEPS:
 			var cx := -NAV_HALF_EXTENT + (float(gx) + 0.5) * step
 			var cz := -NAV_HALF_EXTENT + (float(gz) + 0.5) * step
-			if _is_cell_blocked(cx, cz, obstacles):
+			if _is_cell_blocked(cx, cz, step * 0.5, obstacles):
 				continue
 			var i0 := gz * stride + gx
 			var i1 := i0 + 1
@@ -218,10 +218,14 @@ func _setup_navigation_mesh() -> void:
 	nav_region.navigation_mesh = nav_mesh
 
 
-func _is_cell_blocked(cx: float, cz: float, obstacles: Array[Vector3]) -> bool:
+## Blocks a cell when the obstacle circle overlaps the cell *square*, not just
+## its centre. Centre-only tests miss obstacles sitting on a grid line: the
+## nearest cell centre can be sqrt(2) * half beyond the clearance, so the
+## navmesh would keep a hole-free path straight through a rock.
+func _is_cell_blocked(cx: float, cz: float, half: float, obstacles: Array[Vector3]) -> bool:
 	for obs in obstacles:
-		var dx := cx - obs.x
-		var dz := cz - obs.y
+		var dx := maxf(absf(cx - obs.x) - half, 0.0)
+		var dz := maxf(absf(cz - obs.y) - half, 0.0)
 		if dx * dx + dz * dz < obs.z * obs.z:
 			return true
 	return false

@@ -21,7 +21,9 @@ void fragment() {
 	ALBEDO = mix(base_color.rgb, flash_color, clamp(flash, 0.0, 1.0));
 	ROUGHNESS = 0.35;
 	METALLIC = 0.0;
-	EMISSION = flash_color * (flash * 0.65);
+	// The camera looks at the slime's shaded side, so a little self-glow keeps
+	// the player readable instead of a black blob against the ground.
+	EMISSION = base_color.rgb * 0.08 + flash_color * (flash * 0.65);
 }
 
 void light() {

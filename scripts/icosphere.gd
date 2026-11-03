@@ -52,9 +52,12 @@ static func build(radius := 0.5, subdivisions := 3) -> ArrayMesh:
 	var indices := PackedInt32Array()
 	indices.resize(faces.size() * 3)
 	for i in faces.size():
+		# Godot treats clockwise winding as front-facing, so emit the triangle
+		# with the middle/last vertices swapped. Without this the body renders
+		# inside-out and the `cull_front` outline pass covers the whole slime.
 		indices[i * 3] = faces[i].x
-		indices[i * 3 + 1] = faces[i].y
-		indices[i * 3 + 2] = faces[i].z
+		indices[i * 3 + 1] = faces[i].z
+		indices[i * 3 + 2] = faces[i].y
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
