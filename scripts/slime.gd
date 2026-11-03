@@ -18,6 +18,10 @@ const START_NUTRITION := 27.0
 const MIN_SIZE := 0.55
 const MAX_SIZE := 4.0
 
+## Top-tier threshold: at this size the pupils go pale (plan §7) and the HUD
+## reports "Large". One source of truth for both, so they cannot drift apart.
+@export_range(MIN_SIZE, MAX_SIZE, 0.05) var top_tier_size: float = 2.6
+
 var nutrition := START_NUTRITION
 var size := 0.8
 var eaten_count := 0
@@ -32,6 +36,7 @@ var _visual_scale := Vector3.ONE
 var _was_on_floor := true
 var _flash := 0.0
 var _pupil_mat: StandardMaterial3D
+var _sweep_queued := false
 
 
 func _ready() -> void:
@@ -91,7 +96,7 @@ func _update_eyes() -> void:
 	if _pupil_mat == null:
 		return
 	_pupil_mat.albedo_color = (
-		Color(0.05, 0.04, 0.08) if size < 2.6 else Color(0.87, 0.9, 0.87)
+		Color(0.05, 0.04, 0.08) if size < top_tier_size else Color(0.87, 0.9, 0.87)
 	)
 
 
@@ -178,6 +183,31 @@ func _apply_size() -> void:
 	_size_tween.tween_property(self, "scale", Vector3.ONE * size, 0.35) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	size_changed.emit(size)
+	_queue_eat_sweep()
+
+
+## `area_entered` fires once. If the slime grows past a prop it is already
+## standing on, nothing re-fires, so re-check overlaps after every size change.
+## Otherwise "grow to unlock new food" would not work while standing still.
+func _queue_eat_sweep() -> void:
+	if _sweep_queued or not is_inside_tree():
+		return
+	_sweep_queued = true
+	_sweep_eat_overlaps.call_deferred()
+
+
+func _sweep_eat_overlaps() -> void:
+	_sweep_queued = false
+	if _eat_area == null or not is_inside_tree():
+		return
+	for area in _eat_area.get_overlapping_areas():
+		if area.has_method("try_eat") and area.try_eat(size):
+			_eat(area)
+			return
+	for body in _eat_area.get_overlapping_bodies():
+		if body.has_method("try_eat") and body.try_eat(size):
+			_eat(body)
+			return
 
 
 func _on_area_entered(area: Area3D) -> void:

@@ -9,6 +9,11 @@ const MobScene: PackedScene = preload("res://scenes/mob.tscn")
 
 const WORLD_SIZE := 60.0
 
+## HUD tier boundaries. The top one lives on Slime (`top_tier_size`) because
+## the eye colour depends on it too; these two only drive the label.
+const TIER_SMALL := 1.05
+const TIER_MEDIUM := 1.7
+
 ## SDFGI is the single most expensive environment setting on integrated GPUs.
 ## The prototype budget is 60 fps on an Intel Iris Xe, so it stays off; the sky
 ## ambient + toon bands carry the fill light. Flip to true on a discrete GPU.
@@ -243,7 +248,6 @@ func _spawn_edibles() -> void:
 			var centre: Vector3 = group["center"]
 			var edible := EdibleScene.instantiate() as Edible
 			edible.kind = group["kind"]
-			add_child(edible)
 			var spot := Vector3(centre.x + cos(angle) * radius, y, centre.z + sin(angle) * radius)
 			# Never spawn a free meal inside the player's starting eat radius.
 			var flat := Vector2(spot.x, spot.z)
@@ -251,7 +255,9 @@ func _spawn_edibles() -> void:
 				var outward := flat.normalized() if flat.length() > 0.01 else Vector2.RIGHT
 				spot.x = outward.x * 5.5
 				spot.z = outward.y * 5.5
+			# Position before add_child: _ready() must not run at the origin.
 			edible.position = spot
+			add_child(edible)
 
 
 func _spawn_mobs() -> void:
@@ -361,11 +367,11 @@ func _burst(at: Vector3, color: Color, count: int) -> void:
 
 func _update_hud() -> void:
 	var tier := "Tiny"
-	if player.size > 2.6:
+	if player.size > player.top_tier_size:
 		tier = "Large"
-	elif player.size > 1.7:
+	elif player.size > TIER_MEDIUM:
 		tier = "Medium"
-	elif player.size > 1.05:
+	elif player.size > TIER_SMALL:
 		tier = "Small"
 	hud_label.text = "Size %.2f  ·  %s\nEaten %d" % [player.size, tier, player.eaten_count]
 	if _remaining <= 0:
