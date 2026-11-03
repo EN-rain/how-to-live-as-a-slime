@@ -1,0 +1,32 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/slime.tscn" id="2_slime"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="Player" parent="." instance=ExtResource("2_slime")]
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Label" type="Label" parent="HUD"]
+offset_left = 24.0
+offset_top = 16.0
+offset_right = 520.0
+offset_bottom = 110.0
+theme_override_colors/font_color = Color(1, 0.98, 0.9, 1)
+theme_override_font_sizes/font_size = 22
+
+[node name="Hint" type="Label" parent="HUD"]
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = -40.0
+offset_right = 520.0
+offset_bottom = -16.0
+theme_override_colors/font_color = Color(1, 1, 1, 0.75)
+theme_override_font_sizes/font_size = 15
+text = "WASD move · Space jump · R restart"
+
+[node name="EatSound" type="AudioStreamPlayer" parent="."]

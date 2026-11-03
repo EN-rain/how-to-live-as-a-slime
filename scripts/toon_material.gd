@@ -1,0 +1,35 @@
+class_name ToonMaterial
+extends RefCounted
+
+## Factory for the game's cel-shaded materials. Every opaque material gets an
+## inverted-hull outline as its `next_pass`. Use `flat()` for unlit UI-like bits
+## such as eyes.
+
+const TOON_SHADER: Shader = preload("res://shaders/toon.gdshader")
+const OUTLINE_SHADER: Shader = preload("res://shaders/outline.gdshader")
+
+
+static func make(
+		color: Color,
+		outline_width := 0.02,
+		outline_color := Color(0.09, 0.07, 0.12),
+		with_outline := true
+	) -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = TOON_SHADER
+	mat.set_shader_parameter("base_color", color)
+	mat.set_shader_parameter("rim_strength", 0.18)
+	if with_outline:
+		var outline := ShaderMaterial.new()
+		outline.shader = OUTLINE_SHADER
+		outline.set_shader_parameter("outline_width", outline_width)
+		outline.set_shader_parameter("outline_color", outline_color)
+		mat.next_pass = outline
+	return mat
+
+
+static func flat(color: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = color
+	return mat

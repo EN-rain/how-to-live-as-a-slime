@@ -10,9 +10,10 @@
 - Renderer is Forward+: SSIL and SDFGI are available, but are **not** available on Mobile/Compatibility. Keep that in mind before suggesting renderer changes.
 - `[dotnet] project/assembly_name="How to live as a slime"` is set, but **no C# code exists yet — default to GDScript** (all installed skills assume GDScript). Ask before introducing C#.
 - Project root is this directory (`D:\how-to-live-as-a-slime`). `.godot/` is editor cache — never edit it by hand.
-- This is **not currently a git repository**. Ask before running `git init` or making the first commit.
+- This **is a git repository** now: `origin` → https://github.com/EN-rain/how-to-live-as-a-slime (public, `main`).
 - Godot is **not on PATH**. Open the project in the Godot 4.6 editor and press F5/F6 to run. If `godot` is added to PATH later, `godot --headless --import` is a cheap sanity check that the project parses.
-- There is **no test suite yet**, and no game code yet — the repo currently contains only the plan and the default icon.
+- There is a **headless smoke test** at `tests/smoke_test.tscn` (boot + eat/grow/dissolve/damage checks): `godot --headless --path . res://tests/smoke_test.tscn`. Main scene: `res://scenes/main.tscn`.
+- Validated headlessly with **Godot 4.6.stable**: import + 90 rendered frames, plus the smoke test (exit 0).
 
 ## Agent skills installed in `.agents/skills/`
 
@@ -66,6 +67,29 @@ Not installed (deliberately): the `awesome-gamedev-agent-skills` **router** (it 
 - **Scope:** 3 size tiers (bugs/critters/people), ~10–12 edibles, 2–3 enemy types for the prototype. Cut the rest for now.
 - **Growth:** scale player, camera distance, speed, jump and physics together; add a size gate.
 - **Darkness:** from the world's reactions and visual tone, not from story.
+
+## Current state (prototype pass 1 — all 8 steps, low quality)
+
+`scenes/main.tscn` is playable: eat, grow, camera pull-back, toon look, 11 edibles in 3 tiers, villagers + birds that flee/fight, juice (sound, particles, shake, HUD), restart on R.
+
+| File | Role |
+|---|---|
+| `scripts/main.gd` | World build (lighting, ground, trees, rocks), spawns, camera, shake, HUD, input map, restart |
+| `scripts/slime.gd` | Movement, squash & stretch, nutrition/size curve, eat detection |
+| `scripts/edible.gd` | 11 kinds (primitive meshes), size gate, absorb + dissolve tween |
+| `scripts/mob.gd` | Villager/bird FSM: wander / flee / chase+bite. Shared eat contract with `Edible` |
+| `scripts/toon_material.gd` | Cel material factory; inverted-hull outline as `next_pass` |
+| `scripts/lighting_preset.gd` | Vendored **verbatim** from the `godot-lighting-environment` skill (MIT) |
+| `shaders/` | `slime.gdshader` (wobble/cel/jelly), `toon.gdshader` (cel + dissolve), `outline.gdshader` |
+| `assets/sounds/pop.wav` | Generated procedurally (no external asset) |
+
+**Deliberate prototype shortcuts** (do not "fix" without asking):
+- Mobs use **steering, not `NavigationAgent3D`** — flat hand-placed map, no runtime navmesh bake. Swap when the map gains obstacles.
+- **Input actions are registered in `main.gd`**, not `project.godot`, to avoid desync during the prototype.
+- Edible/mob visuals are **built at runtime from primitives** inside their scenes; the scenes stay 3–4 nodes.
+- No menus, save system, win screen, or threat meter — all explicitly cut in the plan.
+
+**Tuning knobs:** `Slime.START_NUTRITION`/growth exponent, `Edible.KINDS`, `Mob.KINDS`, `EDIBLE_GROUPS` in `main.gd`, `BASE_SPEED`/`BASE_JUMP`.
 
 ## Working agreement
 
