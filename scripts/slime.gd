@@ -41,7 +41,7 @@ const HURT_FLASH_STRENGTH := 0.75
 @export var squash_recover: float = 10.0
 
 @export_group("Look")
-@export var body_color: Color = Color(0.55, 0.9, 0.65)
+@export var body_color: Color = Color(0.45, 0.92, 0.7)
 ## Size at which the pupils go pale (plan §7) and the HUD reads "Large".
 @export var top_tier_size: float = 2.6
 @export var pupil_color: Color = Color(0.05, 0.04, 0.08)
@@ -107,7 +107,7 @@ func _setup_materials() -> void:
 		_material = ShaderMaterial.new()
 		_material.shader = preload("res://shaders/slime.gdshader")
 		var outline := ShaderMaterial.new()
-		outline.shader = preload("res://shaders/outline.gdshader")
+		outline.shader = preload("res://shaders/slime_outline.gdshader")
 		outline.set_shader_parameter("outline_width", 0.03)
 		_material.next_pass = outline
 	_material.set_shader_parameter("base_color", _base_color)

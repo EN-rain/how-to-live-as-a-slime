@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://scripts/slime.gd" id="1_slime"]
 [ext_resource type="Shader" path="res://shaders/slime.gdshader" id="2_slime_shader"]
-[ext_resource type="Shader" path="res://shaders/outline.gdshader" id="3_outline_shader"]
+[ext_resource type="Shader" path="res://shaders/slime_outline.gdshader" id="3_outline_shader"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_outline"]
 render_priority = 0
@@ -14,7 +14,8 @@ shader_parameter/outline_color = Color(0.09, 0.07, 0.12, 1)
 render_priority = 0
 next_pass = SubResource("ShaderMaterial_outline")
 shader = ExtResource("2_slime_shader")
-shader_parameter/base_color = Color(0.55, 0.9, 0.65, 1)
+shader_parameter/base_color = Color(0.45, 0.92, 0.7, 1)
+shader_parameter/alpha = 0.62
 shader_parameter/wobble_amplitude = 0.04
 shader_parameter/wobble_speed = 4.2
 shader_parameter/flash = 0.0
@@ -62,26 +63,35 @@ right_pupil = NodePath("Body/RightEye/Pupil")
 eat_area = NodePath("EatArea")
 
 [node name="Body" type="MeshInstance3D" parent="."]
+cast_shadow = 0
 material_override = SubResource("ShaderMaterial_slime")
+mesh = SubResource("SphereMesh_body")
+
+[node name="ShadowProxy" type="MeshInstance3D" parent="."]
+cast_shadow = 3
 mesh = SubResource("SphereMesh_body")
 
 [node name="LeftEye" type="MeshInstance3D" parent="Body"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.17, 0.1, 0.42)
+cast_shadow = 0
 material_override = SubResource("StandardMaterial3D_eye")
 mesh = SubResource("SphereMesh_eye")
 
 [node name="Pupil" type="MeshInstance3D" parent="Body/LeftEye"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.06)
+cast_shadow = 0
 material_override = SubResource("StandardMaterial3D_pupil")
 mesh = SubResource("SphereMesh_pupil")
 
 [node name="RightEye" type="MeshInstance3D" parent="Body"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.1, 0.42)
+cast_shadow = 0
 material_override = SubResource("StandardMaterial3D_eye")
 mesh = SubResource("SphereMesh_eye")
 
 [node name="Pupil" type="MeshInstance3D" parent="Body/RightEye"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.06)
+cast_shadow = 0
 material_override = SubResource("StandardMaterial3D_pupil")
 mesh = SubResource("SphereMesh_pupil")
 

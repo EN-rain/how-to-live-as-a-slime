@@ -2,7 +2,13 @@ shader_type spatial;
 
 // Wobbling cel-shaded jelly shader for the player slime.
 // Uses an icosphere mesh so the multi-axis vertex wave deforms evenly without pole pinching.
-uniform vec4 base_color : source_color = vec4(0.55, 0.9, 0.65, 1.0);
+// The body is translucent so the ground and the slime's own eyes read through the jelly.
+render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+
+uniform vec4 base_color : source_color = vec4(0.45, 0.92, 0.7, 1.0);
+// Overall body opacity. The rim is made more opaque in fragment() so the
+// silhouette stays readable while the middle lets the world through.
+uniform float alpha : hint_range(0.15, 1.0, 0.01) = 0.62;
 uniform float wobble_amplitude : hint_range(0.0, 0.2, 0.005) = 0.04;
 uniform float wobble_speed : hint_range(0.5, 12.0, 0.1) = 4.2;
 uniform float flash : hint_range(0.0, 1.0, 0.01) = 0.0;
@@ -18,12 +24,18 @@ void vertex() {
 }
 
 void fragment() {
-	ALBEDO = mix(base_color.rgb, flash_color, clamp(flash, 0.0, 1.0));
+	float f = clamp(flash, 0.0, 1.0);
+	ALBEDO = mix(base_color.rgb, flash_color, f);
 	ROUGHNESS = 0.35;
 	METALLIC = 0.0;
-	// The camera looks at the slime's shaded side, so a little self-glow keeps
-	// the player readable instead of a black blob against the ground.
-	EMISSION = base_color.rgb * 0.08 + flash_color * (flash * 0.65);
+
+	// Facing ratio: 1 in the middle of the blob, 0 at the silhouette.
+	float facing = clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0);
+	float edge = pow(1.0 - facing, 2.0);
+	ALPHA = clamp(alpha + edge * 0.2 + f * 0.2, 0.0, 1.0);
+
+	// A little self-glow keeps the jelly readable against the ground.
+	EMISSION = base_color.rgb * 0.06 + flash_color * (f * 0.65);
 }
 
 void light() {
