@@ -72,6 +72,34 @@ class PropData extends RefCounted:
 	var is_static := false
 	var total_mass := 0.0
 	var absorbed_mass := 0.0
+	var real_volume := 0.0
+	var engulf_front := 0.0 # Physical penetration depth allowed during push-eating (0.0 to 1.0)
+
+	func calc_real_volume() -> float:
+		var sx := mesh.scale.x if mesh else radius
+		var sy := mesh.scale.y if mesh else radius
+		var sz := mesh.scale.z if mesh else radius
+		match shape:
+			SHAPE_BOX:
+				real_volume = (2.0 * half.x * sx) * (2.0 * half.y * sy) * (2.0 * half.z * sz)
+			SHAPE_PRISM:
+				var r := base_r * sx
+				var h := 2.0 * half.y * sy
+				if sides >= 3 and sides < 12:
+					var sector := TAU / float(sides)
+					var poly_area := 0.5 * float(sides) * r * r * sin(sector)
+					real_volume = poly_area * h
+				else:
+					real_volume = PI * r * r * h
+			SHAPE_CONE:
+				var r := base_r * sx
+				var h := 2.0 * half.y * sy
+				real_volume = (1.0 / 3.0) * PI * r * r * h
+			_:
+				real_volume = (4.0 / 3.0) * PI * pow(radius, 3.0)
+		total_mass = real_volume
+		return real_volume
+
 
 
 func _ready() -> void:
@@ -234,6 +262,7 @@ func _spawn_props() -> void:
 		_prop_root.add_child(mi)
 		p.mesh = mi
 		p.base_scale = mi.scale
+		p.calc_real_volume()
 		props.append(p)
 
 
@@ -263,6 +292,7 @@ func _spawn_test_structures() -> void:
 		p.mesh = mi
 		p.is_static = true
 		p.base_scale = mi.scale
+		p.calc_real_volume()
 		props.append(p)
 
 	# 2. Low Tunnel / Overhang Bridge: Clearance of 0.75m at (-10, 0, 8)
@@ -283,6 +313,7 @@ func _spawn_test_structures() -> void:
 	roof_mi.position = bridge_pos + Vector3(0.0, floor_y + 0.75 + 0.3, 0.0)
 	_prop_root.add_child(roof_mi)
 	roof_prop.mesh = roof_mi
+	roof_prop.calc_real_volume()
 	props.append(roof_prop)
 
 	for leg_side in [-1.0, 1.0]:
@@ -302,6 +333,7 @@ func _spawn_test_structures() -> void:
 		leg_mi.position = bridge_pos + Vector3(leg_side * 1.35, floor_y + 0.375, 0.0)
 		_prop_root.add_child(leg_mi)
 		leg_p.mesh = leg_mi
+		leg_p.calc_real_volume()
 		props.append(leg_p)
 
 
@@ -415,8 +447,9 @@ func _update_ground_support(s: Slime) -> void:
 			in_footprint = (d <= sup * 1.05)
 
 		if in_footprint:
-			# Slime must actually be above or stepping onto the top surface
-			if slime_bottom >= top_y - (0.15 * S):
+			# Slime stepping/climbing: step height scales with slime size (0.55 * S) or liquid climbing (0.75 * S)
+			var climb_reach := (0.75 * S) if s.liquid_amt > 0.3 else (0.55 * S)
+			if slime_bottom >= top_y - climb_reach:
 				if top_y > highest_top:
 					highest_top = top_y
 					found_prop = p
@@ -569,27 +602,36 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 		# Smooth funneling force: gently guide slime toward the gap centerline as it moves
 		var lateral_offset := (spx - best_center).dot(best_dir)
 		var to_gap := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z)
-		var moving_toward := s.velocity.dot(to_gap) > 0.0 or to_gap.length() < reach * 0.8
-		if moving_toward and (spx - best_center).length() < reach * 2.0:
-			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.4), 0.0, 1.0)
-			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 8.0 * dt
+		var moving_toward := s.velocity.dot(to_gap) > 0.0 or to_gap.length() < reach * 1.5
+		if moving_toward and (spx - best_center).length() < reach * 2.2:
+			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.6), 0.0, 1.0)
+			# Guide firmly along gap centerline
+			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 12.0 * dt
 			s.position += funnel_push
+			s.velocity -= Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 4.0 * dt
 
 	var squeeze_val := 1.0 - s.squeeze_k
 	s.set_shader_param("uSqueeze", squeeze_val)
 	s.set_shader_param("uSqueezeDir", s.sq_dir)
 
 
+func is_edible_by_push(s: Slime, p: PropData) -> bool:
+	if p.state != STATE_IDLE or p.is_static or p.mesh == null:
+		return false
+	# Authoritative volume check: Slime can push-eat anything whose real volume is <= Slime's real volume
+	return s.get_volume() >= p.real_volume * 0.98
+
+
 func _process_edible_props(s: Slime, dt: float) -> void:
 	var S := s.slime_scale
-	var sr := 1.8 * S
 	var sp := s.position
-	# Forgiving edible limit so slimes can still eat after splitting into smaller halves
-	var base_limit := maxf(1.6, sr * 0.95)
-	var edible_limit := base_limit
+	var s_vol := s.get_volume()
 
 	for p in props:
-		if p.state != STATE_IDLE or p.is_static or p.radius >= edible_limit:
+		if not is_edible_by_push(s, p):
+			# If this prop was being pressed by this slime but is no longer push-edible, decay its engulf_front
+			if p.last_presser == s:
+				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
 			continue
 		var m := p.mesh
 		var dx := m.position.x - sp.x
@@ -606,20 +648,19 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 			ro = _poly_support(p, -dx / d, -dz / d) * (0.6 if p.shape == SHAPE_CONE else 1.0)
 
 		var sr_p := _surf_r((m.position.y - sp.y) / S) * S
-		# NOTE: Do NOT expand sr_p in liquid mode here â€” the Z-key engulf system in slime.gd
-		# handles liquid absorption exclusively. Expanding sr_p here causes siphoning where
-		# objects get sucked in from a distance just because Z is held.
 
 		var target := maxf(0.0, sr_p + ro - d)
 		if target <= 0.001:
-			# If this slime was the one pressing this prop, smoothly decay its press spring back to 0
+			# If this slime was pressing this prop, smoothly decay its press spring & engulf front back out
 			if p.last_presser == s:
+				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
 				var acc := 140.0 * (0.0 - p.pd) - 8.0 * p.pv
 				p.pv += acc * dt
 				p.pd += p.pv * dt
-				if p.pd <= 0.001:
+				if p.pd <= 0.001 and p.engulf_front <= 0.001:
 					p.pd = 0.0
 					p.pv = 0.0
+					p.engulf_front = 0.0
 					p.last_presser = null
 					p.hold = 0.0
 			continue
@@ -632,8 +673,10 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 				continue
 
 		p.last_presser = s
-		var q := minf(1.0, p.radius / edible_limit)
-		var thr := ro * (0.85 + 0.45 * q) + 0.1 * S
+		# Compute exact relative volume ratio (prop volume / slime volume)
+		var vol_ratio := clampf(p.real_volume / maxf(1e-4, s_vol), 0.0, 1.0)
+
+		var thr := ro * (0.85 + 0.45 * vol_ratio) + 0.1 * S
 		var press01 := minf(target / thr, 1.0)
 		var acc := 140.0 * (target - p.pd) - 8.0 * p.pv
 		p.pv += acc * dt
@@ -645,32 +688,41 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		p.p_ro = ro
 		p.p_thr = thr
 
-		if press01 > 0.0:
-			var nx0 := dx / d
-			var nz0 := dz / d
-			var x := minf(press01 / 0.85, 1.0)
-			var e := x * x * (3.0 - 2.0 * x)
-			# Never freeze player movement completely so they can push into and absorb props smoothly
-			var cap := maxf(s.cur_max * 0.35, s.cur_max * (1.0 - (0.2 + 0.5 * q * q) * e))
-			var vin := s.velocity.x * nx0 + s.velocity.z * nz0
-			if vin > cap:
-				s.velocity.x -= nx0 * (vin - cap)
-				s.velocity.z -= nz0 * (vin - cap)
+		# Section 1: Physical Engulf-Front Resistance
+		# Instead of a velocity cap that running bypasses, constrain slime's physical position
+		# to a moving engulf front that advances only with sustained pushing!
+		var nx0 := dx / d
+		var nz0 := dz / d
+		var inward_speed := s.velocity.x * nx0 + s.velocity.z * nz0
 
-		if target >= thr:
-			var eat_rate := 2.0
-			p.hold += dt * eat_rate
+		# Advance engulf front when pushing inward; push back out if backing away
+		if inward_speed > 0.1:
+			# Advance rate scales down as prop size approaches slime size:
+			# < 10% ratio: nearly instant (rate ~ 5.0)
+			# 50% ratio: moderate strain (rate ~ 1.5)
+			# 90% ratio: heavy wall strain (rate ~ 0.35)
+			var advance_rate := 4.0 * pow(1.0 - vol_ratio, 1.6) + 0.25
+			p.engulf_front = minf(1.0, p.engulf_front + advance_rate * dt)
 		else:
-			p.hold = maxf(0.0, p.hold - dt * 1.5)
+			# Push back: if player stops pushing, engulf front recedes
+			p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
 
-		if target >= thr and p.hold >= (0.05 + 0.15 * q):
-			# Absorb excess inward momentum so slime doesn't lurch when velocity cap disappears
-			var enx := dx / d
-			var enz := dz / d
-			var evin := s.velocity.x * enx + s.velocity.z * enz
-			if evin > s.walk_speed:
-				s.velocity.x -= enx * (evin - s.walk_speed)
-				s.velocity.z -= enz * (evin - s.walk_speed)
+		# Physical positional constraint: slime body cannot penetrate deeper than allowed by current engulf_front!
+		var max_allowed_pen := (sr_p + ro) * p.engulf_front
+		var current_pen := target
+		if current_pen > max_allowed_pen:
+			var over_pen := current_pen - max_allowed_pen
+			# Constrain position so slime cannot push through before engulf front opens
+			s.position.x -= nx0 * over_pen * 0.95
+			s.position.z -= nz0 * over_pen * 0.95
+			# Zero out inward penetration velocity against the engulf front wall
+			var vin := s.velocity.x * nx0 + s.velocity.z * nz0
+			if vin > 0.0:
+				s.velocity.x -= nx0 * vin
+				s.velocity.z -= nz0 * vin
+
+		# Absorption completes when engulf front has fully enclosed the prop (>= 0.95)
+		if p.engulf_front >= 0.95:
 			p.state = STATE_EATING
 			p.eater = s
 			p.last_presser = null
@@ -679,7 +731,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 			p.t = 0.0
 			p.start = m.position
 			p.off = Vector3(_rng.randf() - 0.5, -0.1 + _rng.randf() * 0.3, _rng.randf() - 0.5)
-			p.total_mass = pow(p.radius, 3.0) * 0.3
+			p.total_mass = p.real_volume
 			p.absorbed_mass = 0.0
 			eaten_changed.emit(eaten)
 
@@ -698,13 +750,14 @@ class ContactInfo extends RefCounted:
 
 func _solve_solid_collisions(s: Slime, dt: float) -> void:
 	var S := s.slime_scale
-	var lim := maxf(1.4, 1.8 * S * 0.95)
-
-	# Gather contacts from all solid props in range
+	# Gather contacts from all solid props:
+	# A prop is SOLID if it is NOT edible by push and is not our current ground support!
 	var contacts: Array[ContactInfo] = []
 	for p in props:
-		# Static walls always collide regardless of radius; moveable props only collide if large enough
-		if p.state != STATE_IDLE or (not p.is_static and p.radius < lim) or p == s.ground_prop:
+		if p.state != STATE_IDLE or p == s.ground_prop:
+			continue
+		# If it's edible by push, it's handled by engulf-front resistance, NOT solid collision solver!
+		if is_edible_by_push(s, p):
 			continue
 		var c := _detect_prop_contact(s, p)
 		if c != null and c.pen > 0.0:
@@ -1109,7 +1162,8 @@ func _update_digesting_props(dt: float) -> void:
 			var dis := maxf(0.0, 1.0 - maxf(0.0, p.t - EAT_TIME) / EAT_LINGER)
 			var shrink := maxf(0.001, (1.0 - 0.35 * e) * (0.65 + 0.35 * dis))
 			p.mesh.scale = p.base_scale * shrink
-			p.material.set_shader_parameter("uDissolve", 1.0 - dis)
+			if p.material != null:
+				p.material.set_shader_parameter("uDissolve", 1.0 - dis)
 			p.mesh.rotation.y += dt * 0.4
 
 			# Smoothly transfer digested mass into slime size progression
@@ -1122,9 +1176,11 @@ func _update_digesting_props(dt: float) -> void:
 				var delta_m: float = target_absorbed - p.absorbed_mass
 				if delta_m > 0.0:
 					p.absorbed_mass = target_absorbed
-					# Growth cap: slime cannot exceed 4× its starting scale (prevents clipping through everything)
-					var growth_cap := s.start_scale * 4.0
-					s.target_scale = minf(growth_cap, pow(pow(s.target_scale, 3.0) + delta_m, 1.0 / 3.0))
+					# Authoritative volume transfer: add prop volume directly into slime target scale
+					# Volume = (4/3)*PI*(body_radius*target_scale)^3
+					# target_scale_new = (target_scale^3 + delta_m / ((4/3)*PI*body_radius^3))^(1/3)
+					var vol_factor := (4.0 / 3.0) * PI * pow(s.body_radius, 3.0)
+					s.target_scale = pow(pow(s.target_scale, 3.0) + (delta_m / vol_factor), 1.0 / 3.0)
 
 				var S: float = s.slime_scale
 				if p.t < EAT_TIME:

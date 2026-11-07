@@ -55,8 +55,8 @@ enum Role {
 @export var start_facing := 0.45
 
 @export_group("Liquid and Engulf")
-@export var liquid_height_ratio := 0.25
-@export var liquid_spread_ratio := 1.85
+@export var liquid_height_ratio := 0.22
+@export var liquid_spread_ratio := 2.13
 @export var liquid_clearance_ratio := 0.12
 @export var devour_duration := 1.6
 
@@ -158,6 +158,16 @@ var _lean_vel := Vector3.ZERO
 var time: float:
 	get:
 		return _time
+
+
+func get_volume() -> float:
+	## Authoritative volume of the slime based on target_scale
+	return (4.0 / 3.0) * PI * pow(body_radius * target_scale, 3.0)
+
+
+func get_visual_volume() -> float:
+	return (4.0 / 3.0) * PI * pow(body_radius * slime_scale, 3.0)
+
 
 
 func _ready() -> void:
@@ -677,10 +687,14 @@ func _process_vertical(dt: float) -> void:
 
 	# Fix 6: Before standing back up from liquid, check for overhead clearance.
 	# If a prop is in the way, stay flat (liquid_clearance_ratio height) rather than getting ejected sideways.
+	# Overhead clearance check:
+	# Keep the base firmly anchored to support_y, and pass headroom compression to shader,
+	# NEVER sink the node position.y into the floor!
 	var target_y := full_target_y
+	var overhead_compression := 1.0
 	if liquid_amt > 0.05 and props != null:
-		var full_top := position.y + height_per_scale * S
-		var flat_top := position.y + height_per_scale * S * liquid_height_ratio
+		var full_top := support_y + (2.0 * height_per_scale * S)
+		var flat_top := support_y + (2.0 * height_per_scale * S * liquid_height_ratio)
 		var slime_r := body_radius * S
 		var overhead_blocked := false
 		for p in props.props:
@@ -689,23 +703,20 @@ func _process_vertical(dt: float) -> void:
 			var m := p.mesh
 			var he := props._half_of(p)
 			var prop_bottom := m.position.y - he.y
-			# Only care about props above us
-			if prop_bottom < flat_top:
+			if prop_bottom < flat_top or prop_bottom > full_top + 0.2:
 				continue
-			# Check horizontal overlap
 			var dx := m.position.x - position.x
 			var dz := m.position.z - position.z
 			var dist_h := Vector2(dx, dz).length()
 			if dist_h < slime_r + maxf(he.x, he.z) * 0.9:
-				# There's something above us — only rise as high as it allows
-				var allowed_top := prop_bottom - 0.05 * S
-				var allowed_y := allowed_top - height_per_scale * S * (1.0 - liquid_height_ratio)
-				target_y = minf(full_target_y, maxf(support_y + height_per_scale * S * liquid_height_ratio, allowed_y))
 				overhead_blocked = true
+				var available_height := maxf(0.1, prop_bottom - support_y)
+				overhead_compression = clampf(available_height / (2.0 * height_per_scale * S), liquid_height_ratio, 1.0)
 				break
-		# If overhead_blocked and Z was just released, keep liquid_mode on until we have room
 		if overhead_blocked and not liquid_mode and role == Role.PLAYER:
 			liquid_mode = true
+
+	set_shader_param("uOverheadCompress", overhead_compression)
 
 	# Fix 25: When shrinking (target_scale < slime_scale), target_y drops and would trigger
 	# gravity fall. Instead, lerp down smoothly to avoid a micro-bounce on every split/merge.
@@ -730,53 +741,59 @@ func _process_vertical(dt: float) -> void:
 
 func _process_engulf(dt: float) -> void:
 	# Liquid mode (Z key) engulfing:
-	# If on top of an object, or covering an object with the liquid body (except bottom),
+	# If covering an object with the liquid body from above or all around,
 	# the slime drapes over and devours the object!
-	# Only run while Z is intentionally held — don't allow completion after release.
+	# NO arbitrary radius cutoffs — eligibility is determined by physical coverage and volume budget!
 	var target_p = null
 	if liquid_mode and liquid_amt > 0.35 and props != null:
 		var S := slime_scale
 		var spread := lerpf(1.0, liquid_spread_ratio, liquid_amt)
 		var puddle_radius := body_radius * S * spread
-		var slime_bottom := position.y - height_per_scale * S * liquid_height_ratio * 0.5
+		# Actual liquid puddle bottom sits at support_y / floor_y:
+		var puddle_bottom := support_y
+		var my_volume := get_volume()
 
-		# 1. If standing on top of a prop AND the puddle fully covers it horizontally
-		if ground_prop != null and ground_prop.state == SlimeProps.STATE_IDLE and not ground_prop.get("is_static") and ground_prop.radius < body_radius * S * 0.75 * 1.5:
-			var gm: MeshInstance3D = ground_prop.mesh
-			if gm != null and is_instance_valid(gm):
-				var ghe: Vector3 = ground_prop.half * gm.scale.x
-				var gprop_r: float = Vector2(ghe.x, ghe.z).length()
-				var gflat_d: float = Vector2(position.x - gm.position.x, position.z - gm.position.z).length()
-				# Only engulf if puddle fully encloses the entire prop footprint (including corners)
-				if gflat_d + gprop_r <= puddle_radius * 1.02:
-					target_p = ground_prop
+		# Check props: prioritize currently mounted ground_prop if any, else check nearby props
+		var candidates: Array = []
+		if ground_prop != null and ground_prop.state == SlimeProps.STATE_IDLE and not ground_prop.is_static:
+			candidates.append(ground_prop)
+		for p in props.props:
+			if p.state == SlimeProps.STATE_IDLE and not p.is_static and p != ground_prop:
+				candidates.append(p)
 
-		if target_p == null:
-			# 2. Check all props to see if the slime is covering or directly over one
-			var best_score := -INF
-			for p in props.props:
-				if p.state != SlimeProps.STATE_IDLE or p.get("is_static") or p.radius >= body_radius * S * 0.75 * 1.5:
-					continue
-				var m: MeshInstance3D = p.mesh
-				if m == null or not is_instance_valid(m):
-					continue
-				var he: Vector3 = p.half * m.scale.x
-				var prop_r: float = Vector2(he.x, he.z).length()
-				var prop_top: float = m.position.y + he.y
-				var prop_bottom: float = m.position.y - he.y
+		var best_score := -INF
+		for p in candidates:
+			var m: MeshInstance3D = p.mesh
+			if m == null or not is_instance_valid(m):
+				continue
+			var he: Vector3 = props._half_of(p)
+			var prop_top: float = m.position.y + he.y
+			var prop_bottom: float = m.position.y - he.y
 
-				var flat_d: float = Vector2(position.x - m.position.x, position.z - m.position.z).length()
+			# Section 4 Volume budget: covering requires enough slime volume to form a shell
+			# Shell area approx = top footprint + side walls
+			var top_area := 4.0 * he.x * he.z if p.shape == SlimeProps.SHAPE_BOX else (PI * he.x * he.z)
+			var side_area := (4.0 * he.x + 4.0 * he.z) * (2.0 * he.y)
+			var min_shell_thickness := 0.08 * S
+			var needed_shell_volume := (top_area + side_area) * min_shell_thickness
+			if my_volume < needed_shell_volume * 0.8:
+				continue # Slime doesn't have enough volume to cover this shape
 
-				# Condition: Slime's liquid body FULLY covers the object
-				var covers_horiz := (flat_d + prop_r <= puddle_radius * 1.02)
-				# Vertically: slime bottom must actually touch or be resting on prop within reach
-				var touches_vert := (slime_bottom >= prop_bottom - 0.3 * S) and (slime_bottom <= prop_top + 0.5 * S)
+			var flat_d: float = Vector2(position.x - m.position.x, position.z - m.position.z).length()
 
-				if covers_horiz and touches_vert:
-					var score: float = 100.0 - flat_d
-					if score > best_score:
-						best_score = score
-						target_p = p
+			# Coverage check against real footprint (corner / vertex reach):
+			var prop_max_r: float = Vector2(he.x, he.z).length()
+			var covers_horiz := (flat_d + prop_max_r <= puddle_radius * 1.05)
+
+			# Vertical reach: slime must be atop or draping down over the prop
+			var touches_vert := (puddle_bottom <= prop_top + 0.3 * S) and (position.y + 0.5 * S >= prop_bottom)
+
+			if covers_horiz and touches_vert:
+				var score: float = 1000.0 - flat_d
+				if score > best_score:
+					best_score = score
+					target_p = p
+				break # Found best valid candidate (prioritized ground_prop)
 
 	if target_p != null:
 		if engulf_target != target_p:

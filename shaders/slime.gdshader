@@ -80,6 +80,7 @@ uniform vec3 uSqueezeDir = vec3(1.0, 0.0, 0.0);
 
 // Liquid puddle mode (hold Z key): flattens height, spreads outward, passes through small holes
 uniform float uLiquid = 0.0;
+uniform float uOverheadCompress = 1.0;
 
 // Engulf drape mode (holding Z on top of a larger object)
 uniform vec3 uDrapePos = vec3(0.0);
@@ -294,14 +295,18 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 
 	if (uLiquid > 0.001) {
-		// Liquid puddle flattening: height squashes to 22%, radius expands along passage
-		float liqH = mix(1.0, 0.22, uLiquid);
-		float liqR = mix(1.0, 1.75, uLiquid);
+		// Volume-preserving liquid puddle flattening:
+		// At 22% height, conservation of volume requires spread = 1 / sqrt(0.22) ≈ 2.13x.
+		float targetH = 0.22 * uOverheadCompress;
+		float liqH = mix(1.0, targetH, uLiquid);
+		float liqR = mix(1.0, 1.0 / sqrt(max(0.04, targetH)), uLiquid);
 		if (uSqueeze > 0.001) {
 			vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
+			vec2 fwdFlow = vec2(-sqd.y, sqd.x);
 			float sqa = dot(p.xz, sqd);
-			vec2 sqp = p.xz - sqd * sqa;
-			p.xz = sqd * sqa + sqp * mix(1.0, liqR, uLiquid);
+			float flowDist = dot(p.xz, fwdFlow);
+			// Area-preserving squeeze in liquid: compressing sqd axis expands fwdFlow proportionally
+			p.xz = sqd * (sqa * mix(1.0, 0.45, uLiquid)) + fwdFlow * (flowDist * mix(1.0, liqR * 1.25, uLiquid));
 		} else {
 			p.xz *= liqR;
 		}

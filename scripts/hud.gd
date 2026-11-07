@@ -56,14 +56,24 @@ func _process(_delta: float) -> void:
 	if slime == null or props == null:
 		return
 
-	var mass := pow(slime.slime_scale, 3.0)
+	# Authoritative volume and mass calculations
+	var mass := slime.get_volume()
 	var clone_count := maxi(0, props.registered_slimes.size() - 1)
-	var text := "Eaten %d / %d  ·  Mass %.1f (Size %.2f×)" % [props.eaten, props.total(), mass, slime.slime_scale]
+	var text := "Eaten %d / %d  ·  Vol %.1f m³ (Scale %.2f×)" % [props.eaten, props.total(), mass, slime.target_scale]
 	if clone_count > 0:
 		text += "  ·  Clones: %d" % clone_count
 
-	if slime.engulf_progress > 0.05:
-		text += "  ·  Engulfing %d%%" % int(slime.engulf_progress * 100.0)
+	# Check active push-eating engulf front or Z-cover progress
+	var active_engulf_p = null
+	for p in props.props:
+		if p.last_presser == slime and p.engulf_front > 0.01:
+			active_engulf_p = p
+			break
+
+	if active_engulf_p != null:
+		text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
+	elif slime.engulf_progress > 0.05:
+		text += "  ·  Z-Drape %d%%" % int(slime.engulf_progress * 100.0)
 	elif slime.liquid_amt > 0.5:
 		text += "  ·  [Liquid Mode]"
 
