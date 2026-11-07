@@ -275,15 +275,21 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 
 	if (uSqueeze > 0.001) {
-		// Squeezing through a gap: compress along gap axis, stretch along passage
+		// Squeezing through a gap: bottleneck constriction along flow passage (neck pinched, front/rear bulges)
 		float sq = clamp(uSqueeze, 0.0, 0.94);
 		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
+		vec2 fwdFlow = vec2(-sqd.y, sqd.x);
 		float sqa = dot(p.xz, sqd);
-		vec2 sqp = p.xz - sqd * sqa;
-		float widthScale = max(0.06, 1.0 - sq);
-		float lengthScale = 1.0 + sq * 0.85;
-		float heightScale = 1.0 + sq * 0.40 * (1.0 - uLiquid);
-		p.xz = sqd * sqa * widthScale + sqp * lengthScale;
+		float flowDist = dot(p.xz, fwdFlow);
+		// Local neck constriction: maximum compression at neck (flowDist ~ 0), relaxing towards front and rear
+		float neckProfile = exp(-flowDist * flowDist * 1.6);
+		float localSq = sq * mix(0.4, 1.0, neckProfile);
+		float widthScale = max(0.08, 1.0 - localSq);
+		// Front and rear bulge out to conserve fluid volume
+		float bulge = sq * (1.0 - neckProfile) * 0.45;
+		float lengthScale = 1.0 + sq * 0.75 + bulge;
+		float heightScale = 1.0 + localSq * 0.35 * (1.0 - uLiquid);
+		p.xz = sqd * (sqa * widthScale) + fwdFlow * (flowDist * lengthScale);
 		p.y = groundFloor + (p.y - groundFloor) * heightScale;
 	}
 

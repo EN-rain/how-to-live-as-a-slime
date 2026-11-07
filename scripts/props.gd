@@ -36,11 +36,9 @@ var registered_slimes: Array[Slime] = []
 var player_slime: Slime = null
 var eaten := 0
 
-var _frame_dt := 1.0 / 60.0
 var _rng := RandomNumberGenerator.new()
 var _prop_root: Node3D
 var _floor_mat: ShaderMaterial
-var _respawn_timer := 0.0
 
 
 class PropData extends RefCounted:
@@ -75,12 +73,11 @@ class PropData extends RefCounted:
 	var total_mass := 0.0
 	var absorbed_mass := 0.0
 
-	var top_y: float:
-		get:
-			return mesh.position.y + half.y * mesh.scale.x
-
 
 func _ready() -> void:
+	# Run after Slimes (priority 0) update their positions, so collisions resolve before render
+	process_priority = 1
+
 	if prop_shader == null:
 		prop_shader = load("res://shaders/prop.gdshader")
 	if spawn_seed == 0:
@@ -93,8 +90,13 @@ func _ready() -> void:
 	if floor_mesh:
 		_floor_mat = floor_mesh.material_override as ShaderMaterial
 
-	_spawn_props()
+	_prop_root = Node3D.new()
+	_prop_root.name = "Generated"
+	add_child(_prop_root)
+
+	# Spawn test structures FIRST so random props avoid blocking the test gate and bridge!
 	_spawn_test_structures()
+	_spawn_props()
 
 	if slime != null:
 		register_slime(slime)
@@ -126,10 +128,6 @@ func unregister_slime(s: Slime) -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _spawn_props() -> void:
-	_prop_root = Node3D.new()
-	_prop_root.name = "Generated"
-	add_child(_prop_root)
-
 	var makers := [
 		{"shape": SHAPE_BOX, "size": Vector3(1.4, 1.4, 1.4)},
 		{"shape": SHAPE_BOX, "size": Vector3(1.4, 1.4, 1.4)},
@@ -335,7 +333,6 @@ func _hue(p: float, q: float, t: float) -> float:
 
 func _process(delta: float) -> void:
 	var dt := minf(delta, 0.05)
-	_frame_dt = dt
 
 	for s in registered_slimes:
 		if is_instance_valid(s):
@@ -458,18 +455,14 @@ func _prop_closest_surface_point(p: PropData, target: Vector2) -> Vector2:
 		return Vector2(m.position.x + ux * sup, m.position.z + uz * sup)
 
 
-var _current_gap_center := Vector2.ZERO
-var _current_gap_w := INF
-var _current_gap_dir := Vector2.ZERO
-
-
 func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	var S := s.slime_scale
 	var sp := s.position
 
+	# Fix 17: Don't allow liquid to flatten to paper-thin (0.05). Use 0.12 minimum.
 	var effective_min_squeeze := min_squeeze
 	if s.liquid_amt > 0.01:
-		effective_min_squeeze = lerpf(min_squeeze, 0.05, s.liquid_amt)
+		effective_min_squeeze = lerpf(min_squeeze, 0.12, s.liquid_amt)
 
 	var r_max := 0.0
 	for k in 6:
@@ -484,8 +477,13 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	for p in props:
 		if p.state != STATE_IDLE or p == s.ground_prop or p.mesh == null:
 			continue
+		# Fix 18: Exclude elevated static overhangs (bridge roof/legs) from gap pairing —
+		# they are ceilings, not side walls, and create false near-zero gaps.
 		var m := p.mesh
 		var he := _half_of(p)
+		var prop_bottom := m.position.y - he.y
+		if p.is_static and prop_bottom > floor_y + 0.5:
+			continue
 		if maxf(m.position.y - he.y, floor_y) > minf(m.position.y + he.y, slime_top):
 			continue
 		var d_sq := Vector2(m.position.x - sp.x, m.position.z - sp.z).length_squared()
@@ -499,6 +497,7 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	var best_dir := Vector2.ZERO
 	var best_center := Vector2.ZERO
 	var best_dist := INF
+	var best_flow_dir := Vector2.ZERO
 
 	for i in nearby_props.size():
 		var p1 := nearby_props[i]
@@ -521,28 +520,42 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			var to_gap := spx - gap_center
 			var dist_along_flow := absf(to_gap.dot(flow_dir))
 			var dist_lateral := absf(to_gap.dot(gap_dir))
-			var dist_total := to_gap.length()
 
 			if dist_along_flow < reach * 2.5 and dist_lateral < (gap_w * 0.5 + reach * 1.5):
 				best_w = gap_w
 				best_dir = gap_dir
 				best_center = gap_center
-				best_dist = dist_total
+				best_dist = to_gap.length()
+				best_flow_dir = flow_dir
 
-	_current_gap_w = best_w
-	_current_gap_center = best_center
-	_current_gap_dir = best_dir
+	s.cur_gap_w = best_w
+	s.cur_gap_center = best_center
+	s.cur_gap_dir = best_dir
 
 	var target := 1.0
 	if best_w < INF:
 		var fit := clampf((best_w * 0.5 - 0.02 * S) / r_max, effective_min_squeeze, 1.0)
 		if fit < 1.0:
-			# Proximity squeeze: as slime approaches the gap, it smoothly tapers down to fit!
-			var prox := clampf(1.0 - (best_dist - reach * 0.6) / (reach * 1.8), 0.0, 1.0)
-			prox = prox * prox * (3.0 - 2.0 * prox)
-			target = lerpf(1.0, fit, prox)
+			var to_gap_vec := spx - best_center
+			var dist_flow := absf(to_gap_vec.dot(best_flow_dir))
+			var dist_lat := absf(to_gap_vec.dot(best_dir))
+			# Squeeze begins on physical contact as the slime's front boundary reaches the opening
+			# (pillar depth half ~0.6m + slime radius ~2.15m = ~2.75m = ~1.32 * reach)
+			var touch_dist := reach * 1.35
+			if dist_flow < touch_dist and dist_lat < (best_w * 0.5 + reach):
+				var prox := clampf(1.0 - dist_flow / touch_dist, 0.0, 1.0)
+				prox = prox * prox * (3.0 - 2.0 * prox)
+				var lat_factor := clampf(1.0 - dist_lat / (best_w * 0.5 + reach * 0.8), 0.0, 1.0)
+				target = lerpf(1.0, fit, prox * lat_factor)
 
-	var rate := squeeze_in_rate if target < s.squeeze_k else squeeze_out_rate
+	# Fix 16: Once slime has fully passed through, release squeeze quickly using squeeze_in_rate
+	var rate: float
+	if target < s.squeeze_k:
+		rate = squeeze_in_rate  # squeezing in (tightening)
+	else:
+		# Releasing — use squeeze_in_rate if the body is clearly past the gap to snap back
+		var past_gap := best_w == INF or absf((spx - best_center).dot(best_flow_dir)) > reach * 1.5
+		rate = squeeze_in_rate if past_gap else squeeze_out_rate
 	s.squeeze_k = clampf(s.squeeze_k + (target - s.squeeze_k) * (1.0 - exp(-rate * dt)), effective_min_squeeze, 1.0)
 
 	if target < 0.98 and best_dir.length_squared() > 0.001:
@@ -566,31 +579,6 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	s.set_shader_param("uSqueeze", squeeze_val)
 	s.set_shader_param("uSqueezeDir", s.sq_dir)
 
-func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float, s: Slime) -> Variant:
-	var m := p.mesh
-	var he := _half_of(p)
-	var dx := m.position.x - sp.x
-	var dz := m.position.z - sp.z
-	var d := maxf(Vector2(dx, dz).length(), 1e-4)
-	if d - Vector2(he.x, he.z).length() > reach:
-		return null
-	var slime_bottom := sp.y - s.height_per_scale * S
-	var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
-	if maxf(m.position.y - he.y, floor_y) > minf(m.position.y + he.y, slime_effective_top):
-		return null
-
-	if p.shape == SHAPE_BOX:
-		var c := cos(m.rotation.y)
-		var sn := sin(m.rotation.y)
-		var lx := -dx * c + dz * sn
-		var lz := -dx * sn - dz * c
-		var cx := clampf(lx, -he.x, he.x)
-		var cz := clampf(lz, -he.z, he.z)
-		return Vector2(m.position.x + cx * c + cz * sn, m.position.z - cx * sn + cz * c)
-
-	var sup := _poly_support(p, -dx / d, -dz / d) * (0.6 if p.shape == SHAPE_CONE else 1.0)
-	return Vector2(m.position.x - dx / d * sup, m.position.z - dz / d * sup)
-
 
 func _process_edible_props(s: Slime, dt: float) -> void:
 	var S := s.slime_scale
@@ -598,7 +586,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 	var sp := s.position
 	# Forgiving edible limit so slimes can still eat after splitting into smaller halves
 	var base_limit := maxf(1.6, sr * 0.95)
-	var edible_limit := base_limit * (1.5 if s.liquid_amt > 0.1 else 1.0)
+	var edible_limit := base_limit
 
 	for p in props:
 		if p.state != STATE_IDLE or p.is_static or p.radius >= edible_limit:
@@ -670,7 +658,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 				s.velocity.z -= nz0 * (vin - cap)
 
 		if target >= thr:
-			var eat_rate := 3.5 if s.liquid_amt > 0.3 else 2.0
+			var eat_rate := 2.0
 			p.hold += dt * eat_rate
 		else:
 			p.hold = maxf(0.0, p.hold - dt * 1.5)
@@ -715,7 +703,8 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 	# Gather contacts from all solid props in range
 	var contacts: Array[ContactInfo] = []
 	for p in props:
-		if p.state != STATE_IDLE or p.radius < lim or p == s.ground_prop:
+		# Static walls always collide regardless of radius; moveable props only collide if large enough
+		if p.state != STATE_IDLE or (not p.is_static and p.radius < lim) or p == s.ground_prop:
 			continue
 		var c := _detect_prop_contact(s, p)
 		if c != null and c.pen > 0.0:
@@ -734,8 +723,16 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 			var c1 := contacts[1]
 			var pen0 := _calc_prop_penetration(s, c0.prop, c0.c_r)
 			var pen1 := _calc_prop_penetration(s, c1.prop, c1.c_r)
-			# Symmetrically center the slime directly between the opposing walls
+			# Symmetrically center the slime directly between opposing walls
 			var net_push := (c0.normal * pen0 + c1.normal * pen1) * 0.5
+			# When between two different props (corridor passage), only push laterally — don't push backward along flow!
+			if c0.prop != c1.prop:
+				var lat_axis := s.sq_dir if s.sq_dir.length_squared() > 0.01 else (c0.normal - c1.normal).normalized()
+				net_push = lat_axis * net_push.dot(lat_axis)
+				# Also adapt squeeze immediately upon physical double-wall contact
+				if s.cur_gap_w < INF:
+					var fit_k := clampf((s.cur_gap_w * 0.5) / maxf(0.1, c0.c_r), 0.08, 1.0)
+					s.squeeze_k = minf(s.squeeze_k, lerpf(s.squeeze_k, fit_k, 0.4))
 			if net_push.length_squared() > 1e-6:
 				s.position.x += net_push.x
 				s.position.z += net_push.z
@@ -777,8 +774,8 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 				corridor_dir = Vector3(-n_across.z, 0.0, n_across.x).normalized()
 
 			var input_dir := s.velocity
-			if input_dir.length_squared() < 0.01 and s.mesh:
-				input_dir = -s.mesh.global_transform.basis.z
+			if input_dir.length_squared() < 0.01:
+				input_dir = s._crawl_dir  # Slime has no .mesh; use _crawl_dir which is always valid
 			if corridor_dir.dot(input_dir) < 0.0:
 				corridor_dir = -corridor_dir
 
@@ -818,7 +815,8 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 			var tangent := Vector3(v.x / vt_len, 0.0, v.z / vt_len)
 			if s.squeeze_k < 0.95 or c0.sharp > 0.15:
 				# Near openings or around corners: zero friction, slight fluid flow deflection around corner
-				var flow_boost := vin * (0.35 if s.squeeze_k < 0.95 else (0.25 * c0.sharp))
+				# Cap flow_boost to 0.15x to prevent runaway speed at triangle/cone vertices
+				var flow_boost := vin * minf(0.15, (0.35 if s.squeeze_k < 0.95 else (0.25 * c0.sharp)))
 				s.velocity = tangent * (vt_len + flow_boost)
 			else:
 				# Flat wall impact with viscous drag clinging
@@ -828,14 +826,14 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 			# Head-on impact (vt_len <= 1e-4)
 			# Deflect along tangent towards the gap opening so slime slides smoothly into the opening
 			var tangent := Vector3(-nz, 0.0, nx)
-			if _current_gap_w < INF:
-				var to_gap := Vector3(_current_gap_center.x - s.position.x, 0.0, _current_gap_center.y - s.position.z)
+			if s.cur_gap_w < INF:
+				var to_gap := Vector3(s.cur_gap_center.x - s.position.x, 0.0, s.cur_gap_center.y - s.position.z)
 				if tangent.dot(to_gap) < 0.0:
 					tangent = -tangent
 				s.velocity = tangent * maxf(vin * 0.8, 2.0)
 			else:
-				var to_prop := Vector3(c0.prop.mesh.position.x - s.position.x, 0.0, c0.prop.mesh.position.z - s.position.z)
-				if tangent.dot(to_prop) > 0.0:
+				# Use crawl_dir as stable tiebreak — to_prop is always perpendicular and flips each frame
+				if tangent.dot(s._crawl_dir) < 0.0:
 					tangent = -tangent
 				s.velocity = tangent * maxf(vin * 0.2, 0.5)
 
@@ -983,8 +981,31 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 			if eff_rs + reach - d > pen:
 				pen = eff_rs + reach - d
 				c_r = eff_rs
-		nx = ux
-		nz = uz
+		if p.sides >= 3 and p.sides < 12:
+			var ca := cos(m.rotation.y)
+			var sa := sin(m.rotation.y)
+			var lx := ux * ca - uz * sa
+			var lz := ux * sa + uz * ca
+			var sector := TAU / p.sides
+			var phi := atan2(lx, lz) - p.phase
+			var d_sec := fmod(phi, sector)
+			if d_sec < 0.0:
+				d_sec += sector
+			var face_local_ang := atan2(lx, lz) - d_sec + sector * 0.5
+			var fn_lx := sin(face_local_ang)
+			var fn_lz := cos(face_local_ang)
+			var fn_wx := fn_lx * ca + fn_lz * sa
+			var fn_wz := -fn_lx * sa + fn_lz * ca
+			# Blend between flat face normal and vertex radial normal based on sharpness
+			var blend_to_radial := smoothstep(0.4, 0.9, sharp)
+			nx = lerpf(fn_wx, ux, blend_to_radial)
+			nz = lerpf(fn_wz, uz, blend_to_radial)
+			var nlen := maxf(Vector2(nx, nz).length(), 1e-4)
+			nx /= nlen
+			nz /= nlen
+		else:
+			nx = ux
+			nz = uz
 
 		if s.squeeze_k < 0.90:
 			var flow_proj := Vector3(nx, 0.0, nz).dot(flow_axis)
@@ -1009,6 +1030,7 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 
 func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
 	var sp := s.position
+	var S := s.slime_scale
 	var m := p.mesh
 	var dx := m.position.x - sp.x
 	var dz := m.position.z - sp.z
@@ -1025,8 +1047,31 @@ func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
 		return maxf(0.0, c_r - dd)
 	else:
 		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-		var sup := _poly_support(p, -dx / d, -dz / d)
-		return maxf(0.0, c_r + sup - d)
+		var ux := -dx / d
+		var uz := -dz / d
+		var base_y := m.position.y - he.y
+		var top_y := m.position.y + he.y
+		var h := 2.0 * he.y
+		var slime_bottom := sp.y - s.height_per_scale * S
+		var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
+		var y_lo := maxf(base_y, floor_y)
+		var y_hi := minf(top_y, slime_effective_top)
+		# For cones: use the same per-height tapered reach as detection, to avoid stutter
+		if p.shape == SHAPE_CONE and h > 1e-4:
+			var best_pen := 0.0
+			var n := 5
+			for k in n:
+				var y := y_lo + (y_hi - y_lo) * float(k) / float(n - 1)
+				var sup_full := _poly_support(p, ux, uz)
+				var reach := sup_full * maxf(0.06, 1.0 - (y - base_y) / h)
+				var rs := _surf_r((y - sp.y) / S) * S + 0.06 * S
+				var pen_at_y := rs + reach - d
+				if pen_at_y > best_pen:
+					best_pen = pen_at_y
+			return maxf(0.0, best_pen)
+		else:
+			var sup := _poly_support(p, ux, uz)
+			return maxf(0.0, c_r + sup - d)
 
 func _update_slime_splat(s: Slime, dt: float) -> void:
 	var since := s.time - s.touch_time
@@ -1077,7 +1122,9 @@ func _update_digesting_props(dt: float) -> void:
 				var delta_m: float = target_absorbed - p.absorbed_mass
 				if delta_m > 0.0:
 					p.absorbed_mass = target_absorbed
-					s.target_scale = pow(pow(s.target_scale, 3.0) + delta_m, 1.0 / 3.0)
+					# Growth cap: slime cannot exceed 4× its starting scale (prevents clipping through everything)
+					var growth_cap := s.start_scale * 4.0
+					s.target_scale = minf(growth_cap, pow(pow(s.target_scale, 3.0) + delta_m, 1.0 / 3.0))
 
 				var S: float = s.slime_scale
 				if p.t < EAT_TIME:
@@ -1145,12 +1192,12 @@ func _update_eat_uniforms(s: Slime) -> void:
 
 	var pressing: Array[PropData] = []
 	for p in props:
-		if (p.state == STATE_IDLE or (p.state == STATE_EATING and p.t < EAT_TIME)) and p.pd > 0.004 and p.p_ro > 0.0:
-			# Strict ownership & physical proximity: only props being pressed by THIS slime
-			if p.last_presser == s or (p.state == STATE_EATING and p.eater == s):
-				var dist := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length()
-				if dist <= 2.2 * S + p.p_ro:
-					pressing.append(p)
+		# Fix: Only IDLE props occupy pressing slots (0-2). Once EATING, props occupy eating slots (3-5) exclusively,
+		# preventing double-dent deformation in the shader during the first 0.8s.
+		if p.state == STATE_IDLE and p.pd > 0.004 and p.p_ro > 0.0 and p.last_presser == s:
+			var dist := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length()
+			if dist <= 2.2 * S + p.p_ro:
+				pressing.append(p)
 	pressing.sort_custom(func(a: PropData, b: PropData) -> bool: return a.pd > b.pd)
 	if pressing.size() > 3:
 		pressing.resize(3)
@@ -1179,7 +1226,8 @@ func _update_eat_uniforms(s: Slime) -> void:
 
 	var near := 0.0
 	for p in props:
-		if p.state != STATE_IDLE or p.p_ro <= 0.0:
+		# Only count props that are actively being pressed by this slime (p_ro is stale otherwise)
+		if p.state != STATE_IDLE or p.p_ro <= 0.0 or p.last_presser != s:
 			continue
 		var gap := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length() - (1.9 * S + p.p_ro)
 		near = maxf(near, minf(1.0, maxf(0.0, 1.0 - gap / (1.5 * S + p.p_ro))))
