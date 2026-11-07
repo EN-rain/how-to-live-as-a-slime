@@ -77,6 +77,10 @@ uniform float uBlink = 1.0;
 // Squeezing through a gap between solids: 0 = off, 1 = fully compressed across uSqueezeDir (a horizontal axis).
 uniform float uSqueeze = 0.0;
 uniform vec3 uSqueezeDir = vec3(1.0, 0.0, 0.0);
+// Gap world-space offset (gap center relative to slime center) for gap-centered neck deform
+uniform vec3 uGapLocal = vec3(0.0);
+// Gap flow direction (along-corridor axis)
+uniform vec3 uGapFlow = vec3(0.0, 0.0, 1.0);
 
 // Liquid puddle mode (hold Z key): flattens height, spreads outward, passes through small holes
 uniform float uLiquid = 0.0;
@@ -275,41 +279,13 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		p.y = groundFloor + 0.9 * (2.0 * tB * tB - tB * tB * tB);
 	}
 
-	if (uSqueeze > 0.001) {
-		// Squeezing through a gap: bottleneck constriction along flow passage (neck pinched, front/rear bulges)
-		float sq = clamp(uSqueeze, 0.0, 0.94);
-		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
-		vec2 fwdFlow = vec2(-sqd.y, sqd.x);
-		float sqa = dot(p.xz, sqd);
-		float flowDist = dot(p.xz, fwdFlow);
-		// Local neck constriction: maximum compression at neck (flowDist ~ 0), relaxing towards front and rear
-		float neckProfile = exp(-flowDist * flowDist * 1.6);
-		float localSq = sq * mix(0.4, 1.0, neckProfile);
-		float widthScale = max(0.08, 1.0 - localSq);
-		// Front and rear bulge out to conserve fluid volume
-		float bulge = sq * (1.0 - neckProfile) * 0.45;
-		float lengthScale = 1.0 + sq * 0.75 + bulge;
-		float heightScale = 1.0 + localSq * 0.35 * (1.0 - uLiquid);
-		p.xz = sqd * (sqa * widthScale) + fwdFlow * (flowDist * lengthScale);
-		p.y = groundFloor + (p.y - groundFloor) * heightScale;
-	}
-
 	if (uLiquid > 0.001) {
-		// Volume-preserving liquid puddle flattening:
-		// At 22% height, conservation of volume requires spread = 1 / sqrt(0.22) ≈ 2.13x.
+		// Fix 6: Volume-preserving liquid puddle flattening.
+		// Spread = 1/sqrt(height) so area is conserved (at 22% height → 2.13× spread).
 		float targetH = 0.22 * uOverheadCompress;
 		float liqH = mix(1.0, targetH, uLiquid);
 		float liqR = mix(1.0, 1.0 / sqrt(max(0.04, targetH)), uLiquid);
-		if (uSqueeze > 0.001) {
-			vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
-			vec2 fwdFlow = vec2(-sqd.y, sqd.x);
-			float sqa = dot(p.xz, sqd);
-			float flowDist = dot(p.xz, fwdFlow);
-			// Area-preserving squeeze in liquid: compressing sqd axis expands fwdFlow proportionally
-			p.xz = sqd * (sqa * mix(1.0, 0.45, uLiquid)) + fwdFlow * (flowDist * mix(1.0, liqR * 1.25, uLiquid));
-		} else {
-			p.xz *= liqR;
-		}
+		p.xz *= liqR;
 		p.y = groundFloor + (p.y - groundFloor) * liqH;
 
 		// Directional flow surge: the leading edge surges forward in movement direction
@@ -326,6 +302,35 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		// Capillary surface ripples propagating across the liquid sheet
 		float capRipple = sin(distCenter * 4.0 - t * 7.0 + flowAlong * 2.0) * 0.030 * uLiquid;
 		p.y += capRipple * smoothstep(0.0, 0.35, p.y - groundFloor);
+	}
+
+	if (uSqueeze > 0.001) {
+		// Fix 6: Squeeze neck is centered at the actual gap position (uGapLocal), not mesh origin.
+		// Negative uSqueeze means exit overshoot (gooey rebound widening).
+		float sq = clamp(uSqueeze, -0.3, 0.94);
+		bool rebounding = sq < 0.0;
+		float sqAbs = abs(sq);
+		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
+		vec2 fwdFlow = vec2(-sqd.y, sqd.x);
+		// Shift vertex into gap-local space for neck profile
+		vec2 gapOffset = uGapLocal.xz;
+		vec2 pLocal = p.xz - gapOffset;
+		float sqa = dot(pLocal, sqd);
+		float flowDist = dot(pLocal, fwdFlow);
+		// Neck profile: maximum at gap center (flowDist ~ 0), relaxing away
+		float neckProfile = exp(-flowDist * flowDist * 1.6);
+		float localSq = sqAbs * mix(0.4, 1.0, neckProfile);
+		float widthScale = rebounding
+			? max(0.08, 1.0 + localSq * 0.3)   // rebound: slightly wider than normal
+			: max(0.08, 1.0 - localSq);           // squeeze: narrower
+		// Front and rear bulge out to conserve fluid volume (area in cross-section)
+		float bulge = sqAbs * (1.0 - neckProfile) * 0.45;
+		float lengthScale = 1.0 + sqAbs * 0.75 + bulge;
+		float heightScale = rebounding ? 1.0 : (1.0 + localSq * 0.35 * (1.0 - uLiquid));
+		// Apply in gap-local space, then shift back
+		pLocal = sqd * (sqa * widthScale) + fwdFlow * (flowDist * lengthScale);
+		p.xz = pLocal + gapOffset;
+		p.y = groundFloor + (p.y - groundFloor) * heightScale;
 	}
 
 	// ---- Sticky Droplet Budding (E and Q split) ----

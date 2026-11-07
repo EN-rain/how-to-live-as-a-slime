@@ -1,4 +1,4 @@
-class_name Slime
+﻿class_name Slime
 extends Node3D
 ## The jelly slime entity: handles player control, follower breadcrumb AI, or autonomous roamer AI,
 ## fluid deformation, liquid mode (Z), climb/engulf, splitting (E, Q), and merging (M).
@@ -112,6 +112,9 @@ var calm := 0.0
 var touch_time := -10.0
 var cur_max := 3.0
 var squeeze_k := 1.0
+var squeeze_v := 0.0
+var cur_gap_flow := Vector2.ZERO
+var _gap_was_active := false
 var sq_dir := Vector3(1, 0, 0)
 var splat_x := 0.0
 var splat_v := 0.0
@@ -291,7 +294,7 @@ func trigger_poke2(local_point: Vector3, impulse: Vector3) -> void:
 
 
 func _process(delta: float) -> void:
-	var dt := clampf(delta, 0.0, 0.1)
+	var dt := clampf(delta, 0.0, 0.05)
 	_time += dt
 	_impulse_time += dt
 	_impulse2_time += dt
@@ -300,8 +303,8 @@ func _process(delta: float) -> void:
 	if is_merging:
 		merge_timer += dt
 		if merge_target and is_instance_valid(merge_target) and not merge_target.is_merging:
-			position = position.lerp(merge_target.position, 14.0 * dt)
-			slime_scale = lerpf(slime_scale, 0.02, 12.0 * dt)
+			position = position.lerp(merge_target.position, 1.0 - exp(-14.0 * dt))
+			slime_scale = maxf(0.02, lerpf(slime_scale, 0.02, 1.0 - exp(-12.0 * dt)))
 			_apply_transform()
 			if merge_timer >= merge_duration or position.distance_squared_to(merge_target.position) < 0.2:
 				if not _has_merged:
@@ -395,8 +398,12 @@ func _process(delta: float) -> void:
 	# --- Horizontal velocity update ---
 	var v_resp := velocity_response * (0.6 if liquid_amt > 0.5 else 1.0)
 	velocity = velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
-	position.x += velocity.x * dt
-	position.z += velocity.z * dt
+	var step := Vector2(velocity.x, velocity.z) * dt
+	var max_step := body_radius * slime_scale * 0.3
+	if step.length() > max_step:
+		step = step.normalized() * max_step
+	position.x += step.x
+	position.z += step.y
 
 	# Clamp to arena boundary
 	var flat := Vector2(position.x, position.z).length()
@@ -561,6 +568,10 @@ func _process_follower_ai(dt: float) -> Vector3:
 		var perp := to_target.cross(Vector3.UP).normalized()
 		target_pt = position + perp * 3.0 + to_target.normalized() * 2.0
 		_follower_stuck_timer = 0.0
+		# Recompute to_target and dist after modifying target_pt (Fix 13)
+		to_target = target_pt - position
+		to_target.y = 0.0
+		dist = to_target.length()
 
 	# Fix 20: Decide liquid from environment, not leader's state
 	# Need clearance for our actual size, with lookahead (start flattening before reaching low spot)
@@ -860,15 +871,20 @@ func _measure_ceiling_clearance() -> float:
 
 
 func _devour_prop(p) -> void:
+	if p == null or p.state != SlimeProps.STATE_IDLE:
+		return
 	p.state = SlimeProps.STATE_EATING
 	p.eater = self
 	p.base_scale = p.mesh.scale # store exact scale: can never grow bigger when digesting!
 	p.t = 0.0
 	p.start = p.mesh.position
 	p.off = Vector3(randf() - 0.5, -0.1 + randf() * 0.3, randf() - 0.5)
-	p.total_mass = pow(p.radius, 3.0) * 0.3
+	# Fix 14: Use real_volume (not radius³×0.3) so Z-eat and push-eat give identical growth
+	p.total_mass = p.real_volume
 	p.absorbed_mass = 0.0
-	inside_props.append(p)
+	# Fix 14: Append AFTER state is set so _update_digesting_props can't double-process
+	if not inside_props.has(p):
+		inside_props.append(p)
 	if props:
 		props.eaten += 1
 		props.eaten_changed.emit(props.eaten)
@@ -991,6 +1007,7 @@ func merge_nearby_clones() -> void:
 				var seg := to2 - from2
 				var t0 := 0.0
 				var t1 := 1.0
+				var hit := false
 				for axis in 2:
 					var o := from2[axis]
 					var d2 := seg[axis]
@@ -998,7 +1015,7 @@ func merge_nearby_clones() -> void:
 					var hi := bmax[axis]
 					if absf(d2) < 1e-6:
 						if o < lo or o > hi:
-							t0 = 1.0  # parallel and outside
+							hit = true  # Fix 15: parallel-outside means NOT blocked
 							break
 					else:
 						var ta := (lo - o) / d2
@@ -1007,7 +1024,7 @@ func merge_nearby_clones() -> void:
 							var tmp := ta; ta = tb; tb = tmp
 						t0 = maxf(t0, ta)
 						t1 = minf(t1, tb)
-				if t0 <= t1:
+				if not hit and t0 <= t1:
 					blocked = true
 					break
 		if not blocked:

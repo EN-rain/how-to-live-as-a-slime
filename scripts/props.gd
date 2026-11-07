@@ -506,12 +506,13 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	var slime_bottom := sp.y - s.height_per_scale * S
 	var slime_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
 
+	# Fix 8: Exclude edible props (they yield, not block) and elevated ceilings
 	var nearby_props: Array[PropData] = []
 	for p in props:
 		if p.state != STATE_IDLE or p == s.ground_prop or p.mesh == null:
 			continue
-		# Fix 18: Exclude elevated static overhangs (bridge roof/legs) from gap pairing —
-		# they are ceilings, not side walls, and create false near-zero gaps.
+		if is_edible_by_push(s, p):
+			continue  # Fix 8: edible props are eaten, not gap walls
 		var m := p.mesh
 		var he := _half_of(p)
 		var prop_bottom := m.position.y - he.y
@@ -526,11 +527,14 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 		nearby_props.append(p)
 
 	var spx := Vector2(sp.x, sp.z)
+	# Fix 2: Score gap pairs by movement direction, not just narrowness
+	var move2 := Vector2(s.velocity.x, s.velocity.z)
+	var moving := move2.length() > 0.1
 	var best_w := INF
 	var best_dir := Vector2.ZERO
 	var best_center := Vector2.ZERO
-	var best_dist := INF
 	var best_flow_dir := Vector2.ZERO
+	var best_score := -INF
 
 	for i in nearby_props.size():
 		var p1 := nearby_props[i]
@@ -544,7 +548,10 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 
 			var gap_vec := pt2 - pt1
 			var gap_w := gap_vec.length()
-			if gap_w < 1e-3 or gap_w >= best_w:
+			if gap_w < 1e-3:
+				continue
+			# Fix 9: Reject impossible gaps (wider than 2×reach means we can't be squeezed)
+			if gap_w >= r_max * 2.0:
 				continue
 			var gap_dir := gap_vec / gap_w
 			var gap_center := (pt1 + pt2) * 0.5
@@ -555,15 +562,25 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			var dist_lateral := absf(to_gap.dot(gap_dir))
 
 			if dist_along_flow < reach * 2.5 and dist_lateral < (gap_w * 0.5 + reach * 1.5):
-				best_w = gap_w
-				best_dir = gap_dir
-				best_center = gap_center
-				best_dist = to_gap.length()
-				best_flow_dir = flow_dir
+				# Fix 2: Score by alignment with movement direction
+				var move_score := 0.0
+				if moving:
+					move_score = absf(move2.normalized().dot(flow_dir))
+				else:
+					move_score = 0.5  # neutral when stopped
+				var dist_score := 1.0 / (1.0 + to_gap.length())
+				var total_score := move_score * 2.0 + dist_score
+				if total_score > best_score:
+					best_score = total_score
+					best_w = gap_w
+					best_dir = gap_dir
+					best_center = gap_center
+					best_flow_dir = flow_dir
 
 	s.cur_gap_w = best_w
 	s.cur_gap_center = best_center
 	s.cur_gap_dir = best_dir
+	s.cur_gap_flow = best_flow_dir  # store for shader
 
 	var target := 1.0
 	if best_w < INF:
@@ -574,33 +591,45 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			var dist_lat := absf(to_gap_vec.x * best_dir.x + to_gap_vec.y * best_dir.y)
 
 			var corridor_half_len := 0.6 * S
-			var entrance_flow := dist_flow - corridor_half_len # distance from slime center to entrance
-			var exit_flow := dist_flow + corridor_half_len     # distance from slime center to exit
+			var entrance_flow := dist_flow - corridor_half_len
+			var exit_flow := dist_flow + corridor_half_len
 
 			var max_lat := best_w * 0.5 + reach * 0.8
 			if dist_lat < max_lat:
 				if entrance_flow > 0.0 and entrance_flow < reach * 1.5:
-					# Slime front reaches entrance: squeeze smoothly from 1.0 down to fit
 					var t_enter := clampf((reach * 1.5 - entrance_flow) / (reach * 1.2), 0.0, 1.0)
 					t_enter = t_enter * t_enter * (3.0 - 2.0 * t_enter)
 					var lat_factor := clampf(1.0 - dist_lat / max_lat, 0.0, 1.0)
 					target = lerpf(1.0, fit, t_enter * lat_factor)
 				elif entrance_flow <= 0.0 and exit_flow > -reach * 1.2:
-					# Inside corridor: maintain fit squeeze until back exits
 					target = fit
 				elif exit_flow <= -reach * 1.2:
-					# Fully exited corridor: snap back to round
 					target = 1.0
 
-	# Fix 16: Once slime has fully passed through, release squeeze quickly using squeeze_in_rate
-	var rate: float
-	if target < s.squeeze_k:
-		rate = squeeze_in_rate  # squeezing in (tightening)
+	# Fix 7: Spring dynamics for squeeze (overshoot on tighten, rebound on exit)
+	var gap_active := best_w < INF and target < 0.98
+	if gap_active:
+		# Spring toward target_squeeze with damping (k=140 tighten)
+		var spring_k := 140.0
+		var damp := 2.0 * sqrt(spring_k) * 0.7
+		var err := target - s.squeeze_k
+		s.squeeze_v += (err * spring_k - s.squeeze_v * damp) * dt
+		s.squeeze_k += s.squeeze_v * dt
+		s.squeeze_k = clampf(s.squeeze_k, effective_min_squeeze, 1.0)
+		s._gap_was_active = true
 	else:
-		# Releasing — use squeeze_in_rate if the body is clearly past the gap to snap back
-		var past_gap := best_w == INF or absf((spx - best_center).dot(best_flow_dir)) > reach * 1.5
-		rate = squeeze_in_rate if past_gap else squeeze_out_rate
-	s.squeeze_k = clampf(s.squeeze_k + (target - s.squeeze_k) * (1.0 - exp(-rate * dt)), effective_min_squeeze, 1.0)
+		if s._gap_was_active:
+			# Just exited gap: inject a small positive overshoot (gooey rebound)
+			s.squeeze_v = maxf(s.squeeze_v, 0.4)
+			s._gap_was_active = false
+			_gap_released(s)
+		# Spring back to 1.0 with softer spring (k=55 release)
+		var spring_k := 55.0
+		var damp := 2.0 * sqrt(spring_k) * 0.65
+		var err := 1.0 - s.squeeze_k
+		s.squeeze_v += (err * spring_k - s.squeeze_v * damp) * dt
+		s.squeeze_k += s.squeeze_v * dt
+		s.squeeze_k = clampf(s.squeeze_k, effective_min_squeeze, 1.0)
 
 	if target < 0.98 and best_dir.length_squared() > 0.001:
 		var d3 := Vector3(best_dir.x, 0.0, best_dir.y).normalized()
@@ -618,14 +647,25 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			var dist_to_gap := (spx - best_center).length()
 			var dist_factor := clampf(1.0 - dist_to_gap / (reach * 2.2), 0.0, 1.0)
 			var align_factor := clampf(1.0 - absf(lateral_offset) / (reach * 1.8), 0.0, 1.0) * maxf(0.35, dist_factor)
-			# Guide firmly along gap centerline
 			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 12.0 * dt
 			s.position += funnel_push
 			s.velocity -= Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 4.0 * dt
 
+	# Send squeeze val — negative squeeze_k means rebound-widening (exits with overshoot)
 	var squeeze_val := 1.0 - s.squeeze_k
 	s.set_shader_param("uSqueeze", squeeze_val)
 	s.set_shader_param("uSqueezeDir", s.sq_dir)
+	# Send gap position and flow direction to shader for gap-centered deform
+	var gap_local := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z) if best_w < INF else Vector3.ZERO
+	s.set_shader_param("uGapLocal", gap_local)
+	s.set_shader_param("uGapFlow", Vector3(best_flow_dir.x, 0.0, best_flow_dir.y) if best_w < INF else Vector3(0.0, 0.0, 1.0))
+
+
+func _gap_released(s: Slime) -> void:
+	# Trigger a surface pop on gap exit for gooey feel
+	var flow_dir3 := Vector3(s.cur_gap_flow.x, 0.0, s.cur_gap_flow.y)
+	if flow_dir3.length_squared() > 0.01:
+		s.trigger_poke2(flow_dir3.normalized() * 0.5, flow_dir3.normalized() * 0.4)
 
 
 func is_edible_by_push(s: Slime, p: PropData) -> bool:
@@ -812,12 +852,10 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 			var net_push := (c0.normal * pen0 + c1.normal * pen1) * 0.5
 			# When between two different props (corridor passage), only push laterally — don't push backward along flow!
 			if c0.prop != c1.prop:
+				# Fix 1: Use sq_dir.z (not sq_dir.y which is always 0 for a horizontal vector)
 				var lat_axis := s.sq_dir if s.sq_dir.length_squared() > 0.01 else (c0.normal - c1.normal).normalized()
 				net_push = lat_axis * net_push.dot(lat_axis)
-				# Also adapt squeeze immediately upon physical double-wall contact
-				if s.cur_gap_w < INF:
-					var fit_k := clampf((s.cur_gap_w * 0.5) / maxf(0.1, c0.c_r), 0.08, 1.0)
-					s.squeeze_k = minf(s.squeeze_k, lerpf(s.squeeze_k, fit_k, 0.4))
+				# Fix 3: Do NOT overwrite squeeze_k here — let spring in _update_slime_squeeze own it
 			if net_push.length_squared() > 1e-6:
 				s.position.x += net_push.x
 				s.position.z += net_push.z
@@ -834,8 +872,8 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 				if pen > 0.001:
 					var push := c.normal * pen * 0.75
 					if s.cur_gap_w < INF and s.sq_dir.length_squared() > 0.01:
-						# Never let single-wall lateral push overshoot past the gap centerline
-						var lat_axis := Vector3(s.sq_dir.x, 0.0, s.sq_dir.y)
+						# Fix 1: Build lat_axis correctly from sq_dir (which is a 3D horizontal vector)
+						var lat_axis := Vector3(s.sq_dir.x, 0.0, s.sq_dir.z)
 						var lat_push := push.dot(lat_axis)
 						var cur_offset := (Vector2(s.position.x, s.position.z) - s.cur_gap_center).dot(Vector2(lat_axis.x, lat_axis.z))
 						if (cur_offset > 0.0 and lat_push < 0.0) or (cur_offset < 0.0 and lat_push > 0.0):
@@ -855,31 +893,12 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 	s.contact_r = c0.c_r / S
 	s.touch_time = s.time
 
-	# Multi-contact channel / narrow passage flow
+	# Fix 4: Remove corridor velocity forcing — velocity is managed by player input + squeeze funnel
+	# Fix 5: Remove head-on forced sideways injection (≥2 m/s jerk)
+	# Only handle same-prop corner crease sliding
 	if contacts.size() >= 2:
 		var c1 := contacts[1]
-		if c0.prop != c1.prop:
-			# Between two separate obstacles: treat as a corridor passage regardless of normal angle!
-			var corridor_dir: Vector3
-			if s.sq_dir.length_squared() > 0.01:
-				corridor_dir = Vector3(-s.sq_dir.z, 0.0, s.sq_dir.x).normalized()
-			else:
-				var n_across := (c0.normal - c1.normal).normalized()
-				corridor_dir = Vector3(-n_across.z, 0.0, n_across.x).normalized()
-
-			var input_dir := s.velocity
-			if input_dir.length_squared() < 0.01:
-				input_dir = s._crawl_dir  # Slime has no .mesh; use _crawl_dir which is always valid
-			if corridor_dir.dot(input_dir) < 0.0:
-				corridor_dir = -corridor_dir
-
-			var v_corridor := maxf(0.0, s.velocity.dot(corridor_dir))
-			# Ensure forward velocity is maintained when pushing through
-			if v_corridor < 1.0:
-				v_corridor = maxf(v_corridor, s.velocity.length())
-			s.velocity = corridor_dir * v_corridor
-			return
-		else:
+		if c0.prop == c1.prop:
 			# Two contacts on the same prop: concave corner / crease on a single obstacle
 			var dot_n := c0.normal.dot(c1.normal)
 			if dot_n < 0.85:
@@ -917,19 +936,17 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 				var fr := (1.0 - exp(-6.0 * dt))
 				s.velocity = tangent * maxf(0.0, vt_len * (1.0 - fr))
 		else:
-			# Head-on impact (vt_len <= 1e-4)
-			# Deflect along tangent towards the gap opening so slime slides smoothly into the opening
+			# Fix 5: Head-on impact — gentle slide, no forced 2 m/s injection
 			var tangent := Vector3(-nz, 0.0, nx)
 			if s.cur_gap_w < INF:
 				var to_gap := Vector3(s.cur_gap_center.x - s.position.x, 0.0, s.cur_gap_center.y - s.position.z)
 				if tangent.dot(to_gap) < 0.0:
 					tangent = -tangent
-				s.velocity = tangent * maxf(vin * 0.8, 2.0)
+				s.velocity = tangent * vin * 0.6  # gentle deflect toward gap, no minimum speed
 			else:
-				# Use crawl_dir as stable tiebreak — to_prop is always perpendicular and flips each frame
 				if tangent.dot(s._crawl_dir) < 0.0:
 					tangent = -tangent
-				s.velocity = tangent * maxf(vin * 0.2, 0.5)
+				s.velocity = tangent * vin * 0.2  # very gentle slide for open-space head-on
 
 		# Only trigger impact poke/splat if hitting a flat wall in open space, NOT around corners or when squeezing
 		if vin > 0.6 and s.squeeze_k > 0.85 and c0.sharp < 0.2 and s.time - c0.prop.hit_cd > 0.3:
@@ -1407,7 +1424,7 @@ func _update_floor_shadows() -> void:
 			break
 		if not is_instance_valid(s):
 			continue
-		var s_scale := s.slime_scale * lerpf(1.0, 1.85, s.liquid_amt)
+		var s_scale := s.slime_scale * lerpf(1.0, s.liquid_spread_ratio, s.liquid_amt)
 		b_pos.append(s.global_position)
 		b_scale.append(s_scale)
 
