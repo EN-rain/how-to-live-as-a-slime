@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://cebnw7hsbwt86"]
 
 [ext_resource type="Shader" uid="uid://cdylotpifnx5w" path="res://shaders/slime.gdshader" id="1_slime_shader"]
-[ext_resource type="Script" uid="uid://d0v3rofmqon45" path="res://scripts/slime.gd" id="3_slime_script"]
+[ext_resource type="PackedScene" path="res://scenes/slime.tscn" id="8_slime_scene"]
 [ext_resource type="Script" uid="uid://be8ahyc03pcny" path="res://scripts/orbit_camera.gd" id="4_orbit_script"]
 [ext_resource type="Shader" uid="uid://qeelh8bvw3or" path="res://shaders/floor.gdshader" id="5_floor_shader"]
 [ext_resource type="Script" uid="uid://bsn3fclfde6cq" path="res://scripts/props.gd" id="6_props_script"]
@@ -19,81 +19,6 @@ fog_light_color = Color(0.337, 0.471, 0.565, 1)
 fog_density = 1.0
 fog_depth_begin = 25.0
 fog_depth_end = 90.0
-
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_slime"]
-render_priority = 0
-shader = ExtResource("1_slime_shader")
-shader_parameter/uJiggleStrength = 1.0
-shader_parameter/uDispersion = 0.85
-shader_parameter/uRefractionStrength = 0.32
-shader_parameter/uRippleNoiseScale = 1.65
-shader_parameter/uBubbleNoiseScale = 3.5
-shader_parameter/uRimStrength = 1.15
-shader_parameter/uOpacity = 0.48
-shader_parameter/uNightMode = 0.0
-shader_parameter/uTopGlow = Vector3(0.08, 0.18, 0.28)
-shader_parameter/uBubbleBoost = 1.4
-shader_parameter/uDayShallow = Color(0.52, 0.82, 0.98, 1)
-shader_parameter/uDayDeep = Color(0.28, 0.62, 0.9, 1)
-shader_parameter/uNightShallow = Color(0.22, 0.64, 0.94, 1)
-shader_parameter/uNightDeep = Color(0.08, 0.32, 0.64, 1)
-shader_parameter/uRimDay = Color(0.8, 0.96, 1, 1)
-shader_parameter/uRimNight = Color(0.62, 0.92, 1, 1)
-shader_parameter/uOutlineDay = Color(0.16, 0.34, 0.52, 1)
-shader_parameter/uOutlineNight = Color(0.04, 0.12, 0.24, 1)
-shader_parameter/uCausticA = Color(0.18, 0.92, 0.62, 1)
-shader_parameter/uCausticB = Color(0.42, 0.98, 0.35, 1)
-shader_parameter/uBubbleColor = Color(0.85, 1, 0.95, 1)
-shader_parameter/uEyeColor = Color(1, 1, 1, 1)
-shader_parameter/uEyeSeparation = 0.32
-shader_parameter/uEyeSize = Vector2(0.11, 0.17)
-shader_parameter/uEyeElevation = 0.12
-shader_parameter/uMelt = 0.28
-shader_parameter/uImpulseTime = 10.0
-shader_parameter/uImpulsePos = Vector3(0, 0.5, 1)
-shader_parameter/uImpulseVector = Vector3(0, 0, 0)
-shader_parameter/uImpulse2Time = 10.0
-shader_parameter/uImpulse2Pos = Vector3(0, 0.5, 1)
-shader_parameter/uImpulse2Vector = Vector3(0, 0, 0)
-shader_parameter/uMoveDir = Vector3(0, 0, 1)
-shader_parameter/uMoveAmt = 0.0
-shader_parameter/uCrawl = 0.0
-shader_parameter/uLean = Vector3(0, 0, 0)
-shader_parameter/uEatPos = PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-shader_parameter/uEatParam = PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-shader_parameter/uBoxHalf = PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-shader_parameter/uPressDir = Vector3(0, 0, 1)
-shader_parameter/uPressAmt = 0.0
-shader_parameter/uSplatDir = Vector3(0, 0, 1)
-shader_parameter/uSplat = 0.0
-shader_parameter/uSpread = 0.0
-shader_parameter/uWall = 2.15
-shader_parameter/uSolidPos = PackedVector3Array(0, 0, 0, 0, 0, 0)
-shader_parameter/uSolidParam = PackedVector3Array(0, 0, 0, 0, 0, 0)
-shader_parameter/uSolidHalf = PackedVector3Array(0, 0, 0, 0, 0, 0)
-shader_parameter/uSolidDir = PackedVector3Array(0, 0, 0, 0, 0, 0)
-shader_parameter/uRippleIntensity = 0.12
-shader_parameter/uFacing = 0.45
-shader_parameter/uBlink = 1.0
-shader_parameter/uSqueeze = 0.0
-shader_parameter/uSqueezeDir = Vector3(1, 0, 0)
-shader_parameter/uLiquid = 0.0
-shader_parameter/uDrapePos = Vector3(0, 0, 0)
-shader_parameter/uDrapeHalf = Vector3(0.01, 0.01, 0.01)
-shader_parameter/uDrapeShape = 0.0
-shader_parameter/uDrapeYaw = 0.0
-shader_parameter/uDrapeAmt = 0.0
-shader_parameter/uSplitAmt = 0.0
-shader_parameter/uSplitDir = Vector3(0, 0, -1)
-shader_parameter/uBudAmt = 0.0
-shader_parameter/uBudDir = Vector3(0, 0, -1)
-shader_parameter/uBudScale = 0.0
-
-[sub_resource type="SphereMesh" id="SphereMesh_slime"]
-radius = 1.6
-height = 3.2
-radial_segments = 160
-rings = 120
 
 [sub_resource type="StandardMaterial3D" id="Mat_red"]
 albedo_color = Color(0.867, 0.373, 0.373, 1)
@@ -176,18 +101,10 @@ environment = SubResource("Environment_studio")
 transform = Transform3D(0.7809, -0.4877, 0.3904, 0, 0.625, 0.7807, -0.6247, -0.6096, 0.488, 4, 8, 5)
 light_energy = 0.9
 
-[node name="Slime" type="Node3D" parent="." unique_id=1693722551 node_paths=PackedStringArray("body", "camera", "floor_mesh", "props")]
-script = ExtResource("3_slime_script")
-body = NodePath("Body")
+[node name="Slime" parent="." instance=ExtResource("8_slime_scene") node_paths=PackedStringArray("camera", "floor_mesh", "props")]
 camera = NodePath("../CameraRig/Camera3D")
 floor_mesh = NodePath("../Floor")
 props = NodePath("../Ecosystem")
-
-[node name="Body" type="MeshInstance3D" parent="Slime" unique_id=512345633]
-material_override = SubResource("ShaderMaterial_slime")
-cast_shadow = 0
-extra_cull_margin = 4.0
-mesh = SubResource("SphereMesh_slime")
 
 [node name="CameraRig" type="Node3D" parent="." unique_id=870445326 node_paths=PackedStringArray("camera", "follow")]
 script = ExtResource("4_orbit_script")

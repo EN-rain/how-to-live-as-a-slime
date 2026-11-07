@@ -1,7 +1,10 @@
-﻿class_name Slime
+class_name Slime
 extends Node3D
-## The jelly slime entity: handles player control, follower breadcrumb AI, or autonomous roamer AI,
-## fluid deformation, liquid mode (Z), climb/engulf, splitting (E, Q), and merging (M).
+## One jelly slime. Intent -> validated posture -> motor movement -> derived visuals.
+##
+## This script never writes its own position: SlimeMotor owns the transform, support
+## and collision resolution; SlimeShapeModel owns the authoritative dimensions;
+## SlimeProps exposes obstacle geometry, passage hints and digestion.
 
 signal poked(local_point: Vector3, impulse: Vector3)
 
@@ -11,7 +14,11 @@ enum Role {
 	ROAMER
 }
 
+## Fallback when no tuning resource is assigned.
+const LIQUID_BLEND_RATE := 2.8
+
 @export var role: Role = Role.PLAYER
+@export var tuning: SlimeTuning
 
 @export_group("Nodes")
 @export var body: MeshInstance3D
@@ -19,132 +26,94 @@ enum Role {
 @export var floor_mesh: MeshInstance3D
 @export var props: SlimeProps
 
-@export_group("Movement")
-@export var walk_speed := 3.0
-@export var run_speed := 10.0
-@export var liquid_speed := 2.2
-@export var velocity_response := 8.0
-@export var arena_radius := 190.0
-
-@export_group("Size")
+@export_group("Agent")
+## Spawn scale. Clones are created with their target scale already resolved.
 @export var start_scale := 1.0
-@export var scale_response := 3.5
-@export var floor_y := -1.2
-@export var height_per_scale := 1.2
-@export var body_radius := 1.6
-
-@export_group("Crawl and lean")
-@export var crawl_rate := 2.6
-@export var speed_for_full_crawl := 3.0
-@export var lean_gain := 0.35
-@export var lean_stiffness := 60.0
-@export var lean_damping := 7.0
-@export var ripple_base := 0.12
-@export var ripple_per_speed := 0.45
-
-@export_group("Poke")
-@export var poke_strength := 0.55
-@export var poke_downward := 0.25
-
-@export_group("Eyes")
-@export var facing_response := 8.0
-@export var moving_threshold := 0.3
-@export var blink_period := 4.0
-@export var blink_start := 3.85
-@export var blink_closed_amount := 0.12
-@export var start_facing := 0.45
-
-@export_group("Liquid and Engulf")
-@export var liquid_height_ratio := 0.22
-@export var liquid_spread_ratio := 2.13
-@export var liquid_clearance_ratio := 0.12
-@export var devour_duration := 1.6
-
-@export_group("Follower & Roamer AI")
 @export var target_leader: Slime = null
-@export var follow_distance := 3.2
 
-var velocity := Vector3.ZERO
+var model: SlimeShapeModel
+var motor: SlimeMotor
+
 var slime_scale := 1.0
 var target_scale := 1.0
 var speed01 := 0.0
 
-# Vertical motion & ground support
-var support_y := -1.2
-var vertical_vel := 0.0
-var is_on_ground := true
-var ground_prop = null
+# Intent (what the agent WANTS), kept separate from the resolved posture.
+var liquid_request := false
+var engulf_request := false
+var liquid_mode: bool:
+	get:
+		return liquid_request
+	set(value):
+		liquid_request = value
 
-# Liquid mode (Z key)
-var liquid_mode := false
+# Resolved posture (what the world actually allows).
 var liquid_amt := 0.0
-
-# Engulfing (Z on top of larger object)
-var engulf_target = null
-var engulf_progress := 0.0
-
-# ---- Fission (budding split) animation state ----
-var is_fissioning := false
-var fission_timer := 0.0
-var fission_duration := 0.38
-var fission_fwd := Vector3.FORWARD
-var fission_start_scale := 1.0
-var fission_target_scale := 0.794
-
-# CLONE budding state
-var is_budding := false
-var bud_timer := 0.0
-var bud_duration := 0.38
-var bud_parent: Slime = null
-var bud_target_scale := 1.0
-var bud_fwd := Vector3.FORWARD
-
-# Merge animation state
-var is_merging := false
-var merge_target: Slime = null
-var merge_timer := 0.0
-var merge_duration := 0.45
-var merge_source_scale := 1.0
-var _has_merged := false
-
-# Physics & deformation state (per-slime)
-var calm := 0.0
-var touch_time := -10.0
-var cur_max := 3.0
+var height_ratio := 1.0
 var squeeze_k := 1.0
 var squeeze_v := 0.0
-var cur_gap_flow := Vector2.ZERO
-var _gap_was_active := false
-var sq_dir := Vector3(1, 0, 0)
+var sq_dir := Vector3(1.0, 0.0, 0.0)
+var expansion_blocked := ""
+
+# Motion/contact feedback used by the presentation layer only.
+var cur_max := 3.0
+var calm := 0.0
+var touch_time := -10.0
 var splat_x := 0.0
 var splat_v := 0.0
 var spread_x := 0.0
 var spread_v := 0.0
 var sharp_amt := 0.0
 var contact_r := 2.15
-var impact_dir := Vector3(0, 0, 1)
+var impact_dir := Vector3(0.0, 0.0, 1.0)
 var press_amt := 0.0
 
-# Per-slime detected gap state
+# Last passage hint from the ecosystem (hint only; posture is query-validated).
 var cur_gap_center := Vector2.ZERO
 var cur_gap_w := INF
 var cur_gap_dir := Vector2.ZERO
+var _passage: Dictionary = {}
 
-# Breadcrumb history for followers to trace
+# Engulf drape state.
+var engulf_target = null
+var engulf_progress := 0.0
+
+# ---- Fission (budding split) animation state ----
+var is_fissioning := false
+var fission_timer := 0.0
+var fission_fwd := Vector3.FORWARD
+var fission_start_scale := 1.0
+var fission_target_scale := 1.0
+var _fission_snapped := false
+
+# CLONE budding state
+var is_budding := false
+var bud_timer := 0.0
+var bud_parent: Slime = null
+var bud_target_scale := 1.0
+var bud_fwd := Vector3.FORWARD
+var _bud_snapped := false
+
+# Merge animation state
+var is_merging := false
+var merge_target: Slime = null
+var merge_timer := 0.0
+var merge_source_scale := 1.0
+var _has_merged := false
+
+# Breadcrumb history for followers (recorded AFTER movement resolution).
 var breadcrumbs: Array[Dictionary] = []
 var _breadcrumb_timer := 0.0
 
-# Internal props being digested
+# Props being digested inside the body.
 var inside_props: Array = []
 
-# AI internal state
-var _ai_target_pos := Vector3.ZERO
+# AI state.
 var _ai_roam_timer := 0.0
 var _ai_recovery_timer := 0.0
-var _ai_target_prop = null
+var _ai_target_pos := Vector3.ZERO
 var _ai_stuck_timer := 0.0
 var _ai_last_pos := Vector3.ZERO
-# Follower-specific: flatten-to-fit flag (suppresses engulf while navigating low areas)
 var _following_flatten := false
 var _follower_stuck_timer := 0.0
 
@@ -152,49 +121,82 @@ var _mat: ShaderMaterial
 var _time := 0.0
 var _impulse_time := 10.0
 var _impulse2_time := 10.0
-var _crawl_dir := Vector3(0, 0, 1)
+var _crawl_dir := Vector3(0.0, 0.0, 1.0)
 var _crawl_phase := 0.0
 var _facing_yaw := 0.0
 var _lean := Vector3.ZERO
 var _lean_vel := Vector3.ZERO
+var _velocity_cache := Vector3.ZERO
 
 var time: float:
 	get:
 		return _time
 
+var velocity: Vector3:
+	get:
+		return motor.velocity if motor != null else _velocity_cache
+	set(value):
+		if motor != null:
+			motor.velocity = value
+		else:
+			_velocity_cache = value
+
+
+# ------------------------------------------------------------------------------------------------
+# Volume authority
+# ------------------------------------------------------------------------------------------------
 
 func get_volume() -> float:
-	## Authoritative volume of the slime based on target_scale
-	return (4.0 / 3.0) * PI * pow(body_radius * target_scale, 3.0)
+	return tuning.volume_per_scale_cubed() * pow(target_scale, 3.0)
 
 
-func get_visual_volume() -> float:
-	return (4.0 / 3.0) * PI * pow(body_radius * slime_scale, 3.0)
+func set_volume(v: float) -> void:
+	target_scale = pow(maxf(v, 0.0) / tuning.volume_per_scale_cubed(), 1.0 / 3.0)
 
 
+func add_volume(delta: float) -> void:
+	set_volume(get_volume() + delta)
+
+
+# ------------------------------------------------------------------------------------------------
+# Lifecycle
+# ------------------------------------------------------------------------------------------------
 
 func _ready() -> void:
+	if tuning == null:
+		tuning = load("res://resources/slime_tuning.tres") as SlimeTuning
+	if props == null:
+		props = get_node_or_null("../Ecosystem") as SlimeProps
+
+	if body and body.material_override is ShaderMaterial:
+		_mat = body.material_override.duplicate() as ShaderMaterial
+		body.material_override = _mat
+		_mat.set_shader_parameter("uMelt", tuning.melt)
+		_mat.set_shader_parameter("uSqueezeElong", tuning.squeeze_elongation)
+		_reset_array_uniforms()
+
 	if not is_budding:
 		slime_scale = start_scale
 		target_scale = start_scale
-		_facing_yaw = start_facing
-		support_y = floor_y
+		_facing_yaw = tuning.start_facing
+	elif target_scale <= 0.0:
+		target_scale = start_scale
 
-	# Duplicate material override so each clone has independent shader uniforms
-	if body and body.material_override:
-		var dup = body.material_override.duplicate()
-		if dup is ShaderMaterial:
-			_mat = dup
-			body.material_override = _mat
-			_mat.set_shader_parameter("uMelt", 0.28)
-			_reset_array_uniforms()
+	model = SlimeShapeModel.new()
+	model.configure(tuning)
+	motor = SlimeMotor.new()
+	motor.setup(self, model, tuning)
+	motor.velocity = _velocity_cache
 
-	if props == null:
-		props = get_node_or_null("../Ecosystem") as SlimeProps
+	model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
+	sq_dir = model.axis
+	motor.support_y = tuning.floor_y
+	global_position.y = tuning.floor_y + tuning.skin + model.rest_half_height * slime_scale
+	model.set_foot(global_position + Vector3(0.0, -model.rest_half_height * slime_scale, 0.0))
+	_apply_transform()
+
 	if props:
 		props.register_slime(self)
-
-	_apply_transform()
 
 
 func _exit_tree() -> void:
@@ -221,9 +223,12 @@ func _reset_array_uniforms() -> void:
 	_mat.set_shader_parameter("uSolidDir", zeros2)
 	_mat.set_shader_parameter("uDrapeAmt", 0.0)
 	_mat.set_shader_parameter("uSplitAmt", 0.0)
-	_mat.set_shader_parameter("uBudAmt", 0.0)
-	_mat.set_shader_parameter("uBudScale", 0.0)
+	_mat.set_shader_parameter("uSqueeze", 0.0)
 
+
+# ------------------------------------------------------------------------------------------------
+# Input
+# ------------------------------------------------------------------------------------------------
 
 func _unhandled_input(event: InputEvent) -> void:
 	if role != Role.PLAYER:
@@ -246,35 +251,39 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _try_poke(screen_pos: Vector2) -> void:
-	if camera == null:
+	if camera == null or model == null:
 		return
 	var origin := camera.project_ray_origin(screen_pos)
 	var dir := camera.project_ray_normal(screen_pos)
-	var base_r := body_radius * slime_scale
-	# Account for liquid flattening/spreading: raycast against true flattened ellipsoid shape
-	var rx := base_r * lerpf(1.0, liquid_spread_ratio, liquid_amt)
-	var ry := base_r * lerpf(1.0, liquid_height_ratio, liquid_amt)
-	var rz := rx
-
-	var inv_r := Vector3(1.0 / rx, 1.0 / ry, 1.0 / rz)
-	var oc := (origin - global_position) * inv_r
-	var d := dir * inv_r
-	var a := d.dot(d)
-	var b := oc.dot(d)
-	var c := oc.dot(oc) - 1.0
+	var center := model.center()
+	var ax := model.axis
+	var perp := Vector3(-ax.z, 0.0, ax.x)
+	var sa := maxf(model.semi_a, 1e-3)
+	var sb := maxf(model.semi_b, 1e-3)
+	var sy := maxf(model.full_height * 0.5, 1e-3)
+	var oc := origin - center
+	var oa := oc.dot(ax) / sa
+	var ob := oc.dot(perp) / sb
+	var oy := oc.y / sy
+	var da := dir.dot(ax) / sa
+	var db := dir.dot(perp) / sb
+	var dy := dir.y / sy
+	var a := da * da + db * db + dy * dy
+	var b := oa * da + ob * db + oy * dy
+	var c := oa * oa + ob * ob + oy * oy - 1.0
 	var disc := b * b - a * c
 	if disc < 0.0:
 		return
-	var s := sqrt(disc)
-	var t := (-b - s) / a
+	var sq := sqrt(disc)
+	var t := (-b - sq) / maxf(a, 1e-6)
 	if t < 0.0:
-		t = (-b + s) / a
+		t = (-b + sq) / maxf(a, 1e-6)
 	if t < 0.0:
 		return
 	var hit := origin + dir * t
-	var local_point := (hit - global_position).normalized() * body_radius
-	var push := (hit - camera.global_position).normalized() * poke_strength
-	push.y -= poke_downward
+	var local_point := ((hit - global_position) / maxf(slime_scale, 1e-4)).normalized() * tuning.reference_radius
+	var push := (hit - camera.global_position).normalized() * tuning.poke_strength
+	push.y -= tuning.poke_downward
 	trigger_poke(local_point, push)
 
 
@@ -293,198 +302,220 @@ func trigger_poke2(local_point: Vector3, impulse: Vector3) -> void:
 		_mat.set_shader_parameter("uImpulse2Vector", impulse)
 
 
-func _process(delta: float) -> void:
-	var dt := clampf(delta, 0.0, 0.05)
+func set_shader_param(param: StringName, value: Variant) -> void:
+	if _mat:
+		_mat.set_shader_parameter(param, value)
+
+
+# ------------------------------------------------------------------------------------------------
+# Physics tick
+# ------------------------------------------------------------------------------------------------
+
+func _physics_process(delta: float) -> void:
+	var dt := delta
 	_time += dt
 	_impulse_time += dt
 	_impulse2_time += dt
 
-	# --- Merge animation (M key) ---
 	if is_merging:
-		merge_timer += dt
-		if merge_target and is_instance_valid(merge_target) and not merge_target.is_merging:
-			position = position.lerp(merge_target.position, 1.0 - exp(-14.0 * dt))
-			slime_scale = maxf(0.02, lerpf(slime_scale, 0.02, 1.0 - exp(-12.0 * dt)))
-			_apply_transform()
-			if merge_timer >= merge_duration or position.distance_squared_to(merge_target.position) < 0.2:
-				if not _has_merged:
-					_has_merged = true
-					merge_target.target_scale = pow(pow(merge_target.target_scale, 3.0) + pow(merge_source_scale, 3.0), 1.0 / 3.0)
-					merge_target.trigger_poke(Vector3(0, 0.3, 0), Vector3(0, -0.65, 0))
-					merge_target.trigger_poke2(Vector3(0, -0.3, 0), Vector3(0, 0.5, 0))
-					# Safely transfer any ongoing digestion props to merge_target
-					if props:
-						for p in props.props:
-							if p.state == SlimeProps.STATE_EATING and p.eater == self:
-								p.eater = merge_target
-								# Fix 10: Avoid duplicate entries in merge target's digestion list
-								if not merge_target.inside_props.has(p):
-									merge_target.inside_props.append(p)
-					inside_props.clear()
-					queue_free()
-		else:
-			# Target disappeared or became invalid: cancel merge safely instead of deleting self
-			is_merging = false
-			merge_target = null
-			_has_merged = false
+		_tick_merge(dt)
 		return
 
-	# ---- PARENT fission: budding separation ----
-	if is_fissioning:
-		fission_timer += dt
-		var k: float = clampf(fission_timer / fission_duration, 0.0, 1.0)
-		var e := sin(k * PI * 0.5)
-
-		slime_scale = lerpf(fission_start_scale, fission_target_scale, e)
-		_apply_transform()
-
-		var stretch_amt := sin(k * PI) * 0.75
-		if _mat:
-			_mat.set_shader_parameter("uSplitAmt", stretch_amt)
-			_mat.set_shader_parameter("uSplitDir", fission_fwd)
-
-		if k >= 1.0:
-			is_fissioning = false
-			slime_scale = fission_target_scale
-			if _mat:
-				_mat.set_shader_parameter("uSplitAmt", 0.0)
-
-	# ---- CLONE budding: emerging from parent ----
 	if is_budding:
-		bud_timer += dt
-		var k: float = clampf(bud_timer / bud_duration, 0.0, 1.0)
-		var e := sin(k * PI * 0.5)
+		_tick_budding(dt)
+		_tick_props(dt)
+		return
 
-		slime_scale = lerpf(bud_target_scale * 0.25, bud_target_scale, e)
-		_apply_transform()
+	if is_fissioning:
+		_tick_fission(dt)
 
-		if bud_parent and is_instance_valid(bud_parent):
-			var sep_dist := (bud_parent.body_radius * bud_parent.slime_scale + body_radius * slime_scale) * 1.15
-			position = bud_parent.position + bud_fwd * (sep_dist * e)
-			position.y = bud_parent.position.y
-
-		var stretch_amt := sin(k * PI) * 0.75
-		if _mat:
-			_mat.set_shader_parameter("uSplitAmt", stretch_amt)
-			_mat.set_shader_parameter("uSplitDir", -bud_fwd)
-
-		if k >= 1.0:
-			is_budding = false
-			bud_parent = null
-			slime_scale = bud_target_scale
-			if _mat:
-				_mat.set_shader_parameter("uSplitAmt", 0.0)
-
-	# --- Handle role-based input or AI driving ---
 	var desired := Vector3.ZERO
-	# Lock movement during clone snap animation; parent anchors/slows during viscous fission
-	if not is_budding:
-		match role:
-			Role.PLAYER:
-				desired = _process_player_input(dt)
-				if is_fissioning:
-					desired *= 0.35
-			Role.FOLLOWER:
-				desired = _process_follower_ai(dt)
-			Role.ROAMER:
-				desired = _process_roamer_ai(dt)
+	match role:
+		Role.PLAYER:
+			desired = _process_player_input()
+			if is_fissioning:
+				desired *= 0.35
+		Role.FOLLOWER:
+			desired = _process_follower_ai(dt)
+		Role.ROAMER:
+			desired = _process_roamer_ai(dt)
 
-	# --- Liquid transition ---
-	var target_liquid := 1.0 if liquid_mode else 0.0
-	liquid_amt += (target_liquid - liquid_amt) * (1.0 - exp(-12.0 * dt))
-	if _mat:
-		_mat.set_shader_parameter("uLiquid", liquid_amt)
+	_update_scale(dt)
+	_resolve_posture(dt)
+	model.resolve(slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir)
+	if props:
+		motor.set_exclude(props.rids_edible_by(self))
 
-	# --- Horizontal velocity update ---
-	var v_resp := velocity_response * (0.6 if liquid_amt > 0.5 else 1.0)
-	velocity = velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
-	var step := Vector2(velocity.x, velocity.z) * dt
-	var max_step := body_radius * slime_scale * 0.3
-	if step.length() > max_step:
-		step = step.normalized() * max_step
-	position.x += step.x
-	position.z += step.y
-
-	# Clamp to arena boundary
-	var flat := Vector2(position.x, position.z).length()
-	if flat > arena_radius:
-		position.x *= arena_radius / flat
-		position.z *= arena_radius / flat
-
-	# --- Scale smoothing (updated BEFORE vertical motion so ground height aligns with frame scale) ---
-	slime_scale += (target_scale - slime_scale) * (1.0 - exp(-scale_response * dt))
+	var v_resp := tuning.velocity_response * (0.6 if liquid_amt > 0.5 else 1.0)
+	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
+	motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
+	motor.update_support()
+	motor.move_vertical(dt, target_scale)
+	_clamp_arena()
 	_apply_transform()
 
-	# --- Vertical motion & climbing on props ---
-	_process_vertical(dt)
-
-	# --- Record breadcrumbs for followers ---
-	if role == Role.PLAYER:
-		_breadcrumb_timer += dt
-		if _breadcrumb_timer >= 0.1:
-			_breadcrumb_timer = 0.0
-			# Fix 20: Record environment (ceiling height, gap width) instead of raw liquid state.
-			# Followers use their own size to decide whether to flatten — not leader's Z state.
-			var ceiling_h := _measure_ceiling_clearance()
-			var gap_w := cur_gap_w
-			breadcrumbs.append({"pos": position, "ceiling_h": ceiling_h, "gap_w": gap_w, "time": _time})
-			if breadcrumbs.size() > 120:
-				breadcrumbs.pop_front()
-
-	# --- Crawl / lean springs ---
-	var speed := velocity.length()
-	speed01 = minf(speed / speed_for_full_crawl, 1.0)
-	if speed > 0.05:
-		_crawl_dir = Vector3(velocity.x, 0.0, velocity.z).normalized()
-	# Heavy crawl struggle when straining against an edible object near slime size
-	var crawl_strain := 1.0 - clampf(press_amt * 0.55, 0.0, 0.6)
-	_crawl_phase += speed * dt * crawl_rate * crawl_strain
-
-	var lean_target := Vector3(velocity.x * lean_gain * (1.0 - calm), 0.0, velocity.z * lean_gain * (1.0 - calm)) - _lean
-	_lean_vel += lean_target * lean_stiffness * dt
-	_lean_vel += _lean_vel * (-lean_damping * dt)
-	_lean += _lean_vel * dt
-	if _time - touch_time < 0.2:
-		_lean_vel = Vector3.ZERO
-		_lean *= exp(-14.0 * dt)
-
-	# --- Eyes orientation & blink ---
-	if speed > moving_threshold:
-		var diff := atan2(_crawl_dir.x, _crawl_dir.z) - _facing_yaw
-		diff = atan2(sin(diff), cos(diff))
-		_facing_yaw += diff * (1.0 - exp(-facing_response * dt))
-	var blink := blink_closed_amount if fmod(_time, blink_period) > blink_start else 1.0
-
-	# --- Per-frame shader uniforms ---
-	if _mat:
-		_mat.set_shader_parameter("uImpulseTime", _impulse_time)
-		_mat.set_shader_parameter("uImpulse2Time", _impulse2_time)
-		_mat.set_shader_parameter("uMoveDir", _crawl_dir)
-		_mat.set_shader_parameter("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
-		_mat.set_shader_parameter("uCrawl", _crawl_phase)
-		_mat.set_shader_parameter("uLean", _lean)
-		_mat.set_shader_parameter("uRippleIntensity", ripple_base + ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28)
-		_mat.set_shader_parameter("uFacing", _facing_yaw)
-		_mat.set_shader_parameter("uBlink", blink)
-
-	# --- Engulfing update ---
-	# Fix 21: Followers flattening to fit under overhangs must NOT accidentally devour props
-	if not (role == Role.FOLLOWER and _following_flatten):
-		_process_engulf(dt)
+	_update_presentation(dt)
+	_update_engulf(dt)
+	_tick_props(dt)
 
 
-func _process_player_input(dt: float) -> Vector3:
-	# Block Z (liquid) during fission — combining deformations causes visual/physics conflicts
-	var wants_liquid := Input.is_action_pressed("slime_liquid")
-	if is_fissioning:
-		liquid_mode = false
+func _tick_props(dt: float) -> void:
+	if props:
+		props.slime_ticked(self, dt)
+
+
+# ------------------------------------------------------------------------------------------------
+# Posture resolution (all transitions collision-tested over the whole footprint)
+# ------------------------------------------------------------------------------------------------
+
+func _update_scale(dt: float) -> void:
+	if absf(target_scale - slime_scale) < 1e-5:
+		return
+	var new_scale := lerpf(slime_scale, target_scale, 1.0 - exp(-tuning.scale_response * dt))
+	if absf(new_scale - target_scale) < 0.001:
+		new_scale = target_scale
+	if new_scale > slime_scale + 1e-6:
+		if not motor.posture_is_legal(new_scale, liquid_amt, height_ratio, squeeze_k, sq_dir):
+			expansion_blocked = "growth blocked by geometry"
+			return
+	slime_scale = new_scale
+
+
+func _resolve_posture(dt: float) -> void:
+	expansion_blocked = ""
+	_passage = {}
+	cur_gap_w = INF
+	var axis := sq_dir
+	var sq_target := 1.0
+
+	if props != null:
+		_passage = props.find_passage(self)
+	if not _passage.is_empty():
+		var gap_dir: Vector3 = _passage.get("axis", Vector3.ZERO)
+		if gap_dir.length_squared() > 1e-6:
+			axis = Vector3(gap_dir.x, 0.0, gap_dir.z).normalized()
+		var gap_w: float = _passage.get("width", INF)
+		var spread_now := lerpf(1.0, tuning.liquid_spread_ratio, liquid_amt)
+		var full_w := 2.0 * model.rest_max_radius * slime_scale * spread_now
+		var min_sq := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
+		var required := (gap_w - 2.0 * tuning.skin) / maxf(full_w, 1e-4)
+		sq_target = clampf(required, min_sq, 1.0)
+		var gc: Vector3 = _passage.get("center", Vector3.ZERO)
+		cur_gap_center = Vector2(gc.x, gc.z)
+		cur_gap_w = gap_w
+		cur_gap_dir = Vector2(axis.x, axis.z)
+	sq_dir = axis
+
+	# --- Lateral squeeze spring (tighten into a passage, release when clear) ---
+	var stiffness := tuning.squeeze_in_rate if sq_target < squeeze_k else tuning.squeeze_out_rate
+	squeeze_v += (stiffness * (sq_target - squeeze_k) - 2.0 * sqrt(stiffness) * squeeze_v) * dt
+	var sq_cand := squeeze_k + squeeze_v * dt
+	var min_sq_now := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
+	if sq_cand < squeeze_k:
+		sq_cand = maxf(sq_cand, min_sq_now)
+
+	# Resting in the open: the posture cannot change enough to matter, so skip
+	# rebuilding convex hulls every physics tick.
+	if absf(sq_cand - squeeze_k) < 1e-4 and squeeze_k >= 0.999 and sq_target >= 0.999:
+		squeeze_k = 1.0
+		squeeze_v = 0.0
 	else:
-		liquid_mode = wants_liquid
+		var r := _height_ratio_for(liquid_amt, sq_cand)
+		if motor.posture_is_legal(slime_scale, liquid_amt, r, sq_cand, axis):
+			squeeze_k = sq_cand
+		else:
+			squeeze_v = 0.0
+			if expansion_blocked == "":
+				expansion_blocked = motor.describe_block(r, sq_cand)
+			var test_sq := minf(sq_cand, 1.0)
+			if motor.posture_is_legal(slime_scale, liquid_amt, _height_ratio_for(liquid_amt, test_sq), test_sq, axis):
+				squeeze_k = minf(sq_cand, 1.0)
+			else:
+				squeeze_v = 0.0
+				if expansion_blocked == "":
+					expansion_blocked = motor.describe_block(_height_ratio_for(liquid_amt, 1.0), 1.0)
+	if squeeze_k < min_sq_now:
+		squeeze_k = min_sq_now
+
+	# --- Liquid posture blend ---
+	var target_liq := 1.0 if liquid_request else 0.0
+	var blend_rate := tuning.liquid_blend_rate if tuning != null else LIQUID_BLEND_RATE
+	var cand := clampf(liquid_amt + clampf(target_liq - liquid_amt, -blend_rate * dt, blend_rate * dt), 0.0, 1.0)
+	if absf(cand - liquid_amt) > 1e-6:
+		var ratio := _height_ratio_for(cand, squeeze_k)
+		if motor.posture_is_legal(slime_scale, cand, ratio, squeeze_k, axis):
+			liquid_amt = cand
+			height_ratio = ratio
+		else:
+			var good := liquid_amt
+			var bad := cand
+			for _i in 4:
+				var mid := (good + bad) * 0.5
+				var mr := _height_ratio_for(mid, squeeze_k)
+				if motor.posture_is_legal(slime_scale, mid, mr, squeeze_k, axis):
+					good = mid
+				else:
+					bad = mid
+			if absf(good - liquid_amt) > 1e-5:
+				liquid_amt = good
+				height_ratio = _height_ratio_for(good, squeeze_k)
+			if expansion_blocked == "":
+				expansion_blocked = motor.describe_block(ratio, squeeze_k)
+	else:
+		height_ratio = _height_ratio_for(liquid_amt, squeeze_k)
+
+
+## Height ratio for a candidate posture, reduced only as far as the liquid posture
+## allows and only when an overhead obstacle actually requires it.
+func _height_ratio_for(liq: float, sq: float) -> float:
+	var base := lerpf(1.0, tuning.liquid_height_ratio, liq)
+	# Normal posture never compresses vertically, so skip the ceiling cast entirely.
+	if liq <= 0.001:
+		return base
+	var boost := 1.0 + (1.0 - sq) * tuning.squeeze_height_gain * (1.0 - liq)
+	var rest_h := model.rest_full_height * slime_scale
+	var rise := motor.ceiling_clearance_up(rest_h * 1.2 + 0.05)
+	if rise == INF:
+		return base
+	var avail := model.full_height + rise
+	var wanted := rest_h * base * boost
+	if wanted <= avail + 1e-4:
+		return base
+	var allowed := clampf(avail / maxf(rest_h * boost, 1e-4), 0.0, 1.0)
+	var min_ratio := lerpf(1.0, tuning.min_liquid_height_ratio, liq)
+	return clampf(minf(base, allowed), min_ratio, 1.0)
+
+
+## Stand-up requests from AI must fit the whole body at full height right now.
+func _set_liquid_request(value: bool) -> void:
+	if value:
+		liquid_request = true
+		expansion_blocked = ""
+		return
+	if liquid_request:
+		if motor.posture_is_legal(slime_scale, 0.0, 1.0, squeeze_k, sq_dir):
+			liquid_request = false
+		elif expansion_blocked == "":
+			expansion_blocked = motor.describe_block(1.0, squeeze_k)
+	else:
+		liquid_request = false
+
+
+# ------------------------------------------------------------------------------------------------
+# Role input / AI
+# ------------------------------------------------------------------------------------------------
+
+func _process_player_input() -> Vector3:
+	var wants_liquid := Input.is_action_pressed("slime_liquid")
+	if is_fissioning or is_merging:
+		wants_liquid = false
+	liquid_request = wants_liquid
+	engulf_request = wants_liquid
 
 	var in_z := Input.get_axis("move_back", "move_forward")
 	var in_x := Input.get_axis("move_left", "move_right")
 
-	var fwd := Vector3(0, 0, -1)
+	var fwd := Vector3(0.0, 0.0, -1.0)
 	if camera:
 		fwd = -camera.global_transform.basis.z
 		fwd.y = 0.0
@@ -492,12 +523,12 @@ func _process_player_input(dt: float) -> Vector3:
 	var right := fwd.cross(Vector3.UP)
 	var desired := fwd * in_z + right * in_x
 
-	if liquid_mode:
-		cur_max = liquid_speed
+	if liquid_amt > 0.5:
+		cur_max = tuning.liquid_speed
 	elif Input.is_action_pressed("run"):
-		cur_max = run_speed
+		cur_max = tuning.run_speed
 	else:
-		cur_max = walk_speed
+		cur_max = tuning.walk_speed
 
 	if desired.length_squared() > 0.0:
 		desired = desired.normalized() * cur_max
@@ -505,7 +536,6 @@ func _process_player_input(dt: float) -> Vector3:
 
 
 func _process_follower_ai(dt: float) -> Vector3:
-	# Fix 20–23: Environment breadcrumbs, own clearance decision, stuck detection, beeline cap
 	if target_leader == null or not is_instance_valid(target_leader):
 		target_leader = null
 		if props and props.player_slime and is_instance_valid(props.player_slime) and props.player_slime != self:
@@ -514,7 +544,6 @@ func _process_follower_ai(dt: float) -> Vector3:
 			_following_flatten = false
 			return Vector3.ZERO
 
-	# Determine individual slot offset so followers don't stack on top of each other
 	var follower_index := 0
 	if props:
 		for s in props.registered_slimes:
@@ -523,11 +552,10 @@ func _process_follower_ai(dt: float) -> Vector3:
 			if is_instance_valid(s) and s.role == Role.FOLLOWER and s.target_leader == target_leader:
 				follower_index += 1
 
-	var slot_spacing := (slime_scale * body_radius * 2.0 + 0.8)
-	var desired_dist := follow_distance * (target_leader.slime_scale + slime_scale) * 0.5 + float(follower_index) * slot_spacing
+	var slot_spacing := model.rest_max_radius * slime_scale * 2.0 + 0.8
+	var desired_dist := tuning.follow_distance * (target_leader.slime_scale + slime_scale) * 0.5 + float(follower_index) * slot_spacing
 
-	var target_pt := target_leader.position
-	# Fix 20: Use recorded environment to decide liquid — NOT the leader's liquid_mode directly
+	var target_pt := target_leader.global_position
 	var env_ceiling_h := INF
 	var env_gap_w := INF
 
@@ -535,9 +563,9 @@ func _process_follower_ai(dt: float) -> Vector3:
 	var found_breadcrumb := false
 	if trail.size() > 0:
 		var accum := 0.0
-		var prev := target_leader.position
+		var prev := target_leader.global_position
 		for i in range(trail.size() - 1, -1, -1):
-			var b = trail[i]
+			var b: Dictionary = trail[i]
 			accum += prev.distance_to(b["pos"])
 			prev = b["pos"]
 			if accum >= desired_dist:
@@ -548,57 +576,49 @@ func _process_follower_ai(dt: float) -> Vector3:
 				break
 
 	if not found_breadcrumb:
-		# Fallback: stay behind leader rather than collapsing onto leader's center
 		var leader_back := -target_leader._crawl_dir
 		if leader_back.length_squared() < 0.01:
-			leader_back = Vector3(0, 0, 1)
-		target_pt = target_leader.position + leader_back.normalized() * desired_dist
+			leader_back = Vector3(0.0, 0.0, 1.0)
+		target_pt = target_leader.global_position + leader_back.normalized() * desired_dist
 
-	var to_target := target_pt - position
+	var to_target := target_pt - global_position
 	to_target.y = 0.0
 	var dist := to_target.length()
 
-	# Fix 22: Follower stuck detection
 	_follower_stuck_timer += dt
-	if _ai_last_pos.distance_squared_to(position) > 0.3:
+	if _ai_last_pos.distance_squared_to(global_position) > 0.3:
 		_follower_stuck_timer = 0.0
-		_ai_last_pos = position
-	if _follower_stuck_timer > 3.0 and dist > 1.0:
-		# Pick an intermediate position offset to get unstuck
+		_ai_last_pos = global_position
+	if _follower_stuck_timer > tuning.follower_stuck_time and dist > 1.0:
 		var perp := to_target.cross(Vector3.UP).normalized()
-		target_pt = position + perp * 3.0 + to_target.normalized() * 2.0
+		target_pt = global_position + perp * 3.0 + to_target.normalized() * 2.0
 		_follower_stuck_timer = 0.0
-		# Recompute to_target and dist after modifying target_pt (Fix 13)
-		to_target = target_pt - position
+		to_target = target_pt - global_position
 		to_target.y = 0.0
 		dist = to_target.length()
 
-	# Fix 20: Decide liquid from environment, not leader's state
-	# Need clearance for our actual size, with lookahead (start flattening before reaching low spot)
-	var my_full_height := height_per_scale * slime_scale * 2.0
-	var needs_flat := env_ceiling_h < my_full_height * 1.1 or env_gap_w < body_radius * slime_scale * 1.8
-	# Hysteresis: flatten when needed, only un-flatten when clearance is comfortable
-	var has_room := env_ceiling_h > my_full_height * 1.4 and env_gap_w > body_radius * slime_scale * 2.5
-	if needs_flat and not _following_flatten:
+	# Own dimensions against the recorded environment; safety comes from queries.
+	var my_full_height := model.rest_full_height * slime_scale
+	var my_width := 2.0 * model.rest_max_radius * slime_scale
+	var needs_flat := env_ceiling_h < my_full_height * 1.1 or env_gap_w < my_width * 1.5
+	var has_room := env_ceiling_h > my_full_height * 1.35 and env_gap_w > my_width * 2.0
+	if needs_flat and not liquid_request:
 		_following_flatten = true
-		liquid_mode = true
 	elif _following_flatten and has_room:
 		_following_flatten = false
-		liquid_mode = false
-	# Also flatten if our own squeeze detector says we're squeezing
-	if squeeze_k < 0.65 and not _following_flatten:
+	if _following_flatten:
+		_set_liquid_request(true)
+	elif liquid_request and has_room and squeeze_k > 0.9:
+		_set_liquid_request(false)
+	if squeeze_k < 0.7 and not liquid_request:
 		_following_flatten = true
-		liquid_mode = true
-	elif _following_flatten and squeeze_k > 0.85 and has_room:
-		_following_flatten = false
-		liquid_mode = false
+		_set_liquid_request(true)
 
-	# Fix 23: Cap beeline speed — no tunneling through walls when catching up
-	var base_speed := liquid_speed if liquid_mode else walk_speed
-	var max_catch_up := run_speed * 0.9
-	cur_max = max_catch_up if dist > 8.0 else base_speed
+	var posture_max := tuning.liquid_speed if liquid_amt > 0.5 else tuning.walk_speed
+	cur_max = posture_max
+	if dist > tuning.follower_catch_up_distance and liquid_amt < 0.5:
+		cur_max = tuning.run_speed * 0.9
 
-	# Smooth arrival easing to prevent stopping threshold jitter/overshoot
 	var stop_dist := slime_scale * 0.35 + 0.2
 	var slow_dist := stop_dist + 2.0
 	if dist <= stop_dist:
@@ -610,297 +630,334 @@ func _process_follower_ai(dt: float) -> Vector3:
 
 
 func _process_roamer_ai(dt: float) -> Vector3:
-	## Fix 19: Pure wander — no food goal-seeking. Gentle heading drift with collision-driven liquid.
 	_ai_roam_timer += dt
 	_ai_stuck_timer += dt
 	if _ai_recovery_timer > 0.0:
 		_ai_recovery_timer = maxf(0.0, _ai_recovery_timer - dt)
 
-	# Stuck detection
-	if _ai_last_pos.distance_squared_to(position) > 0.2:
+	if _ai_last_pos.distance_squared_to(global_position) > 0.2:
 		_ai_stuck_timer = 0.0
-		_ai_last_pos = position
+		_ai_last_pos = global_position
 
-	# Stuck recovery: pick an escape heading and go liquid briefly
-	if _ai_stuck_timer > 2.5:
-		if _ai_stuck_timer > 4.5:
+	if _ai_stuck_timer > tuning.roamer_stuck_time:
+		if _ai_stuck_timer > tuning.roamer_stuck_time * 1.8:
 			var ang := randf() * TAU
-			var escape_dest := position + Vector3(cos(ang) * 12.0, 0, sin(ang) * 12.0)
+			var escape_dest := global_position + Vector3(cos(ang) * 12.0, 0.0, sin(ang) * 12.0)
 			var flat := Vector2(escape_dest.x, escape_dest.z)
-			if flat.length() > arena_radius * 0.85:
-				flat = flat.normalized() * (arena_radius * 0.75)
+			if flat.length() > tuning.arena_radius * 0.85:
+				flat = flat.normalized() * (tuning.arena_radius * 0.75)
 				escape_dest.x = flat.x
 				escape_dest.z = flat.y
 			_ai_target_pos = escape_dest
 			_ai_stuck_timer = 0.0
-			_ai_recovery_timer = 2.5
-		# Liquid during stuck, cleared below with hysteresis
-		if not liquid_mode:
-			liquid_mode = true
+			_ai_recovery_timer = tuning.roamer_recover_time
+		_set_liquid_request(true)
 
-	# Liquid hysteresis: squeeze_k < 0.6 → go liquid; don't un-liquid until squeeze_k > 0.85
-	# This prevents rapid flickering at the threshold.
-	if squeeze_k < 0.6 and not liquid_mode:
-		liquid_mode = true
-	elif liquid_mode and squeeze_k > 0.85 and _ai_recovery_timer <= 0.0 and _ai_stuck_timer < 1.0:
-		liquid_mode = false
+	if squeeze_k < 0.6 and not liquid_request:
+		_set_liquid_request(true)
+	elif liquid_request and squeeze_k > 0.92 and _ai_recovery_timer <= 0.0 and _ai_stuck_timer < 1.0:
+		_set_liquid_request(false)
 
-	# Wander: pick a new gentle heading every 2–4 seconds
-	if _ai_roam_timer > 0.0 and (position.distance_squared_to(_ai_target_pos) < 9.0 or _ai_target_pos == Vector3.ZERO):
+	if _ai_roam_timer > 0.0 and (global_position.distance_squared_to(_ai_target_pos) < 9.0 or _ai_target_pos == Vector3.ZERO):
 		_ai_roam_timer = 0.0
-		# Drift heading ±45° from current crawl direction rather than fully random long goals
 		var base_ang := atan2(_crawl_dir.x, _crawl_dir.z) if _crawl_dir.length_squared() > 0.01 else randf() * TAU
 		var drift := randf_range(-PI * 0.4, PI * 0.4)
 		var new_ang := base_ang + drift
 		var wander_dist := randf_range(6.0, 14.0)
-		var wander_dest := position + Vector3(sin(new_ang) * wander_dist, 0.0, cos(new_ang) * wander_dist)
+		var wander_dest := global_position + Vector3(sin(new_ang) * wander_dist, 0.0, cos(new_ang) * wander_dist)
 		var flat := Vector2(wander_dest.x, wander_dest.z)
-		if flat.length() > arena_radius * 0.85:
-			flat = flat.normalized() * (arena_radius * 0.75)
+		if flat.length() > tuning.arena_radius * 0.85:
+			flat = flat.normalized() * (tuning.arena_radius * 0.75)
 			wander_dest.x = flat.x
 			wander_dest.z = flat.y
 		_ai_target_pos = wander_dest
-		# Randomize next heading change interval (2–4 s)
 		_ai_roam_timer = -randf_range(2.0, 4.0)
 
-	var wander_dir := (_ai_target_pos - position)
+	var wander_dir := _ai_target_pos - global_position
 	wander_dir.y = 0.0
 	var desired_heading := wander_dir.normalized() if wander_dir.length_squared() > 0.01 else _crawl_dir
 
-	cur_max = liquid_speed if liquid_mode else walk_speed
+	cur_max = tuning.liquid_speed if liquid_amt > 0.5 else tuning.walk_speed
 	return desired_heading * cur_max
 
 
-func _find_best_food_for_roamer():
+# ------------------------------------------------------------------------------------------------
+# Presentation
+# ------------------------------------------------------------------------------------------------
+
+func _update_presentation(dt: float) -> void:
+	var speed := motor.velocity.length()
+	speed01 = minf(speed / maxf(tuning.speed_for_full_crawl, 0.01), 1.0)
+	if speed > 0.05:
+		_crawl_dir = Vector3(motor.velocity.x, 0.0, motor.velocity.z).normalized()
+
+	var crawl_strain := 1.0 - clampf(press_amt * 0.55, 0.0, 0.6)
+	_crawl_phase += speed * dt * tuning.crawl_rate * crawl_strain
+
+	var lean_target := Vector3(motor.velocity.x * tuning.lean_gain * (1.0 - calm), 0.0, motor.velocity.z * tuning.lean_gain * (1.0 - calm)) - _lean
+	_lean_vel += lean_target * tuning.lean_stiffness * dt
+	_lean_vel += _lean_vel * (-tuning.lean_damping * dt)
+	_lean += _lean_vel * dt
+	if _time - touch_time < 0.2:
+		_lean_vel = Vector3.ZERO
+		_lean *= exp(-14.0 * dt)
+
+	if speed > tuning.moving_threshold:
+		var diff := atan2(_crawl_dir.x, _crawl_dir.z) - _facing_yaw
+		diff = atan2(sin(diff), cos(diff))
+		_facing_yaw += diff * (1.0 - exp(-tuning.facing_response * dt))
+	var blink := tuning.blink_closed_amount if fmod(_time, tuning.blink_period) > tuning.blink_start else 1.0
+
+	if _mat:
+		_mat.set_shader_parameter("uImpulseTime", _impulse_time)
+		_mat.set_shader_parameter("uImpulse2Time", _impulse2_time)
+		_mat.set_shader_parameter("uMoveDir", _crawl_dir)
+		_mat.set_shader_parameter("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
+		_mat.set_shader_parameter("uCrawl", _crawl_phase)
+		_mat.set_shader_parameter("uLean", _lean)
+		_mat.set_shader_parameter("uRippleIntensity", tuning.ripple_base + tuning.ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28)
+		_mat.set_shader_parameter("uFacing", _facing_yaw)
+		_mat.set_shader_parameter("uBlink", blink)
+		_mat.set_shader_parameter("uLiquid", liquid_amt)
+		_mat.set_shader_parameter("uLiquidHeight", height_ratio)
+		_mat.set_shader_parameter("uLiquidSpread", model.spread)
+		_mat.set_shader_parameter("uSqueeze", clampf(1.0 - squeeze_k, -0.3, 0.94))
+		_mat.set_shader_parameter("uSqueezeDir", sq_dir)
+		if cur_gap_w < INF:
+			var off := Vector3(cur_gap_center.x, 0.0, cur_gap_center.y) - global_position
+			var ml := model.mesh_local(off)
+			_mat.set_shader_parameter("uGapLocal", Vector3(ml.x, 0.0, ml.z))
+
+	if role == Role.PLAYER:
+		_breadcrumb_timer += dt
+		if _breadcrumb_timer >= tuning.breadcrumb_interval:
+			_breadcrumb_timer = 0.0
+			breadcrumbs.append({"pos": global_position, "ceiling_h": _measure_ceiling_clearance(), "gap_w": cur_gap_w, "time": _time})
+			while breadcrumbs.size() > tuning.breadcrumb_limit:
+				breadcrumbs.pop_front()
+
+
+func _measure_ceiling_clearance() -> float:
+	var rise := motor.ceiling_clearance_up(model.rest_full_height * slime_scale)
+	if rise == INF:
+		return INF
+	return model.full_height + rise
+
+
+# ------------------------------------------------------------------------------------------------
+# Engulf (drape) — request-driven, always decays
+# ------------------------------------------------------------------------------------------------
+
+func _update_engulf(dt: float) -> void:
 	if props == null:
-		return null
-	var edible_lim := body_radius * slime_scale * 1.5
-	var best_p = null
-	var best_score := -99999.0
+		return
 
-	for p in props.props:
-		if p.state != SlimeProps.STATE_IDLE or p.get("is_static") or p.radius >= edible_lim:
-			continue
-		if p.mesh == null or not is_instance_valid(p.mesh):
-			continue
-		var dist := position.distance_to(p.mesh.position)
-		if dist > 85.0:
-			continue
-		var score: float = (p.radius * 25.0) - dist * 1.2
-		if score > best_score:
-			best_score = score
-			best_p = p
-	return best_p
-
-
-func _process_vertical(dt: float) -> void:
-	# Node position stays firmly at support height; vertex shader flattens from the top down to the floor
-	var S := slime_scale
-	var full_target_y := support_y + (height_per_scale * S)
-
-	# Fix 6: Before standing back up from liquid, check for overhead clearance.
-	# If a prop is in the way, stay flat (liquid_clearance_ratio height) rather than getting ejected sideways.
-	# Overhead clearance check:
-	# Keep the base firmly anchored to support_y, and pass headroom compression to shader,
-	# NEVER sink the node position.y into the floor!
-	var target_y := full_target_y
-	var overhead_compression := 1.0
-	if liquid_amt > 0.05 and props != null:
-		var full_top := support_y + (2.0 * height_per_scale * S)
-		var flat_top := support_y + (2.0 * height_per_scale * S * liquid_height_ratio)
-		var slime_r := body_radius * S
-		var overhead_blocked := false
-		for p in props.props:
-			if p.state != SlimeProps.STATE_IDLE or p.mesh == null:
-				continue
-			var m := p.mesh
-			var he := props._half_of(p)
-			var prop_bottom := m.position.y - he.y
-			if prop_bottom < flat_top or prop_bottom > full_top + 0.2:
-				continue
-			var dx := m.position.x - position.x
-			var dz := m.position.z - position.z
-			var dist_h := Vector2(dx, dz).length()
-			if dist_h < slime_r + maxf(he.x, he.z) * 0.9:
-				overhead_blocked = true
-				var available_height := maxf(0.1, prop_bottom - support_y)
-				overhead_compression = clampf(available_height / (2.0 * height_per_scale * S), liquid_height_ratio, 1.0)
-				break
-		if overhead_blocked and not liquid_mode and role == Role.PLAYER:
-			liquid_mode = true
-
-	set_shader_param("uOverheadCompress", overhead_compression)
-
-	# Fix 25: When shrinking (target_scale < slime_scale), target_y drops and would trigger
-	# gravity fall. Instead, lerp down smoothly to avoid a micro-bounce on every split/merge.
-	var is_shrinking := target_scale < slime_scale - 0.01
-	if position.y > target_y + 0.02 and not is_shrinking:
-		is_on_ground = false
-		vertical_vel -= 22.0 * dt
-		position.y += vertical_vel * dt
-		if position.y <= target_y:
-			position.y = target_y
-			vertical_vel = 0.0
-			is_on_ground = true
-	else:
-		position.y = lerpf(position.y, target_y, 1.0 - exp(-16.0 * dt))
-		vertical_vel = 0.0
-		is_on_ground = true
-	# In liquid mode the puddle still must stay at or above the floor — clamp it.
-	var liquid_floor := floor_y + height_per_scale * S * liquid_height_ratio * 0.5
-	if liquid_amt > 0.1 and position.y < liquid_floor:
-		position.y = liquid_floor
-
-
-func _process_engulf(dt: float) -> void:
-	# Liquid mode (Z key) engulfing:
-	# If covering an object with the liquid body from above or all around,
-	# the slime drapes over and devours the object!
-	# NO arbitrary radius cutoffs — eligibility is determined by physical coverage and volume budget!
 	var target_p = null
-	if liquid_mode and liquid_amt > 0.35 and props != null:
-		var S := slime_scale
-		var spread := lerpf(1.0, liquid_spread_ratio, liquid_amt)
-		var puddle_radius := body_radius * S * spread
-		# Actual liquid puddle bottom sits at support_y / floor_y:
-		var puddle_bottom := support_y
+	if engulf_request and liquid_amt > 0.35:
+		var puddle_radius := minf(model.semi_a, model.semi_b)
 		var my_volume := get_volume()
-
-		# Check props: prioritize currently mounted ground_prop if any, else check nearby props
-		var candidates: Array = []
-		if ground_prop != null and ground_prop.state == SlimeProps.STATE_IDLE and not ground_prop.is_static:
-			candidates.append(ground_prop)
-		for p in props.props:
-			if p.state == SlimeProps.STATE_IDLE and not p.is_static and p != ground_prop:
-				candidates.append(p)
-
 		var best_score := -INF
-		for p in candidates:
+		for p in props.props:
+			if p.state != SlimeProps.STATE_IDLE or p.is_static:
+				continue
 			var m: MeshInstance3D = p.mesh
 			if m == null or not is_instance_valid(m):
 				continue
 			var he: Vector3 = props._half_of(p)
-			var prop_top: float = m.position.y + he.y
-			var prop_bottom: float = m.position.y - he.y
+			var prop_top: float = m.global_position.y + he.y
+			var prop_bottom: float = m.global_position.y - he.y
 
-			# Section 4 Volume budget: covering requires enough slime volume to form a shell
-			# Shell area approx = top footprint + side walls
 			var top_area := 4.0 * he.x * he.z if p.shape == SlimeProps.SHAPE_BOX else (PI * he.x * he.z)
 			var side_area := (4.0 * he.x + 4.0 * he.z) * (2.0 * he.y)
-			var min_shell_thickness := 0.08 * S
-			var needed_shell_volume := (top_area + side_area) * min_shell_thickness
+			var needed_shell_volume := (top_area + side_area) * 0.08 * slime_scale
 			if my_volume < needed_shell_volume * 0.8:
-				continue # Slime doesn't have enough volume to cover this shape
+				continue
 
-			var flat_d: float = Vector2(position.x - m.position.x, position.z - m.position.z).length()
-
-			# Coverage check against real footprint (corner / vertex reach):
+			var flat_d: float = Vector2(global_position.x - m.global_position.x, global_position.z - m.global_position.z).length()
 			var prop_max_r: float = Vector2(he.x, he.z).length()
-			var covers_horiz := (flat_d + prop_max_r <= puddle_radius * 1.05)
-
-			# Vertical reach: slime must be atop or draping down over the prop
-			var touches_vert := (puddle_bottom <= prop_top + 0.3 * S) and (position.y + 0.5 * S >= prop_bottom)
-
+			var covers_horiz := flat_d + prop_max_r <= puddle_radius * 1.05
+			var touches_vert := model.foot.y <= prop_top + 0.3 * slime_scale and global_position.y + 0.5 * slime_scale >= prop_bottom
 			if covers_horiz and touches_vert:
-				var score: float = 1000.0 - flat_d
+				var score := 1000.0 - flat_d
 				if score > best_score:
 					best_score = score
 					target_p = p
-				break # Found best valid candidate (prioritized ground_prop)
 
 	if target_p != null:
 		if engulf_target != target_p:
 			engulf_target = target_p
 			engulf_progress = 0.0
-
-		engulf_progress = minf(1.0, engulf_progress + dt / maxf(devour_duration, 0.1))
-
-		if _mat and target_p.mesh and is_instance_valid(target_p.mesh):
-			var m: MeshInstance3D = target_p.mesh
-			_mat.set_shader_parameter("uDrapePos", (m.position - position) / slime_scale)
-			_mat.set_shader_parameter("uDrapeHalf", target_p.half * m.scale.x / slime_scale)
+		engulf_progress = minf(1.0, engulf_progress + dt / maxf(tuning.devour_duration, 0.1))
+		var m: MeshInstance3D = target_p.mesh
+		if _mat and m and is_instance_valid(m):
+			_mat.set_shader_parameter("uDrapePos", (m.global_position - global_position) / maxf(slime_scale, 1e-4))
+			_mat.set_shader_parameter("uDrapeHalf", props._half_of(target_p) / maxf(slime_scale, 1e-4))
 			_mat.set_shader_parameter("uDrapeShape", float(target_p.shape) + target_p.sides * 0.01)
 			_mat.set_shader_parameter("uDrapeYaw", m.rotation.y)
 			_mat.set_shader_parameter("uDrapeAmt", engulf_progress)
-
 		if engulf_progress >= 1.0:
-			_devour_prop(target_p)
+			props.devour(target_p, self)
 			engulf_progress = 0.0
 			engulf_target = null
-			if _mat:
-				_mat.set_shader_parameter("uDrapeAmt", 0.0)
+			set_shader_param("uDrapeAmt", 0.0)
 		return
 
-	# Target was lost or not covering: decay visual draping and progress
 	if engulf_progress > 0.0:
 		engulf_progress = maxf(0.0, engulf_progress - dt * 2.0)
-		if _mat:
-			_mat.set_shader_parameter("uDrapeAmt", engulf_progress)
+		set_shader_param("uDrapeAmt", engulf_progress)
 		if engulf_progress <= 0.001:
 			engulf_progress = 0.0
 			engulf_target = null
-			if _mat:
-				_mat.set_shader_parameter("uDrapeAmt", 0.0)
+			set_shader_param("uDrapeAmt", 0.0)
 	else:
 		engulf_target = null
 
 
-func _measure_ceiling_clearance() -> float:
-	## Returns the vertical clearance above this slime (distance to nearest overhead prop bottom).
-	if props == null:
-		return INF
-	var S := slime_scale
-	var slime_top := position.y + height_per_scale * S
-	var slime_r := body_radius * S
-	var closest := INF
-	for p in props.props:
-		if p.state != SlimeProps.STATE_IDLE or p.mesh == null:
-			continue
-		var m := p.mesh
-		var he := props._half_of(p)
-		var prop_bottom := m.position.y - he.y
-		if prop_bottom <= slime_top:
-			continue  # below or at our level
-		var dx := m.position.x - position.x
-		var dz := m.position.z - position.z
-		if Vector2(dx, dz).length() < slime_r + maxf(he.x, he.z):
-			var clearance := prop_bottom - slime_top
-			if clearance < closest:
-				closest = clearance
-	return closest
+# ------------------------------------------------------------------------------------------------
+# Fission / budding / merge
+# ------------------------------------------------------------------------------------------------
+
+func _tick_fission(dt: float) -> void:
+	fission_timer += dt
+	var k := clampf(fission_timer / maxf(tuning.fission_duration, 0.01), 0.0, 1.0)
+	const SNAP_POINT := 0.70
+
+	if k < SNAP_POINT:
+		# Phase 1: tension stretch and neck formation against the separating half.
+		var stretch_k := k / SNAP_POINT
+		var e := sin(stretch_k * PI * 0.5)
+		slime_scale = lerpf(fission_start_scale, fission_start_scale * 0.8 + fission_target_scale * 0.2, e)
+		set_shader_param("uSplitAmt", e * 0.95)
+	else:
+		# Phase 2: the bridge snaps, and the body recoils with an elastic jiggle.
+		if not _fission_snapped:
+			_fission_snapped = true
+			trigger_poke(Vector3(fission_fwd.x, 0.25, fission_fwd.z).normalized() * 1.5, -fission_fwd * 1.6)
+			trigger_poke2(Vector3(-fission_fwd.x, -0.1, -fission_fwd.z).normalized() * 1.5, fission_fwd * 0.8)
+
+		var snap_k := (k - SNAP_POINT) / (1.0 - SNAP_POINT)
+		var snap_e := sin(snap_k * PI * 0.5)
+		slime_scale = lerpf(fission_start_scale * 0.8 + fission_target_scale * 0.2, fission_target_scale, snap_e)
+		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
+		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
+
+	model.resolve(slime_scale, 0.0, 1.0, squeeze_k, sq_dir)
+	motor.update_support()
+	motor.move_vertical(dt, target_scale)
+	_apply_transform()
+	set_shader_param("uSplitDir", fission_fwd)
+
+	if k >= 1.0:
+		is_fissioning = false
+		slime_scale = fission_target_scale
+		set_shader_param("uSplitAmt", 0.0)
 
 
-func _devour_prop(p) -> void:
-	if p == null or p.state != SlimeProps.STATE_IDLE:
+func _tick_budding(dt: float) -> void:
+	bud_timer += dt
+	var k := clampf(bud_timer / maxf(tuning.bud_duration, 0.01), 0.0, 1.0)
+	const SNAP_POINT := 0.70
+
+	if k < SNAP_POINT:
+		# Phase 1: the droplet clings to the parent and is drawn out under tension.
+		var stretch_k := k / SNAP_POINT
+		var e := sin(stretch_k * PI * 0.5)
+		slime_scale = lerpf(bud_target_scale * 0.40, bud_target_scale * 0.85, e)
+		set_shader_param("uSplitAmt", e * 0.95)
+
+		if bud_parent and is_instance_valid(bud_parent):
+			var pull := pow(stretch_k, 1.6)
+			var sep := (bud_parent.model.rest_max_radius * bud_parent.slime_scale + model.rest_max_radius * slime_scale) * (0.35 + 0.60 * pull)
+			var target_pos := bud_parent.global_position + bud_fwd * sep
+			var motion := target_pos - global_position
+			motion.y = 0.0
+			motor.move_horizontal(motion)
+	else:
+		# Phase 2: the neck snaps and the free droplet overshoots then settles.
+		if not _bud_snapped:
+			_bud_snapped = true
+			trigger_poke(Vector3(-bud_fwd.x, 0.25, -bud_fwd.z).normalized() * 1.5, bud_fwd * 1.6)
+			trigger_poke2(Vector3(bud_fwd.x, -0.1, bud_fwd.z).normalized() * 1.4, -bud_fwd * 0.8)
+
+		var snap_k := (k - SNAP_POINT) / (1.0 - SNAP_POINT)
+		var snap_e := sin(snap_k * PI * 0.5)
+		slime_scale = lerpf(bud_target_scale * 0.85, bud_target_scale, snap_e)
+		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
+		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
+
+		if bud_parent and is_instance_valid(bud_parent):
+			var sep := (bud_parent.model.rest_max_radius * bud_parent.slime_scale + model.rest_max_radius * slime_scale) * (0.95 + 0.18 * snap_e)
+			var target_pos := bud_parent.global_position + bud_fwd * sep
+			var motion := target_pos - global_position
+			motion.y = 0.0
+			motor.move_horizontal(motion)
+
+	model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
+	motor.update_support()
+	motor.move_vertical(dt, target_scale)
+	_apply_transform()
+	set_shader_param("uSplitDir", -bud_fwd)
+
+	if k >= 1.0:
+		is_budding = false
+		bud_parent = null
+		slime_scale = bud_target_scale
+		set_shader_param("uSplitAmt", 0.0)
+
+
+func _tick_merge(dt: float) -> void:
+	merge_timer += dt
+	if merge_target == null or not is_instance_valid(merge_target) or merge_target.is_merging:
+		_cancel_merge()
+		_tick_props(dt)
 		return
-	p.state = SlimeProps.STATE_EATING
-	p.eater = self
-	p.base_scale = p.mesh.scale # store exact scale: can never grow bigger when digesting!
-	p.t = 0.0
-	p.start = p.mesh.position
-	p.off = Vector3(randf() - 0.5, -0.1 + randf() * 0.3, randf() - 0.5)
-	# Fix 14: Use real_volume (not radius³×0.3) so Z-eat and push-eat give identical growth
-	p.total_mass = p.real_volume
-	p.absorbed_mass = 0.0
-	# Fix 14: Append AFTER state is set so _update_digesting_props can't double-process
-	if not inside_props.has(p):
-		inside_props.append(p)
-	if props:
-		props.eaten += 1
-		props.eaten_changed.emit(props.eaten)
+
+	var delta := merge_target.global_position - global_position
+	delta.y = 0.0
+	var dist := delta.length()
+	if dist > 1e-4:
+		motor.move_horizontal(delta)
+	slime_scale = maxf(0.02, lerpf(slime_scale, 0.02, 1.0 - exp(-12.0 * dt)))
+	model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
+	motor.update_support()
+	motor.move_vertical(dt, 0.02)
+	_apply_transform()
+
+	var close := dist < 0.6 * maxf(merge_target.model.rest_max_radius * merge_target.slime_scale, 0.2)
+	if merge_timer >= tuning.merge_duration or close:
+		if not _has_merged:
+			_has_merged = true
+			merge_target.add_volume(get_volume())
+			merge_target.trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.65, 0.0))
+			merge_target.trigger_poke2(Vector3(0.0, -0.3, 0.0), Vector3(0.0, 0.5, 0.0))
+			if props:
+				for p in props.props:
+					if p.state == SlimeProps.STATE_EATING and p.eater == self:
+						p.eater = merge_target
+						if not merge_target.inside_props.has(p):
+							merge_target.inside_props.append(p)
+				props.unregister_slime(self)
+			inside_props.clear()
+			queue_free()
+			return
+	_tick_props(dt)
+
+
+func _cancel_merge() -> void:
+	is_merging = false
+	merge_target = null
+	merge_timer = 0.0
+	_has_merged = false
 
 
 func split_clone(clone_role: Role) -> void:
-	## Split into two independent volume-conserved slimes (each = 0.7937x parent scale).
-	# Block splits during liquid mode (Z), while transitioning back to solid, or while engulfing
-	if target_scale < 0.45 or is_fissioning or is_budding or is_merging:
+	if target_scale < tuning.min_split_scale or is_fissioning or is_budding or is_merging:
 		return
-	if liquid_mode or liquid_amt > 0.1 or engulf_target != null or Input.is_action_pressed("slime_liquid"):
+	if liquid_amt > 0.1 or engulf_target != null or liquid_request:
 		return
 
-	# Fix 26: Use camera direction if slime is standing still, rather than stale _crawl_dir
 	var fwd: Vector3
-	if velocity.length() > 0.3:
+	if motor.velocity.length() > 0.3:
 		fwd = _crawl_dir.normalized()
 	elif camera:
 		fwd = -camera.global_transform.basis.z
@@ -909,24 +966,23 @@ func split_clone(clone_role: Role) -> void:
 	else:
 		fwd = _crawl_dir.normalized()
 	if fwd.length_squared() < 0.01:
-		fwd = Vector3(0, 0, -1)
+		fwd = Vector3(0.0, 0.0, -1.0)
 
 	var split_fwd := -fwd
-	var new_target_scale := target_scale * pow(0.5, 1.0 / 3.0)
+	var half_volume := get_volume() * 0.5
+	var new_target_scale := pow(half_volume / tuning.volume_per_scale_cubed(), 1.0 / 3.0)
 
-	# Spawn clone FIRST. If spawning fails, parent is completely untouched!
 	var clone := _spawn_fission_clone(clone_role, split_fwd, new_target_scale)
 	if clone == null:
 		return
 
-	# Only commit parent fission state after successful clone spawn
 	fission_fwd = split_fwd
-	fission_duration = 0.38
 	fission_start_scale = slime_scale
 	fission_target_scale = new_target_scale
-	target_scale = new_target_scale
+	set_volume(half_volume)
 	is_fissioning = true
 	fission_timer = 0.0
+	_fission_snapped = false
 
 
 func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale: float) -> Slime:
@@ -938,97 +994,54 @@ func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale
 		return null
 
 	clone.role = clone_role
+	clone.tuning = tuning
+	clone.props = props
+	clone.floor_mesh = floor_mesh
+	clone.camera = null
 	clone.start_scale = clone_target_scale * 0.25
 	clone.target_scale = clone_target_scale
 	clone.slime_scale = clone.start_scale
-	clone.props = props
-	clone.floor_mesh = floor_mesh
-	clone.floor_y = floor_y
-	clone.support_y = support_y
-
-	clone.position = position + fwd_dir * (0.2 * body_radius * clone_target_scale)
-	clone.position.y = position.y
+	clone._velocity_cache = Vector3.ZERO
+	clone.position = global_position + fwd_dir * (0.2 * model.rest_max_radius * clone_target_scale)
+	clone.position.y = global_position.y
 	clone._facing_yaw = _facing_yaw
-
 	if clone_role == Role.FOLLOWER:
 		clone.target_leader = self
 
 	clone.is_budding = true
 	clone.bud_parent = self
 	clone.bud_timer = 0.0
-	clone.bud_duration = 0.38
 	clone.bud_target_scale = clone_target_scale
 	clone.bud_fwd = fwd_dir
 
-	var p_node := get_parent()
-	if p_node:
-		p_node.add_child(clone)
-	else:
+	var parent_node := get_parent()
+	if parent_node == null:
 		return null
-
+	parent_node.add_child(clone)
+	clone.motor.recover_overlap()
 	return clone
 
 
 func merge_nearby_clones() -> void:
-	# Fix 8: Block merging during liquid/engulf states
 	if props == null or is_merging or is_fissioning or is_budding:
 		return
-	if liquid_mode or liquid_amt > 0.1:
+	if liquid_amt > 0.1:
 		return
-	# Reduced merge range to prevent pulling clones through walls
-	var merge_rad := (body_radius * slime_scale) * 2.5 + 1.0
+
+	var merge_rad := model.rest_max_radius * slime_scale * tuning.merge_range_factor + 1.0
 	var to_merge: Array[Slime] = []
 
 	for s in props.registered_slimes:
 		if s == self or not is_instance_valid(s) or s.is_merging or s.is_fissioning or s.is_budding:
 			continue
-		# Fix 9: Skip clones in liquid state too (undefined interaction)
-		if s.liquid_mode or s.liquid_amt > 0.1:
+		if s.liquid_amt > 0.1:
 			continue
-		var dist := position.distance_to(s.position)
-		if dist > merge_rad + (s.body_radius * s.slime_scale):
+		var dist := global_position.distance_to(s.global_position)
+		if dist > merge_rad + s.model.rest_max_radius * s.slime_scale:
 			continue
-		# Simple line-of-sight check: reject if any static wall AABB separates the two positions
-		var blocked := false
-		if props:
-			var from2 := Vector2(position.x, position.z)
-			var to2 := Vector2(s.position.x, s.position.z)
-			for p in props.props:
-				if not p.is_static or p.mesh == null:
-					continue
-				var m := p.mesh
-				var he := props._half_of(p)
-				# AABB 2D segment intersection (simple rejection test)
-				var bmin := Vector2(m.position.x - he.x, m.position.z - he.z)
-				var bmax := Vector2(m.position.x + he.x, m.position.z + he.z)
-				# Expand box slightly for safety
-				bmin -= Vector2(0.1, 0.1)
-				bmax += Vector2(0.1, 0.1)
-				var seg := to2 - from2
-				var t0 := 0.0
-				var t1 := 1.0
-				var hit := false
-				for axis in 2:
-					var o := from2[axis]
-					var d2 := seg[axis]
-					var lo := bmin[axis]
-					var hi := bmax[axis]
-					if absf(d2) < 1e-6:
-						if o < lo or o > hi:
-							hit = true  # Fix 15: parallel-outside means NOT blocked
-							break
-					else:
-						var ta := (lo - o) / d2
-						var tb := (hi - o) / d2
-						if ta > tb:
-							var tmp := ta; ta = tb; tb = tmp
-						t0 = maxf(t0, ta)
-						t1 = minf(t1, tb)
-				if not hit and t0 <= t1:
-					blocked = true
-					break
-		if not blocked:
-			to_merge.append(s)
+		if not _merge_path_clear(s):
+			continue
+		to_merge.append(s)
 
 	if to_merge.is_empty():
 		return
@@ -1037,16 +1050,34 @@ func merge_nearby_clones() -> void:
 		s.is_merging = true
 		s.merge_target = self
 		s.merge_timer = 0.0
-		s.merge_duration = 0.42
 		s.merge_source_scale = s.target_scale
 		s.velocity = Vector3.ZERO
+		s.liquid_request = false
+		s.engulf_request = false
+		s.set_shader_param("uDrapeAmt", 0.0)
 
-	trigger_poke(Vector3(0, 0.3, 0), Vector3(0, -0.6, 0))
+	trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.6, 0.0))
 
 
-func set_shader_param(param: StringName, value: Variant) -> void:
-	if _mat:
-		_mat.set_shader_parameter(param, value)
+func _merge_path_clear(other: Slime) -> bool:
+	var space := get_world_3d().direct_space_state
+	var from := global_position + Vector3(0.0, 0.25, 0.0)
+	var to := other.global_position + Vector3(0.0, 0.25, 0.0)
+	var q := PhysicsRayQueryParameters3D.create(from, to, SlimeMotor.LAYER_OBSTACLES)
+	return space.intersect_ray(q).is_empty()
+
+
+# ------------------------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------------------------
+
+func _clamp_arena() -> void:
+	var flat := Vector2(global_position.x, global_position.z)
+	if flat.length() > tuning.arena_radius:
+		flat = flat.normalized() * tuning.arena_radius
+		global_position.x = flat.x
+		global_position.z = flat.y
+		motor.recover_overlap()
 
 
 func _apply_transform() -> void:

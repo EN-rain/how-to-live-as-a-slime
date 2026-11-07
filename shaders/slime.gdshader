@@ -77,14 +77,14 @@ uniform float uBlink = 1.0;
 // Squeezing through a gap between solids: 0 = off, 1 = fully compressed across uSqueezeDir (a horizontal axis).
 uniform float uSqueeze = 0.0;
 uniform vec3 uSqueezeDir = vec3(1.0, 0.0, 0.0);
-// Gap world-space offset (gap center relative to slime center) for gap-centered neck deform
+// Mesh-local gap centre (relative to the mesh origin) for the gap-centred neck deform
 uniform vec3 uGapLocal = vec3(0.0);
-// Gap flow direction (along-corridor axis)
-uniform vec3 uGapFlow = vec3(0.0, 0.0, 1.0);
 
-// Liquid puddle mode (hold Z key): flattens height, spreads outward, passes through small holes
+// Resolved posture, authored by SlimeShapeModel every tick (absolute multipliers).
 uniform float uLiquid = 0.0;
-uniform float uOverheadCompress = 1.0;
+uniform float uLiquidHeight = 1.0;
+uniform float uLiquidSpread = 1.0;
+uniform float uSqueezeElong = 0.85;
 
 // Engulf drape mode (holding Z on top of a larger object)
 uniform vec3 uDrapePos = vec3(0.0);
@@ -93,15 +93,8 @@ uniform float uDrapeShape = 0.0;
 uniform float uDrapeYaw = 0.0;
 uniform float uDrapeAmt = 0.0;
 
-// Budding fission (split animation for E and Q).
-// uBudAmt 0→1: grows a secondary lobe out of the parent body.
-// uBudDir: world-space direction the bud grows toward (normalized, local to this mesh).
-// uBudScale: how large the bud lobe is relative to the parent body (0 → 1).
-// Set uSplitAmt separately for the neck-snap oscillation impulse at detach moment.
-uniform float uBudAmt = 0.0;
-uniform vec3 uBudDir = vec3(0.0, 0.0, -1.0);
-uniform float uBudScale = 0.0;
-// Legacy: also keep uSplitAmt for the snap jiggle that fires on the clone side.
+// Budding fission (split animation for E and Q): soft teardrop stretch toward the
+// separating partner, driven by the neck-snap impulse on both sides.
 uniform float uSplitAmt = 0.0;
 uniform vec3 uSplitDir = vec3(0.0, 0.0, -1.0);
 
@@ -280,11 +273,10 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 
 	if (uLiquid > 0.001) {
-		// Fix 6: Volume-preserving liquid puddle flattening.
-		// Spread = 1/sqrt(height) so area is conserved (at 22% height → 2.13× spread).
-		float targetH = 0.22 * uOverheadCompress;
-		float liqH = mix(1.0, targetH, uLiquid);
-		float liqR = mix(1.0, 1.0 / sqrt(max(0.04, targetH)), uLiquid);
+		// Flatten/spread multipliers come from the resolved posture, so the rendered
+		// body matches the collision envelope (including overhead compression).
+		float liqH = max(uLiquidHeight, 0.01);
+		float liqR = max(uLiquidSpread, 0.01);
 		p.xz *= liqR;
 		p.y = groundFloor + (p.y - groundFloor) * liqH;
 
@@ -325,7 +317,7 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 			: max(0.08, 1.0 - localSq);           // squeeze: narrower
 		// Front and rear bulge out to conserve fluid volume (area in cross-section)
 		float bulge = sqAbs * (1.0 - neckProfile) * 0.45;
-		float lengthScale = 1.0 + sqAbs * 0.75 + bulge;
+		float lengthScale = 1.0 + sqAbs * uSqueezeElong + bulge;
 		float heightScale = rebounding ? 1.0 : (1.0 + localSq * 0.35 * (1.0 - uLiquid));
 		// Apply in gap-local space, then shift back
 		pLocal = sqd * (sqa * widthScale) + fwdFlow * (flowDist * lengthScale);
@@ -334,16 +326,32 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 
 	// ---- Sticky Droplet Budding (E and Q split) ----
-	// Softly draws out a sticky droplet peak toward the separating partner.
-	// Preserves smooth convex jelly curvature with NO flat cut face, NO pinch dents, and NO distorted peanut mesh.
+	// Organic fluid separation: the bridge stretches toward the partner, an
+	// hourglass waist pinches around the neck root, the neck thins vertically,
+	// and the rear bulges to conserve visual volume.
 	if (uSplitAmt > 0.001) {
 		vec2 sdir = normalize(uSplitDir.xz + vec2(0.0001));
+		vec2 sperp = vec2(-sdir.y, sdir.x);
 		float sproj = dot(p.xz, sdir);
+		float sperpd = dot(p.xz, sperp);
 
-		// Soft teardrop stretch toward the separating partner
-		float stretch = smoothstep(-0.3, 1.2, sproj) * uSplitAmt * 0.35;
-
+		// Forward stretch towards the separating partner (pulls out a gooey neck)
+		float forwardWeight = smoothstep(-0.25, 1.4, sproj);
+		float stretch = forwardWeight * uSplitAmt * 0.70;
 		p.xz += sdir * stretch;
+
+		// Hourglass waist pinch: constricts the sides inward near the neck root
+		float waistMask = smoothstep(-0.2, 0.45, sproj) * (1.0 - smoothstep(0.75, 1.6, sproj));
+		float pinch = waistMask * uSplitAmt * 0.42;
+		p.xz -= sperp * (sperpd * pinch);
+
+		// Vertical thinning of the connecting neck
+		float vertThin = smoothstep(0.1, 1.2, sproj) * uSplitAmt * 0.25;
+		p.y = mix(p.y, groundFloor + (p.y - groundFloor) * (1.0 - vertThin), forwardWeight);
+
+		// Rear bulge to conserve visual volume while being pulled forward
+		float backWeight = 1.0 - smoothstep(-1.1, 0.1, sproj);
+		p.xz -= sdir * (backWeight * uSplitAmt * 0.18);
 	}
 
 	float breathe = sin(t * 2.0) * 0.022 * uJiggleStrength;

@@ -45,17 +45,17 @@ shader_parameter/uLean = Vector3(0, 0, 0)
 shader_parameter/uRippleIntensity = 0.12
 shader_parameter/uFacing = 0.45
 shader_parameter/uBlink = 1.0
-shader_parameter/uBudAmt = 0.0
-shader_parameter/uBudDir = Vector3(0, 0, -1)
-shader_parameter/uBudScale = 0.0
+shader_parameter/uLiquidHeight = 1.0
+shader_parameter/uLiquidSpread = 1.0
+shader_parameter/uSqueezeElong = 0.85
 shader_parameter/uSplitAmt = 0.0
 shader_parameter/uSplitDir = Vector3(0, 0, -1)
 
 [sub_resource type="SphereMesh" id="SphereMesh_body"]
 radius = 1.6
 height = 3.2
-radial_segments = 120
-rings = 90
+radial_segments = 64
+rings = 48
 
 [node name="Slime" type="Node3D" node_paths=PackedStringArray("body")]
 script = ExtResource("2_script")

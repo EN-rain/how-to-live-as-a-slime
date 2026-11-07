@@ -1,10 +1,11 @@
 class_name SlimeProps
 extends Node3D
-## Port of the "3D Anime Slime" prop ecosystem.
+## Prop ecosystem: geometry, edibility, digestion and visual contact feedback.
 ##
-## Spawns edible/solid props, manages multi-contact simultaneous collision resolution,
-## fluid corner flow-around, directional squeeze & liquid mode hole clearance,
-## climbing & engulfing on props, eating/digestion, force-driven splats, and multi-slime shadows.
+## Every prop owns a real queryable collider on LAYER_OBSTACLES. This node never
+## moves a slime directly: positional constraints are routed through the slime's
+## motor (the single movement owner), and passage data is exposed only as a hint
+## that the slime validates against real queries before changing posture.
 
 signal eaten_changed(total: int)
 
@@ -16,20 +17,14 @@ const STATE_IDLE := 0
 const STATE_EATING := 1
 const STATE_GONE := 2
 
-const EAT_TIME := 0.8
-const EAT_LINGER := 2.0
+const LAYER_OBSTACLES := 1
 
 @export var slime: Slime
 @export var floor_mesh: MeshInstance3D
 @export var prop_shader: Shader
 @export var prop_count := 36
 @export var spawn_seed := 0
-@export var floor_y := -1.2
-
-@export_group("Squeeze & Liquid")
-@export_range(0.06, 1.0, 0.01) var min_squeeze := 0.12
-@export var squeeze_in_rate := 16.0
-@export var squeeze_out_rate := 5.0
+@export var tuning: SlimeTuning
 
 var props: Array[PropData] = []
 var registered_slimes: Array[Slime] = []
@@ -39,11 +34,16 @@ var eaten := 0
 var _rng := RandomNumberGenerator.new()
 var _prop_root: Node3D
 var _floor_mat: ShaderMaterial
+var _floor_body: StaticBody3D
+var _tick_frame := -1
+var _ticked_this_frame: Array[Slime] = []
 
 
 class PropData extends RefCounted:
 	var mesh: MeshInstance3D
 	var material: ShaderMaterial
+	var body: StaticBody3D
+	var collider: CollisionShape3D
 	var radius := 1.0
 	var fp := 1.0
 	var shape := 0
@@ -73,7 +73,12 @@ class PropData extends RefCounted:
 	var total_mass := 0.0
 	var absorbed_mass := 0.0
 	var real_volume := 0.0
-	var engulf_front := 0.0 # Physical penetration depth allowed during push-eating (0.0 to 1.0)
+	var engulf_front := 0.0
+
+	func _poly_area(r: float) -> float:
+		if sides >= 3 and sides < 12:
+			return 0.5 * float(sides) * r * r * sin(TAU / float(sides))
+		return PI * r * r
 
 	func calc_real_volume() -> float:
 		var sx := mesh.scale.x if mesh else radius
@@ -83,29 +88,18 @@ class PropData extends RefCounted:
 			SHAPE_BOX:
 				real_volume = (2.0 * half.x * sx) * (2.0 * half.y * sy) * (2.0 * half.z * sz)
 			SHAPE_PRISM:
-				var r := base_r * sx
-				var h := 2.0 * half.y * sy
-				if sides >= 3 and sides < 12:
-					var sector := TAU / float(sides)
-					var poly_area := 0.5 * float(sides) * r * r * sin(sector)
-					real_volume = poly_area * h
-				else:
-					real_volume = PI * r * r * h
+				real_volume = _poly_area(base_r) * sx * sz * (2.0 * half.y * sy)
 			SHAPE_CONE:
-				var r := base_r * sx
-				var h := 2.0 * half.y * sy
-				real_volume = (1.0 / 3.0) * PI * r * r * h
+				real_volume = _poly_area(base_r) * sx * sz * (2.0 * half.y * sy) / 3.0
 			_:
 				real_volume = (4.0 / 3.0) * PI * pow(radius, 3.0)
 		total_mass = real_volume
 		return real_volume
 
 
-
 func _ready() -> void:
-	# Run after Slimes (priority 0) update their positions, so collisions resolve before render
-	process_priority = 1
-
+	if tuning == null:
+		tuning = load("res://resources/slime_tuning.tres") as SlimeTuning
 	if prop_shader == null:
 		prop_shader = load("res://shaders/prop.gdshader")
 	if spawn_seed == 0:
@@ -122,7 +116,8 @@ func _ready() -> void:
 	_prop_root.name = "Generated"
 	add_child(_prop_root)
 
-	# Spawn test structures FIRST so random props avoid blocking the test gate and bridge!
+	_add_floor_collider()
+	# Test structures first so random props never block the gate or bridge.
 	_spawn_test_structures()
 	_spawn_props()
 
@@ -139,6 +134,7 @@ func register_slime(s: Slime) -> void:
 
 func unregister_slime(s: Slime) -> void:
 	registered_slimes.erase(s)
+	_ticked_this_frame.erase(s)
 	if player_slime == s:
 		player_slime = null
 	for p in props:
@@ -149,6 +145,136 @@ func unregister_slime(s: Slime) -> void:
 			p.hold = 0.0
 		if p.touch_slime == s:
 			p.touch_slime = null
+
+
+## Called by every slime at the end of its physics tick. The ecosystem steps
+## exactly once per physics frame, after ALL registered slimes have moved, so
+## constraints always apply to resolved positions (never before movement).
+func slime_ticked(s: Slime, dt: float) -> void:
+	var frame := Engine.get_physics_frames()
+	if frame != _tick_frame:
+		_tick_frame = frame
+		_ticked_this_frame.clear()
+	if not _ticked_this_frame.has(s):
+		_ticked_this_frame.append(s)
+	for r in registered_slimes:
+		if is_instance_valid(r) and not _ticked_this_frame.has(r):
+			return
+	step(dt)
+
+
+func step(dt: float) -> void:
+	for s in registered_slimes:
+		if not is_instance_valid(s):
+			continue
+		if not s.is_merging:
+			_process_edible_props(s, dt)
+			_register_motor_contacts(s, dt)
+		_update_inside_props(s, dt)
+		_update_slime_splat(s, dt)
+		_update_eat_uniforms(s)
+		_update_solid_uniforms(s)
+
+	for p in props:
+		if p.state == STATE_IDLE and p.pd > 0.0:
+			if p.last_presser == null or not is_instance_valid(p.last_presser):
+				p.pd = maxf(0.0, p.pd * exp(-15.0 * dt))
+				p.pv = 0.0
+				if p.pd <= 0.001:
+					p.pd = 0.0
+					p.last_presser = null
+					p.hold = 0.0
+
+	_update_digesting_props(dt)
+	_update_floor_shadows()
+
+
+# ------------------------------------------------------------------------------------------------
+# Colliders
+# ------------------------------------------------------------------------------------------------
+
+func _add_floor_collider() -> void:
+	_floor_body = StaticBody3D.new()
+	_floor_body.name = "FloorCollider"
+	_floor_body.collision_layer = LAYER_OBSTACLES
+	_floor_body.collision_mask = 0
+	_floor_body.position = Vector3(0.0, tuning.floor_y - 0.5, 0.0)
+	add_child(_floor_body)
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(400.0, 1.0, 400.0)
+	cs.shape = box
+	_floor_body.add_child(cs)
+
+
+func _make_collider_shape(p: PropData) -> Shape3D:
+	match p.shape:
+		SHAPE_BOX:
+			var box := BoxShape3D.new()
+			box.size = p.half * 2.0
+			return box
+		SHAPE_PRISM:
+			if p.sides >= 3 and p.sides < 12:
+				var pts := PackedVector3Array()
+				for i in p.sides:
+					var a := TAU * float(i) / float(p.sides)
+					pts.append(Vector3(sin(a) * p.base_r, -p.half.y, cos(a) * p.base_r))
+					pts.append(Vector3(sin(a) * p.base_r, p.half.y, cos(a) * p.base_r))
+				var convex := ConvexPolygonShape3D.new()
+				convex.set_points(pts)
+				return convex
+			var cyl := CylinderShape3D.new()
+			cyl.radius = p.base_r
+			cyl.height = p.half.y * 2.0
+			return cyl
+		SHAPE_CONE:
+			var n := maxi(p.sides, 12)
+			var pts := PackedVector3Array()
+			for i in n:
+				var a := TAU * float(i) / float(n)
+				pts.append(Vector3(sin(a) * p.base_r, -p.half.y, cos(a) * p.base_r))
+			pts.append(Vector3(0.0, p.half.y, 0.0))
+			var convex := ConvexPolygonShape3D.new()
+			convex.set_points(pts)
+			return convex
+	var sphere := SphereShape3D.new()
+	sphere.radius = p.radius
+	return sphere
+
+
+func _attach_collider(p: PropData) -> void:
+	var body := StaticBody3D.new()
+	body.name = "Body"
+	body.collision_layer = LAYER_OBSTACLES if p.state == STATE_IDLE else 0
+	body.collision_mask = 0
+	p.mesh.add_child(body)
+	var cs := CollisionShape3D.new()
+	cs.shape = _make_collider_shape(p)
+	body.add_child(cs)
+	p.body = body
+	p.collider = cs
+
+
+func _set_prop_solid(p: PropData, solid: bool) -> void:
+	if p.body != null:
+		p.body.collision_layer = LAYER_OBSTACLES if solid else 0
+
+
+## Obstacle RIDs this slime may pass through (food yields to the engulf front,
+## it is not a wall). Refreshed by the slime whenever its volume changes.
+func rids_edible_by(s: Slime) -> Array[RID]:
+	var rids: Array[RID] = []
+	for p in props:
+		if is_edible_by_push(s, p) and p.body != null:
+			rids.append(p.body.get_rid())
+	return rids
+
+
+func _prop_of_body(body: Object) -> PropData:
+	for p in props:
+		if p.body == body:
+			return p
+	return null
 
 
 # ------------------------------------------------------------------------------------------------
@@ -229,7 +355,7 @@ func _spawn_props() -> void:
 					break
 			if not clear:
 				continue
-			position = Vector3(x, floor_y + half.y * radius, z)
+			position = Vector3(x, tuning.floor_y + half.y * radius, z)
 			placed = true
 			break
 
@@ -263,6 +389,7 @@ func _spawn_props() -> void:
 		p.mesh = mi
 		p.base_scale = mi.scale
 		p.calc_real_volume()
+		_attach_collider(p)
 		props.append(p)
 
 
@@ -287,12 +414,13 @@ func _spawn_test_structures() -> void:
 		mi.name = "GatePillar_%s" % ("L" if side < 0 else "R")
 		mi.mesh = p_box
 		mi.material_override = p.material
-		mi.position = gate_pos + Vector3(side * 0.85, floor_y + 1.6, 0.0)
+		mi.position = gate_pos + Vector3(side * 0.85, tuning.floor_y + 1.6, 0.0)
 		_prop_root.add_child(mi)
 		p.mesh = mi
 		p.is_static = true
 		p.base_scale = mi.scale
 		p.calc_real_volume()
+		_attach_collider(p)
 		props.append(p)
 
 	# 2. Low Tunnel / Overhang Bridge: Clearance of 0.75m at (-10, 0, 8)
@@ -310,10 +438,12 @@ func _spawn_test_structures() -> void:
 	roof_mi.name = "BridgeRoof"
 	roof_mi.mesh = roof_box
 	roof_mi.material_override = roof_prop.material
-	roof_mi.position = bridge_pos + Vector3(0.0, floor_y + 0.75 + 0.3, 0.0)
+	roof_mi.position = bridge_pos + Vector3(0.0, tuning.floor_y + 0.75 + 0.3, 0.0)
 	_prop_root.add_child(roof_mi)
 	roof_prop.mesh = roof_mi
+	roof_prop.base_scale = roof_mi.scale
 	roof_prop.calc_real_volume()
+	_attach_collider(roof_prop)
 	props.append(roof_prop)
 
 	for leg_side in [-1.0, 1.0]:
@@ -330,10 +460,12 @@ func _spawn_test_structures() -> void:
 		leg_mi.name = "BridgeLeg_%s" % ("L" if leg_side < 0 else "R")
 		leg_mi.mesh = leg_box
 		leg_mi.material_override = leg_p.material
-		leg_mi.position = bridge_pos + Vector3(leg_side * 1.35, floor_y + 0.375, 0.0)
+		leg_mi.position = bridge_pos + Vector3(leg_side * 1.35, tuning.floor_y + 0.375, 0.0)
 		_prop_root.add_child(leg_mi)
 		leg_p.mesh = leg_mi
+		leg_p.base_scale = leg_mi.scale
 		leg_p.calc_real_volume()
+		_attach_collider(leg_p)
 		props.append(leg_p)
 
 
@@ -355,356 +487,70 @@ func _hue(p: float, q: float, t: float) -> float:
 	if t < 0.5:
 		return q
 	if t < 2.0 / 3.0:
-		return p + (q - p) * (2.0 / 3.0 - t) * 6.0
+		return p + (q - p) * (2.0 - t) * 6.0
 	return p
 
 
 # ------------------------------------------------------------------------------------------------
-# Per-frame physics & ecosystem update
+# Edibility & push-eating
 # ------------------------------------------------------------------------------------------------
-
-func _process(delta: float) -> void:
-	var dt := minf(delta, 0.05)
-
-	for s in registered_slimes:
-		if is_instance_valid(s):
-			_step_slime(s, dt)
-
-	# Global press decay for any props no longer actively pressed by a valid slime
-	for p in props:
-		if p.state == STATE_IDLE and p.pd > 0.0:
-			if p.last_presser == null or not is_instance_valid(p.last_presser):
-				p.pd = maxf(0.0, p.pd * exp(-15.0 * dt))
-				p.pv = 0.0
-				if p.pd <= 0.001:
-					p.pd = 0.0
-					p.last_presser = null
-					p.hold = 0.0
-
-	_update_digesting_props(dt)
-	_update_floor_shadows()
-
-
-func _step_slime(s: Slime, dt: float) -> void:
-	if s.is_merging:
-		return
-	# 1. Detect if standing atop a solid prop or climbing
-	_update_ground_support(s)
-
-	# 2. Update squeeze & liquid mode gap passage
-	_update_slime_squeeze(s, dt)
-
-	# 3. Process edible props pressed/eaten by this slime
-	_process_edible_props(s, dt)
-
-	# 4. Multi-contact simultaneous solver for solid obstacles
-	_solve_solid_collisions(s, dt)
-
-	# 5. Splat & spread spring dynamics
-	_update_slime_splat(s, dt)
-
-	# 6. Inside swallowed prop physics for this slime
-	_update_inside_props(s, dt)
-
-	# 7. Feed eating and solid dent uniforms to this slime's shader
-	_update_eat_uniforms(s)
-	_update_solid_uniforms(s)
-
-
-func _update_ground_support(s: Slime) -> void:
-	var sp := s.position
-	var S := s.slime_scale
-	var highest_top := floor_y
-	var found_prop = null
-	var slime_bottom := sp.y - (s.height_per_scale * S)
-	var slime_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
-
-	for p in props:
-		if p.state != STATE_IDLE:
-			continue
-		var m := p.mesh
-		var he := _half_of(p)
-		var dx := sp.x - m.position.x
-		var dz := sp.z - m.position.z
-		var top_y := m.position.y + he.y
-		var bottom_y := m.position.y - he.y
-
-		# If prop is elevated above the floor (roof/ceiling/bridge) and slime is under it, ignore
-		if bottom_y > floor_y + 0.15 and slime_top <= bottom_y + 0.2:
-			continue
-
-		# Check if slime is horizontally within the prop's top footprint
-		var in_footprint := false
-		if p.shape == SHAPE_BOX:
-			var c := cos(m.rotation.y)
-			var sn := sin(m.rotation.y)
-			var lx := absf(dx * c + dz * sn)
-			var lz := absf(-dx * sn + dz * c)
-			in_footprint = (lx <= he.x * 1.05 and lz <= he.z * 1.05)
-		else:
-			var d := Vector2(dx, dz).length()
-			var sup := _poly_support(p, dx / maxf(d, 1e-4), dz / maxf(d, 1e-4))
-			in_footprint = (d <= sup * 1.05)
-
-		if in_footprint:
-			# Slime stepping/climbing: step height scales with slime size (0.55 * S) or liquid climbing (0.75 * S)
-			var climb_reach := (0.75 * S) if s.liquid_amt > 0.3 else (0.55 * S)
-			if slime_bottom >= top_y - climb_reach:
-				if top_y > highest_top:
-					highest_top = top_y
-					found_prop = p
-
-	s.support_y = highest_top
-	s.ground_prop = found_prop
-
-
-func _prop_closest_surface_point(p: PropData, target: Vector2) -> Vector2:
-	var m := p.mesh
-	var he := _half_of(p)
-	var dx := target.x - m.position.x
-	var dz := target.y - m.position.z
-	if p.shape == SHAPE_BOX:
-		var c := cos(m.rotation.y)
-		var sn := sin(m.rotation.y)
-		var lx := dx * c - dz * sn
-		var lz := dx * sn + dz * c
-		var cx := clampf(lx, -he.x, he.x)
-		var cz := clampf(lz, -he.z, he.z)
-		if absf(cx) < he.x and absf(cz) < he.z:
-			var push_x := he.x - absf(cx)
-			var push_z := he.z - absf(cz)
-			if push_x < push_z:
-				cx = he.x if cx >= 0.0 else -he.x
-			else:
-				cz = he.z if cz >= 0.0 else -he.z
-		var wx := cx * c + cz * sn
-		var wz := -cx * sn + cz * c
-		return Vector2(m.position.x + wx, m.position.z + wz)
-	else:
-		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-		var ux := dx / d
-		var uz := dz / d
-		var sup := _poly_support(p, ux, uz) * (0.6 if p.shape == SHAPE_CONE else 1.0)
-		return Vector2(m.position.x + ux * sup, m.position.z + uz * sup)
-
-
-func _update_slime_squeeze(s: Slime, dt: float) -> void:
-	var S := s.slime_scale
-	var sp := s.position
-
-	# Fix 17: Don't allow liquid to flatten to paper-thin (0.05). Use 0.12 minimum.
-	var effective_min_squeeze := min_squeeze
-	if s.liquid_amt > 0.01:
-		effective_min_squeeze = lerpf(min_squeeze, 0.12, s.liquid_amt)
-
-	var r_max := 0.0
-	for k in 6:
-		r_max = maxf(r_max, _surf_r(-1.2 + 2.2 * float(k) / 5.0))
-	r_max *= S
-	var reach := r_max + 0.06 * S
-
-	var slime_bottom := sp.y - s.height_per_scale * S
-	var slime_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
-
-	# Fix 8: Exclude edible props (they yield, not block) and elevated ceilings
-	var nearby_props: Array[PropData] = []
-	for p in props:
-		if p.state != STATE_IDLE or p == s.ground_prop or p.mesh == null:
-			continue
-		if is_edible_by_push(s, p):
-			continue  # Fix 8: edible props are eaten, not gap walls
-		var m := p.mesh
-		var he := _half_of(p)
-		var prop_bottom := m.position.y - he.y
-		if p.is_static and prop_bottom > floor_y + 0.5:
-			continue
-		if maxf(m.position.y - he.y, floor_y) > minf(m.position.y + he.y, slime_top):
-			continue
-		var d_sq := Vector2(m.position.x - sp.x, m.position.z - sp.z).length_squared()
-		var p_rad := maxf(he.x, he.z)
-		if d_sq > (p_rad + reach * 3.0) * (p_rad + reach * 3.0):
-			continue
-		nearby_props.append(p)
-
-	var spx := Vector2(sp.x, sp.z)
-	# Fix 2: Score gap pairs by movement direction, not just narrowness
-	var move2 := Vector2(s.velocity.x, s.velocity.z)
-	var moving := move2.length() > 0.1
-	var best_w := INF
-	var best_dir := Vector2.ZERO
-	var best_center := Vector2.ZERO
-	var best_flow_dir := Vector2.ZERO
-	var best_score := -INF
-
-	for i in nearby_props.size():
-		var p1 := nearby_props[i]
-		var c1 := Vector2(p1.mesh.position.x, p1.mesh.position.z)
-		for j in range(i + 1, nearby_props.size()):
-			var p2 := nearby_props[j]
-			var c2 := Vector2(p2.mesh.position.x, p2.mesh.position.z)
-			var pt1 := _prop_closest_surface_point(p1, c2)
-			var pt2 := _prop_closest_surface_point(p2, pt1)
-			pt1 = _prop_closest_surface_point(p1, pt2)
-
-			var gap_vec := pt2 - pt1
-			var gap_w := gap_vec.length()
-			if gap_w < 1e-3:
-				continue
-			# Fix 9: Reject impossible gaps (wider than 2×reach means we can't be squeezed)
-			if gap_w >= r_max * 2.0:
-				continue
-			var gap_dir := gap_vec / gap_w
-			var gap_center := (pt1 + pt2) * 0.5
-			var flow_dir := Vector2(-gap_dir.y, gap_dir.x)
-
-			var to_gap := spx - gap_center
-			var dist_along_flow := absf(to_gap.dot(flow_dir))
-			var dist_lateral := absf(to_gap.dot(gap_dir))
-
-			if dist_along_flow < reach * 2.5 and dist_lateral < (gap_w * 0.5 + reach * 1.5):
-				# Fix 2: Score by alignment with movement direction
-				var move_score := 0.0
-				if moving:
-					move_score = absf(move2.normalized().dot(flow_dir))
-				else:
-					move_score = 0.5  # neutral when stopped
-				var dist_score := 1.0 / (1.0 + to_gap.length())
-				var total_score := move_score * 2.0 + dist_score
-				if total_score > best_score:
-					best_score = total_score
-					best_w = gap_w
-					best_dir = gap_dir
-					best_center = gap_center
-					best_flow_dir = flow_dir
-
-	s.cur_gap_w = best_w
-	s.cur_gap_center = best_center
-	s.cur_gap_dir = best_dir
-	s.cur_gap_flow = best_flow_dir  # store for shader
-
-	var target := 1.0
-	if best_w < INF:
-		var fit := clampf((best_w * 0.5 - 0.02 * S) / r_max, effective_min_squeeze, 1.0)
-		if fit < 1.0:
-			var to_gap_vec := best_center - spx
-			var dist_flow := to_gap_vec.x * best_flow_dir.x + to_gap_vec.y * best_flow_dir.y
-			var dist_lat := absf(to_gap_vec.x * best_dir.x + to_gap_vec.y * best_dir.y)
-
-			var corridor_half_len := 0.6 * S
-			var entrance_flow := dist_flow - corridor_half_len
-			var exit_flow := dist_flow + corridor_half_len
-
-			var max_lat := best_w * 0.5 + reach * 0.8
-			if dist_lat < max_lat:
-				if entrance_flow > 0.0 and entrance_flow < reach * 1.5:
-					var t_enter := clampf((reach * 1.5 - entrance_flow) / (reach * 1.2), 0.0, 1.0)
-					t_enter = t_enter * t_enter * (3.0 - 2.0 * t_enter)
-					var lat_factor := clampf(1.0 - dist_lat / max_lat, 0.0, 1.0)
-					target = lerpf(1.0, fit, t_enter * lat_factor)
-				elif entrance_flow <= 0.0 and exit_flow > -reach * 1.2:
-					target = fit
-				elif exit_flow <= -reach * 1.2:
-					target = 1.0
-
-	# Fix 7: Spring dynamics for squeeze (overshoot on tighten, rebound on exit)
-	var gap_active := best_w < INF and target < 0.98
-	if gap_active:
-		# Spring toward target_squeeze with damping (k=140 tighten)
-		var spring_k := 140.0
-		var damp := 2.0 * sqrt(spring_k) * 0.7
-		var err := target - s.squeeze_k
-		s.squeeze_v += (err * spring_k - s.squeeze_v * damp) * dt
-		s.squeeze_k += s.squeeze_v * dt
-		s.squeeze_k = clampf(s.squeeze_k, effective_min_squeeze, 1.0)
-		s._gap_was_active = true
-	else:
-		if s._gap_was_active:
-			# Just exited gap: inject a small positive overshoot (gooey rebound)
-			s.squeeze_v = maxf(s.squeeze_v, 0.4)
-			s._gap_was_active = false
-			_gap_released(s)
-		# Spring back to 1.0 with softer spring (k=55 release)
-		var spring_k := 55.0
-		var damp := 2.0 * sqrt(spring_k) * 0.65
-		var err := 1.0 - s.squeeze_k
-		s.squeeze_v += (err * spring_k - s.squeeze_v * damp) * dt
-		s.squeeze_k += s.squeeze_v * dt
-		s.squeeze_k = clampf(s.squeeze_k, effective_min_squeeze, 1.0)
-
-	if target < 0.98 and best_dir.length_squared() > 0.001:
-		var d3 := Vector3(best_dir.x, 0.0, best_dir.y).normalized()
-		if d3.dot(s.sq_dir) < 0.0:
-			d3 = -d3
-		s.sq_dir = s.sq_dir.lerp(d3, 1.0 - exp(-16.0 * dt)).normalized()
-		if s.sq_dir.length_squared() < 0.01:
-			s.sq_dir = Vector3(1, 0, 0)
-
-		# Smooth funneling force: gently guide slime toward the gap centerline as it moves
-		var lateral_offset := (spx - best_center).dot(best_dir)
-		var to_gap := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z)
-		var moving_toward := s.velocity.dot(to_gap) > -0.5 or to_gap.length() < reach * 2.0
-		if moving_toward and (spx - best_center).length() < reach * 2.5:
-			var dist_to_gap := (spx - best_center).length()
-			var dist_factor := clampf(1.0 - dist_to_gap / (reach * 2.2), 0.0, 1.0)
-			var align_factor := clampf(1.0 - absf(lateral_offset) / (reach * 1.8), 0.0, 1.0) * maxf(0.35, dist_factor)
-			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 12.0 * dt
-			s.position += funnel_push
-			s.velocity -= Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 4.0 * dt
-
-	# Send squeeze val — negative squeeze_k means rebound-widening (exits with overshoot)
-	var squeeze_val := 1.0 - s.squeeze_k
-	s.set_shader_param("uSqueeze", squeeze_val)
-	s.set_shader_param("uSqueezeDir", s.sq_dir)
-	# Send gap position and flow direction to shader for gap-centered deform
-	var gap_local := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z) if best_w < INF else Vector3.ZERO
-	s.set_shader_param("uGapLocal", gap_local)
-	s.set_shader_param("uGapFlow", Vector3(best_flow_dir.x, 0.0, best_flow_dir.y) if best_w < INF else Vector3(0.0, 0.0, 1.0))
-
-
-func _gap_released(s: Slime) -> void:
-	# Trigger a surface pop on gap exit for gooey feel
-	var flow_dir3 := Vector3(s.cur_gap_flow.x, 0.0, s.cur_gap_flow.y)
-	if flow_dir3.length_squared() > 0.01:
-		s.trigger_poke2(flow_dir3.normalized() * 0.5, flow_dir3.normalized() * 0.4)
-
 
 func is_edible_by_push(s: Slime, p: PropData) -> bool:
 	if p.state != STATE_IDLE or p.is_static or p.mesh == null:
 		return false
-	# Authoritative volume check: Slime can push-eat anything whose real volume is <= Slime's real volume
-	return s.get_volume() >= p.real_volume * 0.98
+	return s.get_volume() >= p.real_volume * tuning.edible_volume_ratio
+
+
+func devour(p: PropData, s: Slime) -> void:
+	if p.state == STATE_IDLE:
+		_begin_eating(p, s)
+
+
+func _begin_eating(p: PropData, s: Slime) -> void:
+	p.state = STATE_EATING
+	p.eater = s
+	p.last_presser = null
+	p.base_scale = p.mesh.scale
+	p.t = 0.0
+	p.start = p.mesh.position
+	p.off = Vector3(_rng.randf() - 0.5, -0.1 + _rng.randf() * 0.3, _rng.randf() - 0.5)
+	p.total_mass = p.real_volume
+	p.absorbed_mass = 0.0
+	_set_prop_solid(p, false)
+	eaten += 1
+	eaten_changed.emit(eaten)
 
 
 func _process_edible_props(s: Slime, dt: float) -> void:
-	var S := s.slime_scale
-	var sp := s.position
+	var S := s.model.scale
+	var sp := s.global_position
+	var foot := s.model.foot
 	var s_vol := s.get_volume()
 
 	for p in props:
 		if not is_edible_by_push(s, p):
-			# If this prop was being pressed by this slime but is no longer push-edible, decay its engulf_front
 			if p.last_presser == s:
 				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
 			continue
 		var m := p.mesh
-		var dx := m.position.x - sp.x
-		var dz := m.position.z - sp.z
+		var he := _half_of(p)
+		var prop_top := m.global_position.y + he.y
+		var prop_bottom := m.global_position.y - he.y
+		# Geometry below the foot is support, not a press target; geometry above
+		# the body cannot be pressed either.
+		if prop_top <= foot.y + 0.05 * S or prop_bottom >= foot.y + s.model.full_height:
+			if p.last_presser == s:
+				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
+			continue
+		var dx := m.global_position.x - sp.x
+		var dz := m.global_position.z - sp.z
 		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-
-		var he0 := _half_of(p)
-		var ca := cos(m.rotation.y)
-		var sa := sin(m.rotation.y)
-		var ro: float
-		if p.shape == SHAPE_BOX:
-			ro = absf((dx * ca - dz * sa) / d) * he0.x + absf((dx * sa + dz * ca) / d) * he0.z
-		else:
-			ro = _poly_support(p, -dx / d, -dz / d) * (0.6 if p.shape == SHAPE_CONE else 1.0)
-
-		var sr_p := _surf_r((m.position.y - sp.y) / S) * S
+		var dir := Vector3(dx / d, 0.0, dz / d)
+		var ro := _horizontal_reach(p, -dir, foot.y)
+		var sr_p := s.model.world_radius_at(m.global_position.y, dir)
 
 		var target := maxf(0.0, sr_p + ro - d)
 		if target <= 0.001:
-			# If this slime was pressing this prop, smoothly decay its press spring & engulf front back out
 			if p.last_presser == s:
 				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
 				var acc := 140.0 * (0.0 - p.pd) - 8.0 * p.pv
@@ -718,19 +564,15 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 					p.hold = 0.0
 			continue
 
-		# If another valid slime is already pressing this prop and is closer, don't steal it
 		if p.last_presser != null and p.last_presser != s and is_instance_valid(p.last_presser):
-			var dist_other := p.mesh.position.distance_to(p.last_presser.position)
-			var dist_me := p.mesh.position.distance_to(sp)
+			var dist_other := p.mesh.global_position.distance_to(p.last_presser.global_position)
+			var dist_me := p.mesh.global_position.distance_to(sp)
 			if dist_other < dist_me:
 				continue
 
 		p.last_presser = s
-		# Compute exact relative volume ratio (prop volume / slime volume)
 		var vol_ratio := clampf(p.real_volume / maxf(1e-4, s_vol), 0.0, 1.0)
-
 		var thr := ro * (0.85 + 0.45 * vol_ratio) + 0.1 * S
-		var press01 := minf(target / thr, 1.0)
 		var acc := 140.0 * (target - p.pd) - 8.0 * p.pv
 		p.pv += acc * dt
 		p.pd += p.pv * dt
@@ -741,460 +583,268 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		p.p_ro = ro
 		p.p_thr = thr
 
-		# Section 1: Physical Engulf-Front Resistance
-		# Instead of a velocity cap that running bypasses, constrain slime's physical position
-		# to a moving engulf front that advances only with sustained pushing!
-		var nx0 := dx / d
-		var nz0 := dz / d
-		var inward_speed := s.velocity.x * nx0 + s.velocity.z * nz0
-
-		# Resistance factor: 0.0 for tiny items, ramping up steeply for objects near slime size
+		var inward_speed := s.motor.velocity.x * dir.x + s.motor.velocity.z * dir.z
 		var size_resistance := clampf((vol_ratio - 0.20) / 0.80, 0.0, 1.0)
 
-		# 1. Viscous Speed Drag:
-		# Pushing into objects near slime size heavily resists forward movement down to a crawl
+		# Viscous drag: pushing near-size objects resists forward speed.
 		if inward_speed > 0.0:
 			var allowed_speed := lerpf(s.cur_max, s.cur_max * 0.15, pow(size_resistance, 1.4))
 			if inward_speed > allowed_speed:
 				var excess := inward_speed - allowed_speed
-				s.velocity.x -= nx0 * excess
-				s.velocity.z -= nz0 * excess
+				s.motor.velocity -= dir * excess
 				inward_speed = allowed_speed
 
-		# 2. Advance Engulf Front:
-		# Tiny props (< 20%): fast gulp (rate ~ 3.5 - 4.5)
-		# Medium props (50%): steady strain (rate ~ 1.0)
-		# Props near slime size (> 80%): heavy resistance, steep slowdown (rate ~ 0.06 - 0.2)
+		# Engulf front advances only under sustained push; elastic recoil otherwise.
 		if inward_speed > 0.1:
 			var size_factor := pow(maxf(0.0, 1.0 - vol_ratio), 1.8)
 			var advance_rate := 3.8 * size_factor + 0.06 * (1.0 - size_resistance * 0.85)
 			p.engulf_front = minf(1.0, p.engulf_front + advance_rate * dt)
 		else:
-			# Elastic push back: if player lets go or stops pushing,
-			# an object near slime size pushes back forcefully!
 			var pushback_rate := 1.2 + 3.0 * size_resistance
 			p.engulf_front = maxf(0.0, p.engulf_front - dt * pushback_rate)
 			var recoil := 2.5 * size_resistance * (1.0 - p.engulf_front)
-			s.velocity.x -= nx0 * recoil * dt
-			s.velocity.z -= nz0 * recoil * dt
+			s.motor.velocity -= dir * recoil * dt
 
-		# 3. Physical Positional Constraint:
-		# Slime body cannot penetrate deeper than allowed by current engulf_front!
+		# Positional front limit, applied through the motor so the pushback itself
+		# is collision-safe against every other obstacle.
 		var max_allowed_pen := (sr_p + ro) * p.engulf_front
-		var current_pen := target
-		if current_pen > max_allowed_pen:
-			var over_pen := current_pen - max_allowed_pen
-			# Constrain position so slime cannot push through before engulf front opens
-			s.position.x -= nx0 * over_pen * 0.95
-			s.position.z -= nz0 * over_pen * 0.95
-			# Zero out inward penetration velocity against the engulf front wall
-			var vin := s.velocity.x * nx0 + s.velocity.z * nz0
+		if target > max_allowed_pen:
+			var over_pen := target - max_allowed_pen
+			s.motor.move_horizontal(-dir * over_pen)
+			var vin := s.motor.velocity.dot(dir)
 			if vin > 0.0:
-				s.velocity.x -= nx0 * vin
-				s.velocity.z -= nz0 * vin
+				s.motor.velocity -= dir * vin
 
-		# Absorption completes when engulf front has fully enclosed the prop (>= 0.95)
 		if p.engulf_front >= 0.95:
-			p.state = STATE_EATING
-			p.eater = s
-			p.last_presser = null
-			p.base_scale = m.scale
-			eaten += 1
-			p.t = 0.0
-			p.start = m.position
-			p.off = Vector3(_rng.randf() - 0.5, -0.1 + _rng.randf() * 0.3, _rng.randf() - 0.5)
-			p.total_mass = p.real_volume
-			p.absorbed_mass = 0.0
-			eaten_changed.emit(eaten)
+			_begin_eating(p, s)
 
 
 # ------------------------------------------------------------------------------------------------
-# Multi-contact simultaneous solver & fluid corner flow-around
+# Passage hints (geometry only; the slime validates posture with real queries)
 # ------------------------------------------------------------------------------------------------
 
-class ContactInfo extends RefCounted:
-	var prop: PropData
-	var normal: Vector3
-	var pen: float
-	var c_r: float
-	var sharp: float
-
-
-func _solve_solid_collisions(s: Slime, dt: float) -> void:
-	var S := s.slime_scale
-	# Gather contacts from all solid props:
-	# A prop is SOLID if it is NOT edible by push and is not our current ground support!
-	var contacts: Array[ContactInfo] = []
+## Returns {} or {width, center, axis, flow, half_length}. A passage requires two
+## genuinely opposing, near-parallel faces AND overlapping extent along the flow
+## direction — two nearby props alone are never a corridor.
+func find_passage(s: Slime) -> Dictionary:
+	var result: Dictionary = {}
+	var S := s.model.scale
+	var foot := s.model.foot
+	var top := foot.y + s.model.full_height
+	var reach := s.model.rest_max_radius * S * s.model.spread
+	var candidates: Array[PropData] = []
 	for p in props:
-		if p.state != STATE_IDLE or p == s.ground_prop:
+		if p.state != STATE_IDLE or p.mesh == null or is_edible_by_push(s, p):
 			continue
-		# If it's edible by push, it's handled by engulf-front resistance, NOT solid collision solver!
-		if is_edible_by_push(s, p):
+		var he := _half_of(p)
+		var m := p.mesh
+		var bottom := m.global_position.y - he.y
+		var top_y := m.global_position.y + he.y
+		if bottom > tuning.floor_y + 0.5:
 			continue
-		var c := _detect_prop_contact(s, p)
-		if c != null and c.pen > 0.0:
-			contacts.append(c)
+		if top_y < foot.y or bottom > top:
+			continue
+		var d := Vector2(m.global_position.x - s.global_position.x, m.global_position.z - s.global_position.z).length()
+		if d > reach * 3.0 + maxf(he.x, he.z):
+			continue
+		candidates.append(p)
 
-	if contacts.is_empty():
+	var sp := Vector3(s.global_position.x, 0.0, s.global_position.z)
+	var move_dir := Vector3(s.motor.velocity.x, 0.0, s.motor.velocity.z)
+	var moving := move_dir.length() > 0.1
+	if moving:
+		move_dir = move_dir.normalized()
+	var best_score := -INF
+
+	for i in candidates.size():
+		for j in range(i + 1, candidates.size()):
+			var a := candidates[i]
+			var b := candidates[j]
+			var ya := a.mesh.global_position.y
+			var yb := b.mesh.global_position.y
+			var ca := _closest_and_normal(a, Vector3(b.mesh.global_position.x, ya, b.mesh.global_position.z))
+			var cb := _closest_and_normal(b, Vector3(a.mesh.global_position.x, yb, a.mesh.global_position.z))
+			ca = _closest_and_normal(a, Vector3(cb.point.x, ya, cb.point.z))
+			cb = _closest_and_normal(b, Vector3(ca.point.x, yb, ca.point.z))
+
+			var gap_vec := Vector3(cb.point.x - ca.point.x, 0.0, cb.point.z - ca.point.z)
+			var w := gap_vec.length()
+			if w < 1e-3 or w >= reach * 2.0:
+				continue
+			var gap_dir := gap_vec / w
+			var na := Vector3(ca.normal.x, 0.0, ca.normal.z)
+			var nb := Vector3(cb.normal.x, 0.0, cb.normal.z)
+			if na.length() < 0.3 or nb.length() < 0.3:
+				continue
+			na = na.normalized()
+			nb = nb.normalized()
+			if na.dot(gap_dir) < 0.9 or nb.dot(gap_dir) > -0.9:
+				continue
+			var flow := Vector3(-gap_dir.z, 0.0, gap_dir.x)
+			var center := Vector3((ca.point.x + cb.point.x) * 0.5, 0.0, (ca.point.z + cb.point.z) * 0.5)
+
+			var ea := _flow_extent(a, flow)
+			var eb := _flow_extent(b, flow)
+			var fa := Vector3(a.mesh.global_position.x, 0.0, a.mesh.global_position.z).dot(flow)
+			var fb := Vector3(b.mesh.global_position.x, 0.0, b.mesh.global_position.z).dot(flow)
+			var lo := maxf(fa - ea, fb - eb)
+			var hi := minf(fa + ea, fb + eb)
+			if hi - lo < 0.05:
+				continue
+			var half_length := (hi - lo) * 0.5
+			center += flow * ((lo + hi) * 0.5 - center.dot(flow))
+
+			var to_gap := center - sp
+			# Only nearby passages the body is actually entering may reshape it: a gate
+			# far away (or already behind the direction of travel) must not squeeze it.
+			if to_gap.length() > reach * 1.15 + half_length + 0.5:
+				continue
+			if moving and to_gap.dot(move_dir) < 0.1:
+				continue
+			var score := 1.0 / (1.0 + to_gap.length())
+			score += (absf(move_dir.dot(flow)) * 2.0) if moving else 0.5
+			if score > best_score:
+				best_score = score
+				result = {"width": w, "center": center, "axis": gap_dir, "flow": flow, "half_length": half_length}
+	return result
+
+
+func _closest_and_normal(p: PropData, target: Vector3) -> Dictionary:
+	var m := p.mesh
+	var local := m.to_local(target)
+	var he := p.half
+	var lp := Vector3.ZERO
+	var ln := Vector3.ZERO
+	if p.shape == SHAPE_BOX:
+		if absf(local.x) < he.x and absf(local.y) < he.y and absf(local.z) < he.z:
+			var px := he.x - absf(local.x)
+			var pz := he.z - absf(local.z)
+			if px < pz:
+				lp = Vector3(he.x if local.x >= 0.0 else -he.x, local.y, local.z)
+				ln = Vector3(1.0 if local.x >= 0.0 else -1.0, 0.0, 0.0)
+			else:
+				lp = Vector3(local.x, local.y, he.z if local.z >= 0.0 else -he.z)
+				ln = Vector3(0.0, 0.0, 1.0 if local.z >= 0.0 else -1.0)
+		else:
+			lp = Vector3(clampf(local.x, -he.x, he.x), clampf(local.y, -he.y, he.y), clampf(local.z, -he.z, he.z))
+			var dvec := local - lp
+			ln = dvec.normalized() if dvec.length_squared() > 1e-8 else Vector3(0, 1, 0)
+	else:
+		var y := clampf(local.y, -he.y, he.y)
+		var dxz := Vector2(local.x, local.z)
+		var d := maxf(dxz.length(), 1e-4)
+		var ux := dxz.x / d
+		var uz := dxz.y / d
+		var sup := _poly_support_local(p, ux, uz)
+		if p.shape == SHAPE_CONE:
+			sup *= maxf(0.06, 1.0 - (y + he.y) / maxf(2.0 * he.y, 1e-4))
+		lp = Vector3(ux * sup, y, uz * sup)
+		if p.sides >= 3 and p.sides < 12:
+			var sector := TAU / float(p.sides)
+			var ang := atan2(ux, uz) - p.phase
+			var dsec := fmod(ang, sector)
+			if dsec < 0.0:
+				dsec += sector
+			var face_ang := ang - dsec + sector * 0.5
+			ln = Vector3(sin(face_ang), 0.0, cos(face_ang))
+		else:
+			ln = Vector3(ux, 0.0, uz)
+	return {"point": m.to_global(lp), "normal": (m.basis * ln).normalized()}
+
+
+func _flow_extent(p: PropData, flow: Vector3) -> float:
+	var he := _half_of(p)
+	if p.shape == SHAPE_BOX:
+		var ld := p.mesh.basis.inverse() * flow
+		var l := Vector2(ld.x, ld.z)
+		if l.length_squared() < 1e-8:
+			return maxf(he.x, he.z)
+		l = l.normalized()
+		return absf(l.x) * he.x + absf(l.y) * he.z
+	return _poly_support(p, flow.x, flow.z)
+
+
+func _horizontal_reach(p: PropData, dir_world: Vector3, foot_y: float) -> float:
+	var he := _half_of(p)
+	if p.shape == SHAPE_BOX:
+		var ld := p.mesh.basis.inverse() * dir_world
+		var l := Vector2(ld.x, ld.z)
+		if l.length_squared() < 1e-8:
+			return maxf(he.x, he.z)
+		l = l.normalized()
+		return absf(l.x) * he.x + absf(l.y) * he.z
+	var sup := _poly_support(p, dir_world.x, dir_world.z)
+	if p.shape == SHAPE_CONE:
+		var bottom := p.mesh.global_position.y - he.y
+		var y_lo := maxf(bottom, foot_y)
+		var taper := maxf(0.06, 1.0 - (y_lo - bottom) / maxf(2.0 * he.y, 1e-4))
+		return sup * taper
+	return sup
+
+
+# ------------------------------------------------------------------------------------------------
+# Motor contact feedback (visual only; the motor already resolved the motion)
+# ------------------------------------------------------------------------------------------------
+
+func _register_motor_contacts(s: Slime, dt: float) -> void:
+	var bodies := s.motor.contact_bodies
+	var normals := s.motor.contact_normals
+	if bodies.is_empty():
 		return
+	var S := s.model.scale
+	for i in bodies.size():
+		var p := _prop_of_body(bodies[i])
+		if p == null:
+			continue
+		var n: Vector3 = normals[i] if i < normals.size() else Vector3.ZERO
+		p.touch = s.time
+		p.touch_slime = s
+		p.cnx = n.x
+		p.cnz = n.z
+		if i == 0:
+			s.impact_dir = Vector3(-n.x, 0.0, -n.z)
+			s.touch_time = s.time
+			var to_prop := Vector3(p.mesh.global_position.x - s.global_position.x, 0.0, p.mesh.global_position.z - s.global_position.z)
+			s.contact_r = s.model.horizontal_support(to_prop) / maxf(S, 1e-4)
+			var sharp := _contact_sharpness(p, s)
+			s.sharp_amt += (sharp - s.sharp_amt) * (1.0 - exp(-15.0 * dt))
 
-	# Sort deepest penetration first
-	contacts.sort_custom(func(a: ContactInfo, b: ContactInfo) -> bool: return a.pen > b.pen)
-
-	# Simultaneous iterative resolution (4 passes)
-	for _pass in 4:
-		if contacts.size() >= 2 and (contacts[0].normal.dot(contacts[1].normal) < -0.2 or contacts[0].prop != contacts[1].prop):
-			var c0 := contacts[0]
-			var c1 := contacts[1]
-			var pen0 := _calc_prop_penetration(s, c0.prop, c0.c_r)
-			var pen1 := _calc_prop_penetration(s, c1.prop, c1.c_r)
-			# Symmetrically center the slime directly between opposing walls
-			var net_push := (c0.normal * pen0 + c1.normal * pen1) * 0.5
-			# When between two different props (corridor passage), only push laterally — don't push backward along flow!
-			if c0.prop != c1.prop:
-				# Fix 1: Use sq_dir.z (not sq_dir.y which is always 0 for a horizontal vector)
-				var lat_axis := s.sq_dir if s.sq_dir.length_squared() > 0.01 else (c0.normal - c1.normal).normalized()
-				net_push = lat_axis * net_push.dot(lat_axis)
-				# Fix 3: Do NOT overwrite squeeze_k here — let spring in _update_slime_squeeze own it
-			if net_push.length_squared() > 1e-6:
-				s.position.x += net_push.x
-				s.position.z += net_push.z
-			# Resolve any remaining non-opposing contacts (e.g. end wall)
-			for idx in range(2, contacts.size()):
-				var c := contacts[idx]
-				var pen := _calc_prop_penetration(s, c.prop, c.c_r)
-				if pen > 0.001:
-					s.position.x += c.normal.x * pen * 0.8
-					s.position.z += c.normal.z * pen * 0.8
-		else:
-			for c in contacts:
-				var pen := _calc_prop_penetration(s, c.prop, c.c_r)
-				if pen > 0.001:
-					var push := c.normal * pen * 0.75
-					if s.cur_gap_w < INF and s.sq_dir.length_squared() > 0.01:
-						# Fix 1: Build lat_axis correctly from sq_dir (which is a 3D horizontal vector)
-						var lat_axis := Vector3(s.sq_dir.x, 0.0, s.sq_dir.z)
-						var lat_push := push.dot(lat_axis)
-						var cur_offset := (Vector2(s.position.x, s.position.z) - s.cur_gap_center).dot(Vector2(lat_axis.x, lat_axis.z))
-						if (cur_offset > 0.0 and lat_push < 0.0) or (cur_offset < 0.0 and lat_push > 0.0):
-							var max_push := absf(cur_offset)
-							if absf(lat_push) > max_push:
-								push -= lat_axis * (lat_push - signf(lat_push) * max_push)
-					s.position += push
-
-	# Primary contact for splat & stick
-	var c0 := contacts[0]
-	s.impact_dir = Vector3(-c0.normal.x, 0, -c0.normal.z)
-	c0.prop.touch = s.time
-	c0.prop.touch_slime = s
-	c0.prop.cnx = c0.normal.x
-	c0.prop.cnz = c0.normal.z
-	s.sharp_amt += (c0.sharp - s.sharp_amt) * (1.0 - exp(-15.0 * dt))
-	s.contact_r = c0.c_r / S
-	s.touch_time = s.time
-
-	# Fix 4: Remove corridor velocity forcing — velocity is managed by player input + squeeze funnel
-	# Fix 5: Remove head-on forced sideways injection (≥2 m/s jerk)
-	# Only handle same-prop corner crease sliding
-	if contacts.size() >= 2:
-		var c1 := contacts[1]
-		if c0.prop == c1.prop:
-			# Two contacts on the same prop: concave corner / crease on a single obstacle
-			var dot_n := c0.normal.dot(c1.normal)
-			if dot_n < 0.85:
-				var sum_n := c0.normal + c1.normal
-				if sum_n.length_squared() > 0.01:
-					var crease := sum_n.cross(Vector3.UP).normalized()
-					if crease.dot(s.velocity) < 0.0:
-						crease = -crease
-					var v_along_crease := maxf(0.0, s.velocity.dot(crease))
-					s.velocity = crease * v_along_crease
-					return
-
-	# Single contact handling: fluid sliding with low friction
-	var nx := c0.normal.x
-	var nz := c0.normal.z
-	var v := s.velocity
-	var vdot := v.x * nx + v.z * nz
-
-	if vdot < 0.0:
-		var vin := -vdot
-		# Project velocity onto surface tangent: cancel normal penetration velocity
-		v.x -= nx * vdot
-		v.z -= nz * vdot
-
-		var vt_len := Vector2(v.x, v.z).length()
-		if vt_len > 1e-4:
-			var tangent := Vector3(v.x / vt_len, 0.0, v.z / vt_len)
-			if s.squeeze_k < 0.95 or c0.sharp > 0.15:
-				# Near openings or around corners: zero friction, slight fluid flow deflection around corner
-				# Cap flow_boost to 0.15x to prevent runaway speed at triangle/cone vertices
-				var flow_boost := vin * minf(0.15, (0.35 if s.squeeze_k < 0.95 else (0.25 * c0.sharp)))
-				s.velocity = tangent * (vt_len + flow_boost)
-			else:
-				# Flat wall impact with viscous drag clinging
-				var fr := (1.0 - exp(-6.0 * dt))
-				s.velocity = tangent * maxf(0.0, vt_len * (1.0 - fr))
-		else:
-			# Fix 5: Head-on impact — gentle slide, no forced 2 m/s injection
-			var tangent := Vector3(-nz, 0.0, nx)
-			if s.cur_gap_w < INF:
-				var to_gap := Vector3(s.cur_gap_center.x - s.position.x, 0.0, s.cur_gap_center.y - s.position.z)
-				if tangent.dot(to_gap) < 0.0:
-					tangent = -tangent
-				s.velocity = tangent * vin * 0.6  # gentle deflect toward gap, no minimum speed
-			else:
-				if tangent.dot(s._crawl_dir) < 0.0:
-					tangent = -tangent
-				s.velocity = tangent * vin * 0.2  # very gentle slide for open-space head-on
-
-		# Only trigger impact poke/splat if hitting a flat wall in open space, NOT around corners or when squeezing
-		if vin > 0.6 and s.squeeze_k > 0.85 and c0.sharp < 0.2 and s.time - c0.prop.hit_cd > 0.3:
-			c0.prop.hit_cd = s.time
-			var sev := minf(1.0, pow(vin / 8.5, 0.9))
-			s.splat_v += sev * 28.0 * (1.0 + 0.5 * c0.sharp)
-			s.trigger_poke(
-				Vector3(-nx, -0.15, -nz).normalized() * 1.6,
-				Vector3(nx * 1.6 * sev, 0.18 * sev, nz * 1.6 * sev)
-			)
+	var p0 := _prop_of_body(bodies[0])
+	var vin := s.motor.impact_speed
+	if p0 != null and vin > 0.6 and s.model.squeeze > 0.85 and s.time - p0.hit_cd > 0.3:
+		p0.hit_cd = s.time
+		var n0: Vector3 = normals[0]
+		var sev := minf(1.0, pow(vin / 8.5, 0.9))
+		s.splat_v += sev * 28.0 * (1.0 + 0.5 * s.sharp_amt)
+		s.trigger_poke(
+			Vector3(-n0.x, -0.15, -n0.z).normalized() * 1.6,
+			Vector3(n0.x * 1.6 * sev, 0.18 * sev, n0.z * 1.6 * sev))
 
 
-func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
-	var S := s.slime_scale
-	var sp := s.position
-	var m := p.mesh
-	var dx := m.position.x - sp.x
-	var dz := m.position.z - sp.z
-	var d := maxf(Vector2(dx, dz).length(), 1e-4)
-	var he := _half_of(p)
-
-	if d - Vector2(he.x, he.z).length() > 2.8 * S:
-		return null
-
-	var base_y := m.position.y - he.y
-	var top_y := m.position.y + he.y
-	var y_lo := maxf(base_y, floor_y)
-	var slime_bottom := sp.y - s.height_per_scale * S
-	var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
-	var y_hi := minf(top_y, slime_effective_top)
-	if y_hi < y_lo:
-		return null
-
-	var pen := 0.0
-	var nx := 0.0
-	var nz := 0.0
-	var c_r := 0.0
-	var sharp := 0.0
-	var n := 5
-
-	# Directional ellipse axes
-	var sq_axis := s.sq_dir
-	var flow_axis := Vector3(-sq_axis.z, 0, sq_axis.x)
-
+func _contact_sharpness(p: PropData, s: Slime) -> float:
+	var local := p.mesh.to_local(s.global_position)
+	var he := p.half
 	if p.shape == SHAPE_BOX:
-		var r := 0.0
-		for k in n:
-			var y := y_lo + (y_hi - y_lo) * float(k) / float(n - 1)
-			r = maxf(r, _surf_r((y - sp.y) / S) * S + 0.06 * S)
-
-		var c := cos(m.rotation.y)
-		var sn := sin(m.rotation.y)
-		var wx := -dx
-		var wz := -dz
-		var lx := wx * c - wz * sn
-		var lz := wx * sn + wz * c
-		var cx := clampf(lx, -he.x, he.x)
-		var cz := clampf(lz, -he.z, he.z)
-		var ex := lx - cx
-		var ez := lz - cz
-		var dd := Vector2(ex, ez).length()
-
-		# Corner sharpness
-		var ox := absf(lx) - he.x
-		var oz := absf(lz) - he.z
+		var ox := absf(local.x) - he.x
+		var oz := absf(local.z) - he.z
+		var r := maxf(s.model.rest_max_radius * s.model.scale, 0.1)
 		var t := clampf(minf(ox, oz) / (0.22 * r), 0.0, 1.0)
-		sharp = t * t * (3.0 - 2.0 * t)
+		return t * t * (3.0 - 2.0 * t)
+	if p.sides >= 3 and p.sides < 12:
+		var d := Vector2(local.x, local.z)
+		if d.length_squared() < 1e-6:
+			return 0.0
+		d = d.normalized()
+		var sup := _poly_support_local(p, d.x, d.y)
+		var ap := p.base_r * cos(PI / float(p.sides))
+		var t := clampf((sup - ap) / maxf(p.base_r - ap, 1e-4), 0.0, 1.0)
+		return t * t * (3.0 - 2.0 * t)
+	return 0.0
 
-		# Elliptical radius along contact direction
-		var world_ex := ex * c + ez * sn
-		var world_ez := -ex * sn + ez * c
-		var dir_len := maxf(Vector2(world_ex, world_ez).length(), 1e-4)
-		var unx := world_ex / dir_len
-		var unz := world_ez / dir_len
-
-		var r_gap := maxf(r * s.squeeze_k, 0.05 * S)
-		# Only stretch along flow when aligned and within the gap corridor,
-		# never when approaching or hitting outside front faces!
-		var gap_corridor_factor := 1.0
-		if s.cur_gap_w < INF and sq_axis.length_squared() > 0.01:
-			var to_gap := Vector2(sp.x - s.cur_gap_center.x, sp.z - s.cur_gap_center.y)
-			var dist_flow := absf(to_gap.x * flow_axis.x + to_gap.y * flow_axis.z)
-			gap_corridor_factor = clampf(1.0 - maxf(0.0, dist_flow - he.z) / (0.8 * S), 0.0, 1.0)
-		var r_flow := maxf(r * (1.0 + 0.5 * (1.0 - s.squeeze_k) * gap_corridor_factor), 0.05 * S)
-		var effective_r := r
-		if sq_axis.length_squared() > 0.01:
-			var p_gap := absf(unx * sq_axis.x + unz * sq_axis.z)
-			var p_flow := absf(unx * flow_axis.x + unz * flow_axis.z)
-			var denom := sqrt((p_gap * r_flow) * (p_gap * r_flow) + (p_flow * r_gap) * (p_flow * r_gap))
-			if denom > 1e-4:
-				effective_r = (r_gap * r_flow) / denom
-		effective_r = clampf(effective_r, minf(r_gap, r_flow), maxf(r_gap, r_flow))
-		c_r = effective_r
-
-		if dd < effective_r:
-			if dd > 1e-4:
-				ex /= dd
-				ez /= dd
-				pen = effective_r - dd
-			else:
-				# Deep inside box: safely push opposing velocity
-				var px := he.x - absf(lx)
-				var pz := he.z - absf(lz)
-				if px < pz:
-					ex = 1.0 if lx >= 0.0 else -1.0
-					ez = 0.0
-					pen = px + r_gap
-				else:
-					ex = 0.0
-					ez = 1.0 if lz >= 0.0 else -1.0
-					pen = pz + r_flow
-			nx = ex * c + ez * sn
-			nz = -ex * sn + ez * c
-
-			# When squeezing, side walls and corners must not push backward along the corridor flow
-			if s.squeeze_k < 0.90:
-				var flow_proj := Vector3(nx, 0.0, nz).dot(flow_axis)
-				if flow_proj < 0.0:
-					var lateral_comp := Vector3(nx, 0.0, nz) - flow_axis * flow_proj
-					if lateral_comp.length_squared() > 1e-4:
-						var lat_norm := lateral_comp.normalized()
-						nx = lat_norm.x
-						nz = lat_norm.z
-	else:
-		var ux := -dx / d
-		var uz := -dz / d
-		var sup := _poly_support(p, ux, uz)
-
-		if p.sides >= 3 and p.sides < 12:
-			var rc := p.base_r * m.scale.x
-			var ap := rc * cos(PI / p.sides)
-			var t := clampf((sup - ap) / (rc - ap), 0.0, 1.0)
-			sharp = t * t * (3.0 - 2.0 * t)
-
-		var h := 2.0 * he.y
-		for k in n:
-			var y := y_lo + (y_hi - y_lo) * float(k) / float(n - 1)
-			var rs := _surf_r((y - sp.y) / S) * S + 0.06 * S
-			var r_gap := maxf(rs * s.squeeze_k, 0.05 * S)
-			var r_flow := maxf(rs * (1.0 + 0.5 * (1.0 - s.squeeze_k)), 0.05 * S)
-			var eff_rs := rs
-			if sq_axis.length_squared() > 0.01:
-				var p_gap := absf(ux * sq_axis.x + uz * sq_axis.z)
-				var p_flow := absf(ux * flow_axis.x + uz * flow_axis.z)
-				var denom := sqrt((p_gap * r_flow) * (p_gap * r_flow) + (p_flow * r_gap) * (p_flow * r_gap))
-				if denom > 1e-4:
-					eff_rs = (r_gap * r_flow) / denom
-			eff_rs = clampf(eff_rs, minf(r_gap, r_flow), maxf(r_gap, r_flow))
-			var reach := sup * (maxf(0.06, 1.0 - (y - base_y) / h) if p.shape == SHAPE_CONE else 1.0)
-			if eff_rs + reach - d > pen:
-				pen = eff_rs + reach - d
-				c_r = eff_rs
-		if p.sides >= 3 and p.sides < 12:
-			var ca := cos(m.rotation.y)
-			var sa := sin(m.rotation.y)
-			var lx := ux * ca - uz * sa
-			var lz := ux * sa + uz * ca
-			var sector := TAU / p.sides
-			var phi := atan2(lx, lz) - p.phase
-			var d_sec := fmod(phi, sector)
-			if d_sec < 0.0:
-				d_sec += sector
-			var face_local_ang := atan2(lx, lz) - d_sec + sector * 0.5
-			var fn_lx := sin(face_local_ang)
-			var fn_lz := cos(face_local_ang)
-			var fn_wx := fn_lx * ca + fn_lz * sa
-			var fn_wz := -fn_lx * sa + fn_lz * ca
-			# Blend between flat face normal and vertex radial normal based on sharpness
-			var blend_to_radial := smoothstep(0.4, 0.9, sharp)
-			nx = lerpf(fn_wx, ux, blend_to_radial)
-			nz = lerpf(fn_wz, uz, blend_to_radial)
-			var nlen := maxf(Vector2(nx, nz).length(), 1e-4)
-			nx /= nlen
-			nz /= nlen
-		else:
-			nx = ux
-			nz = uz
-
-		if s.squeeze_k < 0.90:
-			var flow_proj := Vector3(nx, 0.0, nz).dot(flow_axis)
-			if flow_proj < 0.0:
-				var lateral_comp := Vector3(nx, 0.0, nz) - flow_axis * flow_proj
-				if lateral_comp.length_squared() > 1e-4:
-					var lat_norm := lateral_comp.normalized()
-					nx = lat_norm.x
-					nz = lat_norm.z
-
-	if pen <= 0.0:
-		return null
-
-	var ci := ContactInfo.new()
-	ci.prop = p
-	ci.normal = Vector3(nx, 0, nz).normalized()
-	ci.pen = pen
-	ci.c_r = c_r
-	ci.sharp = sharp
-	return ci
-
-
-func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
-	var sp := s.position
-	var S := s.slime_scale
-	var m := p.mesh
-	var dx := m.position.x - sp.x
-	var dz := m.position.z - sp.z
-	var he := _half_of(p)
-
-	if p.shape == SHAPE_BOX:
-		var c := cos(m.rotation.y)
-		var sn := sin(m.rotation.y)
-		var lx := -dx * c + dz * sn
-		var lz := -dx * sn - dz * c
-		var cx := clampf(lx, -he.x, he.x)
-		var cz := clampf(lz, -he.z, he.z)
-		var dd := Vector2(lx - cx, lz - cz).length()
-		return maxf(0.0, c_r - dd)
-	else:
-		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-		var ux := -dx / d
-		var uz := -dz / d
-		var base_y := m.position.y - he.y
-		var top_y := m.position.y + he.y
-		var h := 2.0 * he.y
-		var slime_bottom := sp.y - s.height_per_scale * S
-		var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
-		var y_lo := maxf(base_y, floor_y)
-		var y_hi := minf(top_y, slime_effective_top)
-		# For cones: use the same per-height tapered reach as detection, to avoid stutter
-		if p.shape == SHAPE_CONE and h > 1e-4:
-			var best_pen := 0.0
-			var n := 5
-			for k in n:
-				var y := y_lo + (y_hi - y_lo) * float(k) / float(n - 1)
-				var sup_full := _poly_support(p, ux, uz)
-				var reach := sup_full * maxf(0.06, 1.0 - (y - base_y) / h)
-				var rs := _surf_r((y - sp.y) / S) * S + 0.06 * S
-				var pen_at_y := rs + reach - d
-				if pen_at_y > best_pen:
-					best_pen = pen_at_y
-			return maxf(0.0, best_pen)
-		else:
-			var sup := _poly_support(p, ux, uz)
-			return maxf(0.0, c_r + sup - d)
 
 func _update_slime_splat(s: Slime, dt: float) -> void:
 	var since := s.time - s.touch_time
-	# Sustained push into a wall keeps the slime flattened
-	var is_pushing := s.velocity.length_squared() > 0.1
+	var is_pushing := s.motor.velocity.length_squared() > 0.1
 	var tgt := 0.20 if since < 0.15 else (0.12 if (since < 0.4 and is_pushing) else 0.0)
 
 	var ks := 120.0 if s.splat_v > 0.0 else 40.0
@@ -1215,60 +865,56 @@ func _update_slime_splat(s: Slime, dt: float) -> void:
 	s.set_shader_param("uSplatDir", s.impact_dir)
 
 
+# ------------------------------------------------------------------------------------------------
+# Digestion & inside props
+# ------------------------------------------------------------------------------------------------
+
 func _update_digesting_props(dt: float) -> void:
 	for p in props:
-		if p.state == STATE_EATING:
-			p.t += dt
-			# Smoothly decay press spring so the contact dent fades during absorption
-			p.pd = maxf(0.0, p.pd * exp(-10.0 * dt))
-			p.pv = maxf(0.0, p.pv * exp(-10.0 * dt))
-			var k := minf(p.t / EAT_TIME, 1.0)
-			var e := k * k * (3.0 - 2.0 * k)
-			var dis := maxf(0.0, 1.0 - maxf(0.0, p.t - EAT_TIME) / EAT_LINGER)
-			var shrink := maxf(0.001, (1.0 - 0.35 * e) * (0.65 + 0.35 * dis))
-			p.mesh.scale = p.base_scale * shrink
-			if p.material != null:
-				p.material.set_shader_parameter("uDissolve", 1.0 - dis)
-			p.mesh.rotation.y += dt * 0.4
+		if p.state != STATE_EATING:
+			continue
+		p.t += dt
+		p.pd = maxf(0.0, p.pd * exp(-10.0 * dt))
+		p.pv = maxf(0.0, p.pv * exp(-10.0 * dt))
+		var k := minf(p.t / tuning.eat_time, 1.0)
+		var e := k * k * (3.0 - 2.0 * k)
+		var dis := maxf(0.0, 1.0 - maxf(0.0, p.t - tuning.eat_time) / tuning.eat_linger)
+		var shrink := maxf(0.001, (1.0 - 0.35 * e) * (0.65 + 0.35 * dis))
+		p.mesh.scale = p.base_scale * shrink
+		if p.material != null:
+			p.material.set_shader_parameter("uDissolve", 1.0 - dis)
+		p.mesh.rotation.y += dt * 0.4
 
-			# Smoothly transfer digested mass into slime size progression
-			var s: Slime = p.eater if p.eater != null and is_instance_valid(p.eater) else player_slime
-			if s != null and is_instance_valid(s):
-				var total_digest_time: float = EAT_TIME + EAT_LINGER
-				var progress := clampf(p.t / total_digest_time, 0.0, 1.0)
-				var e_mass := progress * progress * (3.0 - 2.0 * progress)
-				var target_absorbed: float = p.total_mass * e_mass
-				var delta_m: float = target_absorbed - p.absorbed_mass
-				if delta_m > 0.0:
-					p.absorbed_mass = target_absorbed
-					# Authoritative volume transfer: add prop volume directly into slime target scale
-					# Volume = (4/3)*PI*(body_radius*target_scale)^3
-					# target_scale_new = (target_scale^3 + delta_m / ((4/3)*PI*body_radius^3))^(1/3)
-					var vol_factor := (4.0 / 3.0) * PI * pow(s.body_radius, 3.0)
-					s.target_scale = pow(pow(s.target_scale, 3.0) + (delta_m / vol_factor), 1.0 / 3.0)
+		var s: Slime = p.eater if p.eater != null and is_instance_valid(p.eater) else player_slime
+		if s != null and is_instance_valid(s):
+			var total_digest_time := tuning.eat_time + tuning.eat_linger
+			var progress := clampf(p.t / total_digest_time, 0.0, 1.0)
+			var e_mass := progress * progress * (3.0 - 2.0 * progress)
+			var target_absorbed := p.total_mass * e_mass
+			var delta_m := target_absorbed - p.absorbed_mass
+			if delta_m > 0.0:
+				p.absorbed_mass = target_absorbed
+				s.add_volume(delta_m)
 
-				var S: float = s.slime_scale
-				if p.t < EAT_TIME:
-					var target_in_belly: Vector3 = s.position + p.off * (S * 0.70)
-					p.mesh.position = p.start.lerp(target_in_belly, e)
-					p.vel = Vector3.ZERO
-				else:
-					if not s.inside_props.has(p):
-						s.inside_props.append(p)
+			if p.t < tuning.eat_time:
+				var target_in_belly: Vector3 = s.model.center() + p.off * (s.model.scale * 0.70)
+				p.mesh.position = p.start.lerp(target_in_belly, e)
+				p.vel = Vector3.ZERO
+			else:
+				if not s.inside_props.has(p):
+					s.inside_props.append(p)
 
-			if dis <= 0.0:
-				if p.eater != null and is_instance_valid(p.eater):
-					p.eater.inside_props.erase(p)
-				elif player_slime != null:
-					player_slime.inside_props.erase(p)
-				p.mesh.queue_free()
-				p.state = STATE_GONE
+		if dis <= 0.0:
+			if p.eater != null and is_instance_valid(p.eater):
+				p.eater.inside_props.erase(p)
+			elif player_slime != null:
+				player_slime.inside_props.erase(p)
+			p.mesh.queue_free()
+			p.state = STATE_GONE
 
 
 func _update_inside_props(s: Slime, dt: float) -> void:
-	# Inside props physics for this slime
-	var S := s.slime_scale
-	var sp := s.position
+	var center := s.model.center()
 	for item in s.inside_props:
 		var p: PropData = item as PropData
 		if p == null or p.mesh == null:
@@ -1280,29 +926,33 @@ func _update_inside_props(s: Slime, dt: float) -> void:
 		var m: MeshInstance3D = p.mesh
 		var he: Vector3 = _half_of(p)
 		var rr: float = maxf(maxf(he.x, he.y), he.z) * 0.8
-		var rh: float = maxf(0.15, 1.6 * S - rr)
-		var rv: float = maxf(0.15, 1.15 * S - rr)
-		var l: Vector3 = m.position - sp
+		var rh: float = maxf(0.15, maxf(s.model.semi_a, s.model.semi_b) * 0.8 - rr)
+		var rv: float = maxf(0.15, s.model.full_height * 0.45 - rr)
+		var l: Vector3 = m.position - center
 		var qx: float = l.x / rh
 		var qy: float = l.y / rv
 		var qz: float = l.z / rh
 		var ql: float = sqrt(qx * qx + qy * qy + qz * qz)
 		if ql > 1.0:
-			m.position = sp + l / ql
+			m.position = center + l / ql
 			var n: Vector3 = Vector3(qx / rh, qy / rv, qz / rh).normalized()
 			var vn: float = p.vel.dot(n)
 			if vn > 0.0:
 				p.vel -= n * vn * 1.4
 
-		if m.position.y < floor_y + he.y:
-			m.position.y = floor_y + he.y
+		if m.position.y < tuning.floor_y + he.y:
+			m.position.y = tuning.floor_y + he.y
 			if p.vel.y < 0.0:
 				p.vel.y *= -0.2
 
 
+# ------------------------------------------------------------------------------------------------
+# Shader uniforms (all positions in mesh-local units via the resolved model)
+# ------------------------------------------------------------------------------------------------
+
 func _update_eat_uniforms(s: Slime) -> void:
-	var S := s.slime_scale
-	var sp := s.position
+	var S := s.model.scale
+	var sp := s.global_position
 	var eat_pos := PackedVector3Array()
 	var eat_param := PackedVector3Array()
 	var box_half := PackedVector3Array()
@@ -1313,11 +963,9 @@ func _update_eat_uniforms(s: Slime) -> void:
 
 	var pressing: Array[PropData] = []
 	for p in props:
-		# Fix: Only IDLE props occupy pressing slots (0-2). Once EATING, props occupy eating slots (3-5) exclusively,
-		# preventing double-dent deformation in the shader during the first 0.8s.
 		if p.state == STATE_IDLE and p.pd > 0.004 and p.p_ro > 0.0 and p.last_presser == s:
-			var dist := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length()
-			if dist <= 2.2 * S + p.p_ro:
+			var dist := Vector2(p.mesh.global_position.x - sp.x, p.mesh.global_position.z - sp.z).length()
+			if dist <= s.model.rest_max_radius * S * 1.1 + p.p_ro:
 				pressing.append(p)
 	pressing.sort_custom(func(a: PropData, b: PropData) -> bool: return a.pd > b.pd)
 	if pressing.size() > 3:
@@ -1327,13 +975,13 @@ func _update_eat_uniforms(s: Slime) -> void:
 	var press_dir := Vector3(0, 0, 1)
 	for i in pressing.size():
 		var p := pressing[i]
-		var m := p.mesh.position
+		var m := p.mesh.global_position
 		var dx := m.x - sp.x
 		var dz := m.z - sp.z
 		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-		var yl := (m.y - sp.y) / S
-		var dv := (_surf_r(yl) * S + p.p_ro - p.pd) / S
-		eat_pos[i] = Vector3(dx / d * dv, yl, dz / d * dv)
+		var dir := Vector3(dx / d, 0.0, dz / d)
+		var dv := (s.model.world_radius_at(m.y, dir) + p.p_ro - p.pd) / maxf(S, 1e-4)
+		eat_pos[i] = Vector3(dir.x * dv, (m.y - sp.y) / maxf(S, 1e-4), dir.z * dv)
 		eat_param[i] = Vector3(float(p.shape) + p.sides * 0.01, 1.0, p.mesh.rotation.y + p.phase)
 		box_half[i] = _box_half(p, S)
 		var a := minf(1.0, p.pd / p.p_thr)
@@ -1342,7 +990,7 @@ func _update_eat_uniforms(s: Slime) -> void:
 		a = minf(1.0, a * strain_boost)
 		if a > pa:
 			pa = a
-			press_dir = Vector3(dx / d, 0, dz / d)
+			press_dir = dir
 
 	s.press_amt += (pa - s.press_amt) * 0.25
 	s.set_shader_param("uPressAmt", s.press_amt)
@@ -1350,10 +998,10 @@ func _update_eat_uniforms(s: Slime) -> void:
 
 	var near := 0.0
 	for p in props:
-		# Only count props that are actively being pressed by this slime (p_ro is stale otherwise)
 		if p.state != STATE_IDLE or p.p_ro <= 0.0 or p.last_presser != s:
 			continue
-		var gap := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length() - (1.9 * S + p.p_ro)
+		var to_prop := Vector3(p.mesh.global_position.x - sp.x, 0.0, p.mesh.global_position.z - sp.z)
+		var gap := to_prop.length() - (s.model.horizontal_support(to_prop) + p.p_ro)
 		near = maxf(near, minf(1.0, maxf(0.0, 1.0 - gap / (1.5 * S + p.p_ro))))
 	s.calm += (maxf(near, s.press_amt) - s.calm) * 0.2
 
@@ -1361,8 +1009,8 @@ func _update_eat_uniforms(s: Slime) -> void:
 	for p in props:
 		if p.state != STATE_EATING or p.eater != s or slot > 5:
 			continue
-		var m := p.mesh.position
-		eat_pos[slot] = Vector3((m.x - sp.x) / S, (m.y - sp.y) / S, (m.z - sp.z) / S)
+		var m := p.mesh.global_position
+		eat_pos[slot] = s.model.mesh_local(m - sp)
 		var eat_fade := clampf(p.t / 0.4, 0.0, 1.0)
 		eat_param[slot] = Vector3(float(p.shape) + p.sides * 0.01, eat_fade, p.mesh.rotation.y + p.phase)
 		box_half[slot] = _box_half(p, S)
@@ -1374,8 +1022,8 @@ func _update_eat_uniforms(s: Slime) -> void:
 
 
 func _update_solid_uniforms(s: Slime) -> void:
-	var S := s.slime_scale
-	var sp := s.position
+	var S := s.model.scale
+	var sp := s.global_position
 	var solid_pos := PackedVector3Array()
 	var solid_param := PackedVector3Array()
 	var solid_half := PackedVector3Array()
@@ -1390,8 +1038,8 @@ func _update_solid_uniforms(s: Slime) -> void:
 	for p in props:
 		if p.state == STATE_IDLE and p.touch_slime == s and s.time - p.touch < 1.2:
 			var he := _half_of(p)
-			var dist := Vector2(p.mesh.position.x - sp.x, p.mesh.position.z - sp.z).length()
-			if dist <= 2.4 * S + Vector2(he.x, he.z).length():
+			var dist := Vector2(p.mesh.global_position.x - sp.x, p.mesh.global_position.z - sp.z).length()
+			if dist <= s.model.rest_max_radius * S * 1.2 + Vector2(he.x, he.z).length():
 				active.append(p)
 	active.sort_custom(func(a: PropData, b: PropData) -> bool: return a.touch > b.touch)
 	if active.size() > 2:
@@ -1400,8 +1048,9 @@ func _update_solid_uniforms(s: Slime) -> void:
 	var depth := minf(1.2, maxf(s.splat_x, s.spread_x * 0.5) * (0.5 + 0.7 * s.sharp_amt))
 	for i in active.size():
 		var p := active[i]
-		var m := p.mesh.position
-		solid_pos[i] = Vector3((m.x - sp.x) / S + p.cnx * depth, (m.y - sp.y) / S, (m.z - sp.z) / S + p.cnz * depth)
+		var m := p.mesh.global_position
+		var local := s.model.mesh_local(m - sp)
+		solid_pos[i] = Vector3(local.x + p.cnx * depth, local.y, local.z + p.cnz * depth)
 		solid_dir[i] = Vector3(-p.cnx, 0, -p.cnz)
 		var fade := 1.0 - minf(1.0, maxf(0.0, (s.time - p.touch - 0.8) / 0.4))
 		solid_param[i] = Vector3(float(p.shape) + p.sides * 0.01, fade, p.mesh.rotation.y + p.phase)
@@ -1424,11 +1073,8 @@ func _update_floor_shadows() -> void:
 			break
 		if not is_instance_valid(s):
 			continue
-		var s_scale := s.slime_scale * lerpf(1.0, s.liquid_spread_ratio, s.liquid_amt)
 		b_pos.append(s.global_position)
-		b_scale.append(s_scale)
-
-
+		b_scale.append(s.model.scale * s.model.spread)
 
 	var count := b_pos.size()
 	while b_pos.size() < 8:
@@ -1441,60 +1087,39 @@ func _update_floor_shadows() -> void:
 
 
 # ------------------------------------------------------------------------------------------------
-# Shape helpers
+# Shape helpers (world-space, rotation-correct)
 # ------------------------------------------------------------------------------------------------
-
-func _surf_r(yl: float) -> float:
-	var melt := 0.28
-	var k := 0.86 - melt * 0.22
-	var g_floor := -1.6 * k
-	var lo := g_floor
-	var hi := 1.6 * k
-	for _i in 18:
-		var mid := (lo + hi) * 0.5
-		var b := mid - g_floor
-		var f := mid
-		if b < 0.9:
-			var t := clampf(b / 0.9, 0.0, 1.0)
-			f = g_floor + 0.9 * (2.0 * t * t - t * t * t)
-		if f < yl:
-			lo = mid
-		else:
-			hi = mid
-
-	var py := clampf(lo / k, -1.6, 1.6)
-	var h := (py / 1.6 + 1.0) * 0.5
-	var sm := smoothstep(0.0, 0.22, h)
-	var spread := 1.0 + (pow(1.0 - h, 1.35) * sm * 0.34 + sin(h * PI) * 0.08) * (0.8 + melt * 1.1)
-	return maxf(0.3, sqrt(maxf(0.0, 2.56 - py * py)) * spread)
-
 
 func _half_of(p: PropData) -> Vector3:
 	return p.half * p.mesh.scale.x
 
 
-func _poly_support(p: PropData, ux: float, uz: float) -> float:
-	var r := p.base_r * p.mesh.scale.x
+func _poly_support_local(p: PropData, ux: float, uz: float) -> float:
 	if p.sides < 3 or p.sides >= 12:
-		return r
-	var ca := cos(p.mesh.rotation.y)
-	var sa := sin(p.mesh.rotation.y)
-	var lx := ux * ca - uz * sa
-	var lz := ux * sa + uz * ca
-	var sector := TAU / p.sides
-	var d := fmod(atan2(lx, lz) - p.phase, sector)
+		return p.base_r
+	var sector := TAU / float(p.sides)
+	var d := fmod(atan2(ux, uz) - p.phase, sector)
 	if d < 0.0:
 		d += sector
 	var from_face := absf(d - sector * 0.5)
-	return r * cos(sector * 0.5) / cos(from_face)
+	return p.base_r * cos(sector * 0.5) / cos(from_face)
+
+
+func _poly_support(p: PropData, ux: float, uz: float) -> float:
+	var ld := p.mesh.basis.inverse() * Vector3(ux, 0.0, uz)
+	var l := Vector2(ld.x, ld.z)
+	if l.length_squared() < 1e-8:
+		return p.base_r * p.mesh.scale.x
+	l = l.normalized()
+	return _poly_support_local(p, l.x, l.y) * p.mesh.scale.x
 
 
 func _box_half(p: PropData, S: float) -> Vector3:
 	var he := _half_of(p)
 	if p.shape == SHAPE_BOX:
-		return he / S
+		return he / maxf(S, 1e-4)
 	var r := p.base_r * p.mesh.scale.x
-	return Vector3(r, he.y, r) / S
+	return Vector3(r, he.y, r) / maxf(S, 1e-4)
 
 
 func total() -> int:

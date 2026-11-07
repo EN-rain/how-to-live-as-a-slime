@@ -22,12 +22,14 @@ extends Node3D
 @export_group("Follow")
 ## Height of the look-at point above the slime's centre, per unit of slime scale.
 @export var target_height_per_scale := 0.15
-## Camera starts following once the slime is moving faster than this (0..1).
-@export var follow_speed_threshold := 0.01
+## Camera starts following once the slime moves faster than this (0..1 of walk speed).
+## Negative means "use the slime's authored tuning value".
+@export var follow_speed_threshold := -1.0
 
 var target := Vector3.ZERO
 var _dragging := false
 var _last_scale := 1.0
+var _engaged := false
 
 
 func _ready() -> void:
@@ -66,6 +68,12 @@ func _zoom(amount: float) -> void:
 func _process(_delta: float) -> void:
 	if follow == null or not is_instance_valid(follow):
 		return
+	if not _engaged:
+		var thr := follow_speed_threshold
+		if thr < 0.0 and follow.tuning != null:
+			thr = follow.tuning.follow_speed_threshold
+		if follow.speed01 > maxf(thr, 0.0):
+			_engaged = true
 	var s := follow.slime_scale
 	var target_look_y := follow.position.y + target_height_per_scale * s - (0.55 * s * follow.liquid_amt)
 	if absf(s - _last_scale) > 1e-4:
@@ -75,8 +83,9 @@ func _process(_delta: float) -> void:
 		_update_camera()
 	else:
 		target.y = lerpf(target.y, target_look_y, 0.1)
-	target.x = follow.position.x
-	target.z = follow.position.z
+	if _engaged:
+		target.x = follow.position.x
+		target.z = follow.position.z
 	_update_camera()
 
 
@@ -86,6 +95,7 @@ func _update_camera() -> void:
 		radius * cos(phi),
 		radius * sin(phi) * cos(theta))
 	var cam_pos := target + offset
-	cam_pos.y = maxf(cam_pos.y, -1.2 + 0.25)
+	var floor_y := follow.tuning.floor_y if follow != null and follow.tuning != null else -1.2
+	cam_pos.y = maxf(cam_pos.y, floor_y + 0.25)
 	camera.global_position = cam_pos
 	camera.look_at(target, Vector3.UP)

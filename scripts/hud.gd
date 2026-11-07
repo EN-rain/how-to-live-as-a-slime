@@ -5,6 +5,7 @@ extends Control
 @export var slime: Slime
 @export var props: SlimeProps
 @export var hint_text := "WASD move · Shift run · Z hold liquid / engulf · E split follower · Q split roamer · M merge · Click poke"
+@export var debug_posture := false
 
 var _stat: Label
 var _hint: Label
@@ -83,6 +84,11 @@ func _process(_delta: float) -> void:
 		text += "  ·  Z-Drape %d%%" % int(slime.engulf_progress * 100.0)
 	elif slime.liquid_amt > 0.5:
 		text += "  ·  [Liquid Mode]"
+
+	if debug_posture and slime.model != null:
+		text += "  ·  h %.2f  sq %.2f  liq %.2f" % [slime.height_ratio, slime.squeeze_k, slime.liquid_amt]
+		if slime.expansion_blocked != "":
+			text += "  ·  %s" % slime.expansion_blocked
 
 	if text != _last:
 		_last = text
