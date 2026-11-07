@@ -588,7 +588,7 @@ func _process_engulf(dt: float) -> void:
 		var puddle_radius := 1.8 * S * 1.85
 
 		# 1. If standing on top of a prop AND the puddle fully covers it horizontally
-		if ground_prop != null and ground_prop.state == 0:
+		if ground_prop != null and ground_prop.state == 0 and not ground_prop.get("is_static") and ground_prop.radius < 1.8 * S * 0.75 * 1.5:
 			var gm: MeshInstance3D = ground_prop.mesh
 			if gm != null:
 				var ghe: Vector3 = ground_prop.half * gm.scale.x
@@ -601,7 +601,7 @@ func _process_engulf(dt: float) -> void:
 			# 2. Check all props to see if the slime is covering or directly over one
 			var best_score := -INF
 			for p in props.props:
-				if p.state != 0:
+				if p.state != 0 or p.get("is_static") or p.radius >= 1.8 * S * 0.75 * 1.5:
 					continue
 				var m: MeshInstance3D = p.mesh
 				if m == null:

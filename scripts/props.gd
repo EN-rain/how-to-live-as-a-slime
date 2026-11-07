@@ -71,6 +71,7 @@ class PropData extends RefCounted:
 	var eater: Slime = null
 	var last_presser: Slime = null
 	var base_scale := Vector3.ONE
+	var is_static := false
 	var total_mass := 0.0
 	var absorbed_mass := 0.0
 
@@ -262,6 +263,7 @@ func _spawn_test_structures() -> void:
 		mi.position = gate_pos + Vector3(side * 0.85, floor_y + 1.6, 0.0)
 		_prop_root.add_child(mi)
 		p.mesh = mi
+		p.is_static = true
 		p.base_scale = mi.scale
 		props.append(p)
 
@@ -270,6 +272,7 @@ func _spawn_test_structures() -> void:
 	var roof_box := BoxMesh.new()
 	roof_box.size = Vector3(3.2, 0.6, 2.4)
 	var roof_prop := PropData.new()
+	roof_prop.is_static = true
 	roof_prop.radius = 2.8
 	roof_prop.fp = 2.8
 	roof_prop.shape = SHAPE_BOX
@@ -288,6 +291,7 @@ func _spawn_test_structures() -> void:
 		var leg_box := BoxMesh.new()
 		leg_box.size = Vector3(0.5, 0.75, 2.4)
 		var leg_p := PropData.new()
+		leg_p.is_static = true
 		leg_p.radius = 1.8
 		leg_p.fp = 1.8
 		leg_p.shape = SHAPE_BOX
@@ -383,6 +387,8 @@ func _update_ground_support(s: Slime) -> void:
 	var S := s.slime_scale
 	var highest_top := floor_y
 	var found_prop = null
+	var slime_bottom := sp.y - (s.height_per_scale * S)
+	var slime_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
 
 	for p in props:
 		if p.state != STATE_IDLE:
@@ -392,6 +398,11 @@ func _update_ground_support(s: Slime) -> void:
 		var dx := sp.x - m.position.x
 		var dz := sp.z - m.position.z
 		var top_y := m.position.y + he.y
+		var bottom_y := m.position.y - he.y
+
+		# If prop is elevated above the floor (roof/ceiling/bridge) and slime is under it, ignore
+		if bottom_y > floor_y + 0.15 and slime_top <= bottom_y + 0.2:
+			continue
 
 		# Check if slime is horizontally within the prop's top footprint
 		var in_footprint := false
@@ -400,16 +411,15 @@ func _update_ground_support(s: Slime) -> void:
 			var sn := sin(m.rotation.y)
 			var lx := absf(dx * c + dz * sn)
 			var lz := absf(-dx * sn + dz * c)
-			in_footprint = (lx <= he.x * 1.15 and lz <= he.z * 1.15)
+			in_footprint = (lx <= he.x * 1.05 and lz <= he.z * 1.05)
 		else:
 			var d := Vector2(dx, dz).length()
 			var sup := _poly_support(p, dx / maxf(d, 1e-4), dz / maxf(d, 1e-4))
-			in_footprint = (d <= sup * 1.15)
+			in_footprint = (d <= sup * 1.05)
 
 		if in_footprint:
-			# If the slime's bottom is close to or above the top surface
-			var slime_bottom := sp.y - (s.height_per_scale * S * 0.5)
-			if slime_bottom >= top_y - (0.45 * S):
+			# Slime must actually be above or stepping onto the top surface
+			if slime_bottom >= top_y - (0.15 * S):
 				if top_y > highest_top:
 					highest_top = top_y
 					found_prop = p
@@ -437,7 +447,7 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	for p in props:
 		if p.state != STATE_IDLE or p.radius < lim or p == s.ground_prop:
 			continue
-		var c: Variant = _solid_surface_point(p, sp, S, reach * 2.2, s)
+		var c: Variant = _solid_surface_point(p, sp, S, reach * 2.0, s)
 		if c != null:
 			pts.append(c)
 
@@ -445,6 +455,8 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	var best_w := INF
 	var best_dir := Vector2.ZERO
 	var best_center := Vector2.ZERO
+	var best_dist := INF
+
 	for i in pts.size():
 		for j in range(i + 1, pts.size()):
 			var seg := pts[j] - pts[i]
@@ -455,21 +467,27 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			if t < -0.35 or t > 1.35:
 				continue
 			var off := (spx - (pts[i] + seg * clampf(t, 0.0, 1.0))).length()
-			if off > reach * 1.8:
+			if off > reach * 2.0:
 				continue
 			best_w = w
 			best_dir = seg / w
 			best_center = (pts[i] + pts[j]) * 0.5
+			best_dist = off
 
 	var target := 1.0
 	if best_w < INF:
-		var fit := (best_w * 0.5 - 0.02 * S) / r_max
-		target = clampf(fit, effective_min_squeeze, 1.0)
+		var fit := clampf((best_w * 0.5 - 0.02 * S) / r_max, effective_min_squeeze, 1.0)
+		if fit < 1.0:
+			# Proximity squeeze: as slime approaches the gap, it smoothly tapers down to fit!
+			# Full squeeze reached when distance to gap is <= reach * 0.6 (~1.0m)
+			var prox := clampf(1.0 - (best_dist - reach * 0.6) / (reach * 1.4), 0.0, 1.0)
+			prox = prox * prox * (3.0 - 2.0 * prox)
+			target = lerpf(1.0, fit, prox)
 
 	var rate := squeeze_in_rate if target < s.squeeze_k else squeeze_out_rate
 	s.squeeze_k = clampf(s.squeeze_k + (target - s.squeeze_k) * (1.0 - exp(-rate * dt)), effective_min_squeeze, 1.0)
 
-	if target < 1.0:
+	if target < 0.98:
 		var d3 := Vector3(best_dir.x, 0.0, best_dir.y)
 		if d3.dot(s.sq_dir) < 0.0:
 			d3 = -d3
@@ -477,17 +495,16 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 
 		# Smooth funneling force: gently guide slime toward the gap centerline as it moves
 		var lateral_offset := (spx - best_center).dot(best_dir)
-		var flow_dir := Vector3(-best_dir.y, 0.0, best_dir.x)
-		var forward_motion := absf(s.velocity.dot(flow_dir))
-		if forward_motion > 0.05 and (spx - best_center).length() < reach * 2.0:
-			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.5), 0.0, 1.0)
-			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 6.0 * dt
+		var to_gap := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z)
+		var moving_toward := s.velocity.dot(to_gap) > 0.0 or to_gap.length() < reach * 0.6
+		if moving_toward and (spx - best_center).length() < reach * 1.6:
+			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.2), 0.0, 1.0)
+			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 8.0 * dt
 			s.position += funnel_push
 
 	var squeeze_val := 1.0 - s.squeeze_k
 	s.set_shader_param("uSqueeze", squeeze_val)
 	s.set_shader_param("uSqueezeDir", s.sq_dir)
-
 
 func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float, s: Slime) -> Variant:
 	var m := p.mesh
@@ -497,7 +514,8 @@ func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float, s: S
 	var d := maxf(Vector2(dx, dz).length(), 1e-4)
 	if d - Vector2(he.x, he.z).length() > reach:
 		return null
-	var slime_effective_top := floor_y + (sp.y + S - floor_y) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
+	var slime_bottom := sp.y - s.height_per_scale * S
+	var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
 	if maxf(m.position.y - he.y, floor_y) > minf(m.position.y + he.y, slime_effective_top):
 		return null
 
@@ -523,7 +541,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 	var edible_limit := base_limit * (1.5 if s.liquid_amt > 0.1 else 1.0)
 
 	for p in props:
-		if p.state != STATE_IDLE or p.radius >= edible_limit:
+		if p.state != STATE_IDLE or p.is_static or p.radius >= edible_limit:
 			continue
 		var m := p.mesh
 		var dx := m.position.x - sp.x
@@ -736,13 +754,13 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 				s.velocity = tangent * (vt_len + flow_boost)
 			else:
 				# Flat wall impact with viscous drag clinging
-				var squeeze_slip := s.squeeze_k * s.squeeze_k
-				var fr := (1.0 - exp(-6.0 * dt)) * squeeze_slip
+				var fr := (1.0 - exp(-6.0 * dt))
 				s.velocity = tangent * maxf(0.0, vt_len * (1.0 - fr))
 		else:
 			s.velocity = Vector3.ZERO
 
-		if vin > 0.6 and s.squeeze_k > 0.8 and s.time - c0.prop.hit_cd > 0.3:
+		# Only trigger impact poke/splat if hitting a flat wall in open space, NOT around corners or when squeezing
+		if vin > 0.6 and s.squeeze_k > 0.85 and c0.sharp < 0.2 and s.time - c0.prop.hit_cd > 0.3:
 			c0.prop.hit_cd = s.time
 			var sev := minf(1.0, pow(vin / 8.5, 0.9))
 			s.splat_v += sev * 28.0 * (1.0 + 0.5 * c0.sharp)
@@ -767,7 +785,8 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 	var base_y := m.position.y - he.y
 	var top_y := m.position.y + he.y
 	var y_lo := maxf(base_y, floor_y)
-	var slime_effective_top := sp.y + S * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
+	var slime_bottom := sp.y - s.height_per_scale * S
+	var slime_effective_top := slime_bottom + (2.0 * s.height_per_scale * S) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
 	var y_hi := minf(top_y, slime_effective_top)
 	if y_hi < y_lo:
 		return null
@@ -779,7 +798,7 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 	var sharp := 0.0
 	var n := 5
 
-	# Elliptical directional support so squeezing matches the visible stretched mesh
+	# Directional ellipse axes
 	var sq_axis := s.sq_dir
 	var flow_axis := Vector3(-sq_axis.z, 0, sq_axis.x)
 
@@ -817,8 +836,10 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 		var p_gap := absf(unx * sq_axis.x + unz * sq_axis.z)
 		var p_flow := absf(unx * flow_axis.x + unz * flow_axis.z)
 		var r_gap := r * s.squeeze_k
-		var r_flow := r * (1.0 + 0.45 * (1.0 - s.squeeze_k))
-		var effective_r := sqrt(p_gap * p_gap * r_gap * r_gap + p_flow * p_flow * r_flow * r_flow)
+		var r_flow := r * (1.0 + 0.5 * (1.0 - s.squeeze_k))
+		# Exact ellipse radius in contact direction
+		var denom := sqrt((p_gap / maxf(r_gap, 0.01)) * (p_gap / maxf(r_gap, 0.01)) + (p_flow / maxf(r_flow, 0.01)) * (p_flow / maxf(r_flow, 0.01)))
+		var effective_r := 1.0 / maxf(denom, 1e-4)
 		c_r = effective_r
 
 		if dd < effective_r:
@@ -833,13 +854,23 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 				if px < pz:
 					ex = 1.0 if lx >= 0.0 else -1.0
 					ez = 0.0
-					pen = px + effective_r
+					pen = px + r_gap
 				else:
 					ex = 0.0
 					ez = 1.0 if lz >= 0.0 else -1.0
-					pen = pz + effective_r
+					pen = pz + r_flow
 			nx = ex * c + ez * sn
 			nz = -ex * sn + ez * c
+
+			# When squeezing, side walls and corners must not push backward along the corridor flow
+			if s.squeeze_k < 0.90:
+				var flow_proj := Vector3(nx, 0.0, nz).dot(flow_axis)
+				if flow_proj < 0.0:
+					var lateral_comp := Vector3(nx, 0.0, nz) - flow_axis * flow_proj
+					if lateral_comp.length_squared() > 1e-4:
+						var lat_norm := lateral_comp.normalized()
+						nx = lat_norm.x
+						nz = lat_norm.z
 	else:
 		var ux := -dx / d
 		var uz := -dz / d
@@ -857,13 +888,25 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 			var rs := _surf_r((y - sp.y) / S) * S + 0.06 * S
 			var p_gap := absf(ux * sq_axis.x + uz * sq_axis.z)
 			var p_flow := absf(ux * flow_axis.x + uz * flow_axis.z)
-			var eff_rs := sqrt(p_gap * p_gap * (rs * s.squeeze_k) * (rs * s.squeeze_k) + p_flow * p_flow * (rs * 1.3) * (rs * 1.3))
+			var r_gap := rs * s.squeeze_k
+			var r_flow := rs * (1.0 + 0.5 * (1.0 - s.squeeze_k))
+			var denom := sqrt((p_gap / maxf(r_gap, 0.01)) * (p_gap / maxf(r_gap, 0.01)) + (p_flow / maxf(r_flow, 0.01)) * (p_flow / maxf(r_flow, 0.01)))
+			var eff_rs := 1.0 / maxf(denom, 1e-4)
 			var reach := sup * (maxf(0.06, 1.0 - (y - base_y) / h) if p.shape == SHAPE_CONE else 1.0)
 			if eff_rs + reach - d > pen:
 				pen = eff_rs + reach - d
 				c_r = eff_rs
 		nx = ux
 		nz = uz
+
+		if s.squeeze_k < 0.90:
+			var flow_proj := Vector3(nx, 0.0, nz).dot(flow_axis)
+			if flow_proj < 0.0:
+				var lateral_comp := Vector3(nx, 0.0, nz) - flow_axis * flow_proj
+				if lateral_comp.length_squared() > 1e-4:
+					var lat_norm := lateral_comp.normalized()
+					nx = lat_norm.x
+					nz = lat_norm.z
 
 	if pen <= 0.0:
 		return null
@@ -875,6 +918,7 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 	ci.c_r = c_r
 	ci.sharp = sharp
 	return ci
+
 
 func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
 	var sp := s.position
@@ -896,7 +940,6 @@ func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
 		var d := maxf(Vector2(dx, dz).length(), 1e-4)
 		var sup := _poly_support(p, -dx / d, -dz / d)
 		return maxf(0.0, c_r + sup - d)
-
 
 func _update_slime_splat(s: Slime, dt: float) -> void:
 	var since := s.time - s.touch_time
