@@ -27,9 +27,9 @@ const EAT_LINGER := 2.0
 @export var floor_y := -1.2
 
 @export_group("Squeeze & Liquid")
-@export_range(0.15, 1.0, 0.01) var min_squeeze := 0.25
-@export var squeeze_in_rate := 14.0
-@export var squeeze_out_rate := 4.0
+@export_range(0.06, 1.0, 0.01) var min_squeeze := 0.12
+@export var squeeze_in_rate := 16.0
+@export var squeeze_out_rate := 5.0
 
 var props: Array[PropData] = []
 var registered_slimes: Array[Slime] = []
@@ -425,7 +425,7 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 
 	var effective_min_squeeze := min_squeeze
 	if s.liquid_amt > 0.01:
-		effective_min_squeeze = lerpf(min_squeeze, 0.18, s.liquid_amt)
+		effective_min_squeeze = lerpf(min_squeeze, 0.05, s.liquid_amt)
 
 	var r_max := 0.0
 	for k in 6:
@@ -437,13 +437,14 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	for p in props:
 		if p.state != STATE_IDLE or p.radius < lim or p == s.ground_prop:
 			continue
-		var c: Variant = _solid_surface_point(p, sp, S, reach * 1.6)
+		var c: Variant = _solid_surface_point(p, sp, S, reach * 2.2, s)
 		if c != null:
 			pts.append(c)
 
 	var spx := Vector2(sp.x, sp.z)
 	var best_w := INF
 	var best_dir := Vector2.ZERO
+	var best_center := Vector2.ZERO
 	for i in pts.size():
 		for j in range(i + 1, pts.size()):
 			var seg := pts[j] - pts[i]
@@ -451,17 +452,18 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 			if w < 1e-3 or w >= best_w:
 				continue
 			var t := (spx - pts[i]).dot(seg) / (w * w)
-			if t < -0.1 or t > 1.1:
+			if t < -0.35 or t > 1.35:
 				continue
 			var off := (spx - (pts[i] + seg * clampf(t, 0.0, 1.0))).length()
-			if off > reach * 1.3:
+			if off > reach * 1.8:
 				continue
 			best_w = w
 			best_dir = seg / w
+			best_center = (pts[i] + pts[j]) * 0.5
 
 	var target := 1.0
 	if best_w < INF:
-		var fit := (0.96 * best_w * 0.5 - 0.06 * S) / r_max
+		var fit := (best_w * 0.5 - 0.02 * S) / r_max
 		target = clampf(fit, effective_min_squeeze, 1.0)
 
 	var rate := squeeze_in_rate if target < s.squeeze_k else squeeze_out_rate
@@ -471,14 +473,23 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 		var d3 := Vector3(best_dir.x, 0.0, best_dir.y)
 		if d3.dot(s.sq_dir) < 0.0:
 			d3 = -d3
-		s.sq_dir = s.sq_dir.lerp(d3, 1.0 - exp(-12.0 * dt)).normalized()
+		s.sq_dir = s.sq_dir.lerp(d3, 1.0 - exp(-16.0 * dt)).normalized()
+
+		# Smooth funneling force: gently guide slime toward the gap centerline as it moves
+		var lateral_offset := (spx - best_center).dot(best_dir)
+		var flow_dir := Vector3(-best_dir.y, 0.0, best_dir.x)
+		var forward_motion := absf(s.velocity.dot(flow_dir))
+		if forward_motion > 0.05 and (spx - best_center).length() < reach * 2.0:
+			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.5), 0.0, 1.0)
+			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 6.0 * dt
+			s.position += funnel_push
 
 	var squeeze_val := 1.0 - s.squeeze_k
 	s.set_shader_param("uSqueeze", squeeze_val)
 	s.set_shader_param("uSqueezeDir", s.sq_dir)
 
 
-func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float) -> Variant:
+func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float, s: Slime) -> Variant:
 	var m := p.mesh
 	var he := _half_of(p)
 	var dx := m.position.x - sp.x
@@ -486,7 +497,7 @@ func _solid_surface_point(p: PropData, sp: Vector3, S: float, reach: float) -> V
 	var d := maxf(Vector2(dx, dz).length(), 1e-4)
 	if d - Vector2(he.x, he.z).length() > reach:
 		return null
-	var slime_effective_top := sp.y + S * (1.0 - (player_slime.liquid_amt * 0.75 if player_slime else 0.0))
+	var slime_effective_top := floor_y + (sp.y + S - floor_y) * lerpf(1.0, s.liquid_height_ratio, s.liquid_amt)
 	if maxf(m.position.y - he.y, floor_y) > minf(m.position.y + he.y, slime_effective_top):
 		return null
 
@@ -638,13 +649,31 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 	# Sort deepest penetration first
 	contacts.sort_custom(func(a: ContactInfo, b: ContactInfo) -> bool: return a.pen > b.pen)
 
-	# Simultaneous iterative resolution (Gauss-Seidel 4 passes)
+	# Simultaneous iterative resolution (4 passes)
 	for _pass in 4:
-		for c in contacts:
-			var pen := _calc_prop_penetration(s, c.prop, c.c_r)
-			if pen > 0.001:
-				s.position.x += c.normal.x * pen * 0.8
-				s.position.z += c.normal.z * pen * 0.8
+		if contacts.size() >= 2 and contacts[0].normal.dot(contacts[1].normal) < -0.2:
+			var c0 := contacts[0]
+			var c1 := contacts[1]
+			var pen0 := _calc_prop_penetration(s, c0.prop, c0.c_r)
+			var pen1 := _calc_prop_penetration(s, c1.prop, c1.c_r)
+			# Symmetrically center the slime directly between the opposing walls
+			var net_push := (c0.normal * pen0 + c1.normal * pen1) * 0.5
+			if net_push.length_squared() > 1e-6:
+				s.position.x += net_push.x
+				s.position.z += net_push.z
+			# Resolve any remaining non-opposing contacts (e.g. end wall)
+			for idx in range(2, contacts.size()):
+				var c := contacts[idx]
+				var pen := _calc_prop_penetration(s, c.prop, c.c_r)
+				if pen > 0.001:
+					s.position.x += c.normal.x * pen * 0.8
+					s.position.z += c.normal.z * pen * 0.8
+		else:
+			for c in contacts:
+				var pen := _calc_prop_penetration(s, c.prop, c.c_r)
+				if pen > 0.001:
+					s.position.x += c.normal.x * pen * 0.8
+					s.position.z += c.normal.z * pen * 0.8
 
 	# Primary contact for splat & stick
 	var c0 := contacts[0]
@@ -657,7 +686,36 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 	s.contact_r = c0.c_r / S
 	s.touch_time = s.time
 
-	# Handle velocity: fluid corner flow-around vs wall stick
+	# Multi-contact channel / narrow passage flow
+	if contacts.size() >= 2:
+		var c1 := contacts[1]
+		var dot_n := c0.normal.dot(c1.normal)
+		if dot_n < -0.2:
+			# Opposing walls in a channel or narrow gap:
+			# The corridor tangent is perpendicular to the cross-wall axis
+			var n_across := (c0.normal - c1.normal).normalized()
+			var corridor_dir := Vector3(-n_across.z, 0.0, n_across.x)
+			var input_dir := s.velocity
+			if input_dir.length_squared() < 0.01 and s.sq_dir.length_squared() > 0.01:
+				input_dir = Vector3(-s.sq_dir.z, 0.0, s.sq_dir.x)
+			if corridor_dir.dot(input_dir) < 0.0:
+				corridor_dir = -corridor_dir
+			var v_corridor := maxf(0.0, s.velocity.dot(corridor_dir))
+			# 100% preserve forward corridor speed, zero lateral velocity into either wall
+			s.velocity = corridor_dir * v_corridor
+			return
+		elif dot_n < 0.85:
+			# Concave corner / wedge: clip velocity along the crease
+			var sum_n := c0.normal + c1.normal
+			if sum_n.length_squared() > 0.01:
+				var crease := sum_n.cross(Vector3.UP).normalized()
+				if crease.dot(s.velocity) < 0.0:
+					crease = -crease
+				var v_along_crease := maxf(0.0, s.velocity.dot(crease))
+				s.velocity = crease * v_along_crease
+				return
+
+	# Single contact handling: fluid sliding with low friction
 	var nx := c0.normal.x
 	var nz := c0.normal.z
 	var v := s.velocity
@@ -665,30 +723,25 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 
 	if vdot < 0.0:
 		var vin := -vdot
+		# Project velocity onto surface tangent: cancel normal penetration velocity
 		v.x -= nx * vdot
 		v.z -= nz * vdot
 
-		# Tangent along surface
-		var tx := -nz
-		var tz := nx
-		var vt := v.x * tx + v.z * tz
-
-		# Corner flow-around: when hitting a sharp corner, transfer part of inward velocity around it!
-		if c0.sharp > 0.2:
-			var flow_dir := 1.0 if vt >= 0.0 else -1.0
-			var flow_boost := vin * 0.45 * c0.sharp
-			v.x += tx * flow_dir * flow_boost
-			v.z += tz * flow_dir * flow_boost
+		var vt_len := Vector2(v.x, v.z).length()
+		if vt_len > 1e-4:
+			var tangent := Vector3(v.x / vt_len, 0.0, v.z / vt_len)
+			if s.squeeze_k < 0.90 or c0.sharp > 0.15:
+				# Near openings or around corners: zero friction, slight fluid flow deflection around corner
+				var flow_boost := vin * (0.35 if s.squeeze_k < 0.90 else (0.25 * c0.sharp))
+				s.velocity = tangent * (vt_len + flow_boost)
+			else:
+				# Flat wall impact with viscous drag clinging
+				var squeeze_slip := s.squeeze_k * s.squeeze_k
+				var fr := (1.0 - exp(-6.0 * dt)) * squeeze_slip
+				s.velocity = tangent * maxf(0.0, vt_len * (1.0 - fr))
 		else:
-			# Flat wall: viscous drag clinging (slips smoothly when squeezing through narrow places!)
-			var squeeze_slip := (s.squeeze_k * s.squeeze_k) if contacts.size() < 2 else 0.05
-			var fr := (1.0 - exp(-6.0 * dt)) * squeeze_slip
-			v.x -= tx * vt * fr
-			v.z -= tz * vt * fr
+			s.velocity = Vector3.ZERO
 
-		s.velocity = v
-
-		# Impact impulse splat trigger (only for direct wall crashes, not during narrow gap squeeze)
 		if vin > 0.6 and s.squeeze_k > 0.8 and s.time - c0.prop.hit_cd > 0.3:
 			c0.prop.hit_cd = s.time
 			var sev := minf(1.0, pow(vin / 8.5, 0.9))
@@ -697,27 +750,6 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 				Vector3(-nx, -0.15, -nz).normalized() * 1.6,
 				Vector3(nx * 1.6 * sev, 0.18 * sev, nz * 1.6 * sev)
 			)
-
-	# Multi-contact resolution for narrow passages and corners
-	if contacts.size() >= 2:
-		var c1 := contacts[1]
-		var dot_n := c0.normal.dot(c1.normal)
-		if dot_n < -0.2:
-			# Opposing walls in a channel or narrow gap:
-			# Cancel velocity components pushing INTO either wall, leaving corridor velocity completely free!
-			var vn0 := s.velocity.dot(c0.normal)
-			if vn0 < 0.0:
-				s.velocity -= c0.normal * vn0
-			var vn1 := s.velocity.dot(c1.normal)
-			if vn1 < 0.0:
-				s.velocity -= c1.normal * vn1
-		elif dot_n < 0.85:
-			# Concave corner / wedge: clip velocity along the crease
-			var sum_n := c0.normal + c1.normal
-			if sum_n.length_squared() > 0.01:
-				var crease := sum_n.cross(Vector3.UP).normalized()
-				var v_along_crease := s.velocity.dot(crease)
-				s.velocity = crease * v_along_crease
 
 
 func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
@@ -843,7 +875,6 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 	ci.c_r = c_r
 	ci.sharp = sharp
 	return ci
-
 
 func _calc_prop_penetration(s: Slime, p: PropData, c_r: float) -> float:
 	var sp := s.position

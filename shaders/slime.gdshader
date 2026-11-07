@@ -276,26 +276,26 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 
 	if (uSqueeze > 0.001) {
 		// Squeezing through a gap: compress along gap axis, stretch along passage
-		float sq = clamp(uSqueeze, 0.0, 0.80);
+		float sq = clamp(uSqueeze, 0.0, 0.94);
 		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
 		float sqa = dot(p.xz, sqd);
 		vec2 sqp = p.xz - sqd * sqa;
-		float widthScale = max(0.20, 1.0 - sq);
-		float lengthScale = 1.0 + sq * 0.65;
-		float heightScale = 1.0 + sq * 0.35 * (1.0 - uLiquid);
+		float widthScale = max(0.06, 1.0 - sq);
+		float lengthScale = 1.0 + sq * 0.85;
+		float heightScale = 1.0 + sq * 0.40 * (1.0 - uLiquid);
 		p.xz = sqd * sqa * widthScale + sqp * lengthScale;
 		p.y = groundFloor + (p.y - groundFloor) * heightScale;
 	}
 
 	if (uLiquid > 0.001) {
-		// Liquid puddle flattening: height squashes to 22%, radius expands to 1.75x
+		// Liquid puddle flattening: height squashes to 22%, radius expands along passage
 		float liqH = mix(1.0, 0.22, uLiquid);
 		float liqR = mix(1.0, 1.75, uLiquid);
 		if (uSqueeze > 0.001) {
 			vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
 			float sqa = dot(p.xz, sqd);
 			vec2 sqp = p.xz - sqd * sqa;
-			p.xz = sqd * sqa + sqp * liqR;
+			p.xz = sqd * sqa + sqp * mix(1.0, liqR, uLiquid);
 		} else {
 			p.xz *= liqR;
 		}
