@@ -1,8 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="PackedScene" path="res://assets/models/house.glb" id="1_model"]
-
-[node name="HouseVisual" type="Node3D"]
-
-[node name="Model" parent="." instance=ExtResource("1_model")]
-transform = Transform3D(0.7692, 0, 0, 0, 0.7692, 0, 0, 0, 0.7692, 0, -0.3206, 0)

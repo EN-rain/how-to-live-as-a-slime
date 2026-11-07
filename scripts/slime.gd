@@ -1,318 +1,756 @@
 class_name Slime
-extends CharacterBody3D
+extends Node3D
+## The jelly slime entity: handles player control, follower breadcrumb AI, or autonomous roamer AI,
+## fluid deformation, liquid mode (Z), climb/engulf, splitting (E, Q), and merging (M).
 
-## The player. Movement, squash & stretch, growth, and the eating trigger.
-##
-## Growth curve: size = base_size * (nutrition / start_nutrition) ^ growth_exponent,
-## so early bites are visibly chunky and late tiers need the bigger meals. Speed
-## and jump scale with size so a bigger slime still crosses the map at a similar pace.
+signal poked(local_point: Vector3, impulse: Vector3)
 
-signal ate(nutrition: float, meal_color: Color, world_position: Vector3)
-signal size_changed(new_size: float)
-signal hurt
+enum Role {
+	PLAYER,
+	FOLLOWER,
+	ROAMER
+}
 
-const GROUND_ACCEL := 30.0
-const AIR_ACCEL := 12.0
-const TURN_SPEED := 12.0
-const COLOR_SHIFT_RATE := 0.06
-const HURT_FLASH_STRENGTH := 0.75
-
-@export_group("Movement")
-@export var base_speed: float = 5.2
-@export var base_jump: float = 7.0
-@export var gravity: float = 24.0
-## Speed and jump scale with size so a big slime still moves at a usable pace.
-@export_range(0.0, 1.5, 0.05) var speed_scale_exponent: float = 0.55
-@export_range(0.0, 1.5, 0.05) var jump_scale_exponent: float = 0.5
-
-@export_group("Growth")
-@export var start_nutrition: float = 27.0
-@export_range(0.1, 1.0, 0.05) var growth_exponent: float = 0.4
-@export var base_size: float = 0.8
-@export var min_size: float = 0.55
-@export var max_size: float = 4.0
-@export var growth_duration: float = 0.35
-## Damage can shrink you, but never below this nutrition.
-@export var min_nutrition: float = 6.0
-
-@export_group("Feel")
-@export var jump_stretch: float = 1.18
-@export var land_squash: float = 0.78
-@export var squash_recover: float = 10.0
-
-@export_group("Look")
-@export var body_color: Color = Color(0.45, 0.92, 0.7)
-## Size at which the pupils go pale (plan §7) and the HUD reads "Large".
-@export var top_tier_size: float = 2.6
-@export var pupil_color: Color = Color(0.05, 0.04, 0.08)
-@export var blank_eye_color: Color = Color(0.87, 0.9, 0.87)
-@export_range(0.0, 0.2, 0.005) var wobble_idle: float = 0.04
-@export_range(0.0, 0.2, 0.005) var wobble_move: float = 0.05
-@export var flash_decay: float = 3.0
+@export var role: Role = Role.PLAYER
 
 @export_group("Nodes")
-@export var body_mesh: MeshInstance3D
-@export var left_pupil: MeshInstance3D
-@export var right_pupil: MeshInstance3D
-@export var eat_area: Area3D
+@export var body: MeshInstance3D
+@export var camera: Camera3D
+@export var floor_mesh: MeshInstance3D
+@export var props: SlimeProps
 
-var nutrition := 0.0
-var size := 0.0
-var eaten_count := 0
+@export_group("Movement")
+@export var walk_speed := 3.0
+@export var run_speed := 10.0
+@export var liquid_speed := 2.2
+@export var velocity_response := 8.0
+@export var arena_radius := 190.0
 
-var _mesh: MeshInstance3D
-var _material: ShaderMaterial
-var _eat_area: Area3D
-var _base_color := Color(0.55, 0.9, 0.65)
-var _target_size := 0.8
-var _size_tween: Tween
-var _visual_scale := Vector3.ONE
-var _was_on_floor := true
-var _flash := 0.0
-var _pupil_mat: StandardMaterial3D
-var _sweep_queued := false
+@export_group("Size")
+@export var start_scale := 1.0
+@export var scale_response := 3.5
+@export var floor_y := -1.2
+@export var height_per_scale := 1.2
+@export var body_radius := 1.6
+
+@export_group("Crawl and lean")
+@export var crawl_rate := 2.6
+@export var speed_for_full_crawl := 3.0
+@export var lean_gain := 0.35
+@export var lean_stiffness := 60.0
+@export var lean_damping := 7.0
+@export var ripple_base := 0.12
+@export var ripple_per_speed := 0.45
+
+@export_group("Poke")
+@export var poke_strength := 0.55
+@export var poke_downward := 0.25
+
+@export_group("Eyes")
+@export var facing_response := 8.0
+@export var moving_threshold := 0.3
+@export var blink_period := 4.0
+@export var blink_start := 3.85
+@export var blink_closed_amount := 0.12
+@export var start_facing := 0.45
+
+@export_group("Liquid and Engulf")
+@export var liquid_height_ratio := 0.25
+@export var liquid_spread_ratio := 1.85
+@export var liquid_clearance_ratio := 0.12
+@export var devour_duration := 1.6
+
+@export_group("Follower & Roamer AI")
+@export var target_leader: Slime = null
+@export var follow_distance := 3.2
+
+var velocity := Vector3.ZERO
+var slime_scale := 1.0
+var target_scale := 1.0
+var speed01 := 0.0
+
+# Vertical motion & ground support
+var support_y := -1.2
+var vertical_vel := 0.0
+var is_on_ground := true
+var ground_prop = null
+
+# Liquid mode (Z key)
+var liquid_mode := false
+var liquid_amt := 0.0
+
+# Engulfing (Z on top of larger object)
+var engulf_target = null
+var engulf_progress := 0.0
+
+# ---- Fission (budding split) animation state ----
+var is_fissioning := false
+var fission_timer := 0.0
+var fission_duration := 0.38
+var fission_fwd := Vector3.FORWARD
+var fission_clone_role: Role = Role.FOLLOWER
+var fission_start_scale := 1.0
+var fission_target_scale := 0.794
+
+# CLONE budding state
+var is_budding := false
+var bud_timer := 0.0
+var bud_duration := 0.38
+var bud_parent: Slime = null
+var bud_target_scale := 1.0
+var bud_fwd := Vector3.FORWARD
+
+# Merge animation state
+var is_merging := false
+var merge_target: Slime = null
+var merge_timer := 0.0
+var merge_duration := 0.45
+var merge_source_scale := 1.0
+var _has_merged := false
+
+# Physics & deformation state (per-slime)
+var calm := 0.0
+var touch_time := -10.0
+var cur_max := 3.0
+var squeeze_k := 1.0
+var sq_dir := Vector3(1, 0, 0)
+var splat_x := 0.0
+var splat_v := 0.0
+var spread_x := 0.0
+var spread_v := 0.0
+var sharp_amt := 0.0
+var contact_r := 2.15
+var impact_dir := Vector3(0, 0, 1)
+var press_amt := 0.0
+var press_dir := Vector3(0, 0, 1)
+
+# Breadcrumb history for followers to trace
+var breadcrumbs: Array[Dictionary] = []
+var _breadcrumb_timer := 0.0
+
+# Internal props being digested
+var inside_props: Array = []
+
+# AI internal state
+var _ai_target_pos := Vector3.ZERO
+var _ai_roam_timer := 0.0
+var _ai_target_prop = null
+var _ai_stuck_timer := 0.0
+var _ai_last_pos := Vector3.ZERO
+
+var _mat: ShaderMaterial
+var _floor_mat: ShaderMaterial
+var _time := 0.0
+var _impulse_time := 10.0
+var _impulse2_time := 10.0
+var _crawl_dir := Vector3(0, 0, 1)
+var _crawl_phase := 0.0
+var _facing_yaw := 0.0
+var _lean := Vector3.ZERO
+var _lean_vel := Vector3.ZERO
+
+var time: float:
+	get:
+		return _time
 
 
 func _ready() -> void:
-	add_to_group("player")
-	nutrition = start_nutrition
-	size = base_size
-	_target_size = base_size
-	_base_color = body_color
-	scale = Vector3.ONE * size
+	slime_scale = start_scale
+	target_scale = start_scale
+	_facing_yaw = start_facing
+	support_y = floor_y
 
-	_mesh = body_mesh if body_mesh != null else ($Body as MeshInstance3D)
-	if left_pupil == null:
-		left_pupil = get_node_or_null("Body/LeftEye/Pupil") as MeshInstance3D
-	if right_pupil == null:
-		right_pupil = get_node_or_null("Body/RightEye/Pupil") as MeshInstance3D
-	_eat_area = eat_area if eat_area != null else ($EatArea as Area3D)
+	# Duplicate material override so each clone has independent shader uniforms
+	if body and body.material_override:
+		_mat = body.material_override.duplicate() as ShaderMaterial
+		body.material_override = _mat
+		_mat.set_shader_parameter("uMelt", 0.28)
+		_reset_array_uniforms()
 
-	# Plan §8: an icosphere wobbles evenly; a UV sphere pinches at the poles.
-	_mesh.mesh = Icosphere.build(0.5, 3)
-	_setup_materials()
-	_update_eyes()
-	_eat_area.area_entered.connect(_on_area_entered)
-	_eat_area.body_entered.connect(_on_body_entered)
-	size_changed.emit(size)
+	if floor_mesh and role == Role.PLAYER:
+		_floor_mat = floor_mesh.material_override as ShaderMaterial
 
+	if props == null:
+		props = get_node_or_null("../Ecosystem") as SlimeProps
+	if props:
+		props.register_slime(self)
 
-func _setup_materials() -> void:
-	var existing_mat := _mesh.material_override as ShaderMaterial
-	if existing_mat != null:
-		_material = existing_mat.duplicate() as ShaderMaterial
-		if _material.next_pass != null:
-			_material.next_pass = _material.next_pass.duplicate()
-	else:
-		_material = ShaderMaterial.new()
-		_material.shader = preload("res://shaders/slime.gdshader")
-		var outline := ShaderMaterial.new()
-		outline.shader = preload("res://shaders/slime_outline.gdshader")
-		outline.set_shader_parameter("outline_width", 0.03)
-		_material.next_pass = outline
-	_material.set_shader_parameter("base_color", _base_color)
-	_material.set_shader_parameter("wobble_amplitude", wobble_idle)
-	_mesh.material_override = _material
-
-	_pupil_mat = ToonMaterial.flat(pupil_color)
-	if left_pupil != null:
-		left_pupil.material_override = _pupil_mat
-	if right_pupil != null:
-		right_pupil.material_override = _pupil_mat
+	_apply_transform()
 
 
-## Plan §7: the eyes go blank at the top tier.
-func _update_eyes() -> void:
-	if _pupil_mat == null:
+func _exit_tree() -> void:
+	if props:
+		props.unregister_slime(self)
+
+
+func _reset_array_uniforms() -> void:
+	if _mat == null:
 		return
-	_pupil_mat.albedo_color = (
-		pupil_color if size < top_tier_size else blank_eye_color
-	)
+	var zeros6 := PackedVector3Array()
+	var small6 := PackedVector3Array()
+	for i in 6:
+		zeros6.append(Vector3.ZERO)
+		small6.append(Vector3(0.01, 0.01, 0.01))
+	var zeros2 := PackedVector3Array([Vector3.ZERO, Vector3.ZERO])
+	var small2 := PackedVector3Array([Vector3(0.01, 0.01, 0.01), Vector3(0.01, 0.01, 0.01)])
+	_mat.set_shader_parameter("uEatPos", zeros6)
+	_mat.set_shader_parameter("uEatParam", zeros6)
+	_mat.set_shader_parameter("uBoxHalf", small6)
+	_mat.set_shader_parameter("uSolidPos", zeros2)
+	_mat.set_shader_parameter("uSolidParam", zeros2)
+	_mat.set_shader_parameter("uSolidHalf", small2)
+	_mat.set_shader_parameter("uSolidDir", zeros2)
+	_mat.set_shader_parameter("uDrapeAmt", 0.0)
+	_mat.set_shader_parameter("uSplitAmt", 0.0)
+	_mat.set_shader_parameter("uBudAmt", 0.0)
+	_mat.set_shader_parameter("uBudScale", 0.0)
 
 
-func _physics_process(delta: float) -> void:
-	var horizontal := Input.get_axis("move_left", "move_right")
-	var forward := Input.get_axis("move_back", "move_forward")
-	var dir := _camera_relative(horizontal, forward)
-	if dir.length_squared() > 1.0:
-		dir = dir.normalized()
-
-	var speed := _current_speed()
-	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
-	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
-	velocity.z = move_toward(velocity.z, dir.z * speed, accel * delta)
-
-	if not is_on_floor():
-		velocity.y -= gravity * delta
-	if is_on_floor() and Input.is_action_just_pressed("jump"):
-		velocity.y = _current_jump()
-		_squash(jump_stretch)
-
-	move_and_slide()
-
-	if is_on_floor() and not _was_on_floor:
-		_squash(land_squash)
-	_was_on_floor = is_on_floor()
-
-	if dir.length_squared() > 0.01:
-		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), TURN_SPEED * delta)
-
-	# Wobble harder while moving, and spring the squash back to rest.
-	var move_ratio := clampf(Vector2(velocity.x, velocity.z).length() / maxf(speed, 0.01), 0.0, 1.0)
-	_material.set_shader_parameter("wobble_amplitude", wobble_idle + move_ratio * wobble_move)
-	_visual_scale = _visual_scale.lerp(Vector3.ONE, clampf(squash_recover * delta, 0.0, 1.0))
-	_mesh.scale = _visual_scale
+func _unhandled_input(event: InputEvent) -> void:
+	if role != Role.PLAYER:
+		return
+	if event.is_action_pressed("slime_poke") and camera:
+		_try_poke((event as InputEventMouseButton).position)
+	elif event.is_action_pressed("split_follow"):
+		split_clone(Role.FOLLOWER)
+	elif event.is_action_pressed("split_roam"):
+		split_clone(Role.ROAMER)
+	elif event.is_action_pressed("merge_clones"):
+		merge_nearby_clones()
 
 
-## WASD is camera-relative, so "forward" always means away from the camera
-## even after the third-person camera orbits around the slime.
-func _camera_relative(horizontal: float, forward: float) -> Vector3:
-	var cam := get_viewport().get_camera_3d()
-	if cam == null:
-		return Vector3(horizontal, 0.0, -forward).limit_length(1.0)
-	var cam_forward := -cam.global_basis.z
-	cam_forward.y = 0.0
-	cam_forward = cam_forward.normalized()
-	var cam_right := cam.global_basis.x
-	cam_right.y = 0.0
-	cam_right = cam_right.normalized()
-	return (cam_right * horizontal + cam_forward * forward).limit_length(1.0)
+func _try_poke(screen_pos: Vector2) -> void:
+	if camera == null:
+		return
+	var origin := camera.project_ray_origin(screen_pos)
+	var dir := camera.project_ray_normal(screen_pos)
+	var radius := body_radius * slime_scale
+	var oc := origin - global_position
+	var b := oc.dot(dir)
+	var c := oc.dot(oc) - radius * radius
+	var disc := b * b - c
+	if disc < 0.0:
+		return
+	var s := sqrt(disc)
+	var t := -b - s
+	if t < 0.0:
+		t = -b + s
+	if t < 0.0:
+		return
+	var hit := origin + dir * t
+	var local_point := (hit - global_position).normalized() * body_radius
+	var push := (hit - camera.global_position).normalized() * poke_strength
+	push.y -= poke_downward
+	trigger_poke(local_point, push)
+
+
+func trigger_poke(local_point: Vector3, impulse: Vector3) -> void:
+	_impulse_time = 0.001
+	if _mat:
+		_mat.set_shader_parameter("uImpulsePos", local_point)
+		_mat.set_shader_parameter("uImpulseVector", impulse)
+	poked.emit(local_point, impulse)
+
+
+func trigger_poke2(local_point: Vector3, impulse: Vector3) -> void:
+	_impulse2_time = 0.001
+	if _mat:
+		_mat.set_shader_parameter("uImpulse2Pos", local_point)
+		_mat.set_shader_parameter("uImpulse2Vector", impulse)
 
 
 func _process(delta: float) -> void:
-	if _flash > 0.0:
-		_flash = maxf(_flash - delta * flash_decay, 0.0)
-		_material.set_shader_parameter("flash", _flash)
+	var dt := minf(delta, 0.05)
+	_time += dt
+	_impulse_time += dt
+	_impulse2_time += dt
 
-
-## Keep volume roughly constant: stretch Y, pinch XZ, and vice versa.
-func _squash(vertical: float) -> void:
-	var pinch := 1.0 / sqrt(vertical)
-	_visual_scale = Vector3(pinch, vertical, pinch)
-
-
-func _current_speed() -> float:
-	return base_speed * pow(size, speed_scale_exponent)
-
-
-func _current_jump() -> float:
-	return base_jump * pow(size, jump_scale_exponent)
-
-
-func add_nutrition(amount: float) -> void:
-	nutrition = maxf(nutrition + amount, min_nutrition)
-	_refresh_size()
-
-
-func take_damage(amount: float) -> void:
-	nutrition = maxf(nutrition - amount, min_nutrition)
-	_refresh_size()
-	_flash = HURT_FLASH_STRENGTH
-	hurt.emit()
-
-
-func get_base_color() -> Color:
-	return _base_color
-
-
-func apply_save_state(saved_nutrition: float, saved_eaten: int, saved_color: Color, saved_pos: Vector3) -> void:
-	nutrition = maxf(saved_nutrition, min_nutrition)
-	eaten_count = maxi(saved_eaten, 0)
-	_base_color = saved_color
-	if _material != null:
-		_material.set_shader_parameter("base_color", _base_color)
-	global_position = saved_pos
-	velocity = Vector3.ZERO
-	_target_size = clampf(
-		base_size * pow(nutrition / start_nutrition, growth_exponent),
-		min_size,
-		max_size
-	)
-	size = _target_size
-	if _size_tween and _size_tween.is_valid():
-		_size_tween.kill()
-	scale = Vector3.ONE * size
-	_update_eyes()
-	size_changed.emit(size)
-	_queue_eat_sweep()
-
-
-func _refresh_size() -> void:
-	var next_size := clampf(
-		base_size * pow(nutrition / start_nutrition, growth_exponent),
-		min_size,
-		max_size
-	)
-	if is_equal_approx(next_size, _target_size):
+	# --- Merge animation (M key) ---
+	if is_merging:
+		merge_timer += dt
+		if merge_target and is_instance_valid(merge_target):
+			position = position.lerp(merge_target.position, 14.0 * dt)
+			slime_scale = lerpf(slime_scale, 0.02, 12.0 * dt)
+			_apply_transform()
+			if merge_timer >= merge_duration or position.distance_squared_to(merge_target.position) < 0.2:
+				if not _has_merged:
+					_has_merged = true
+					merge_target.target_scale = pow(pow(merge_target.target_scale, 3.0) + pow(merge_source_scale, 3.0), 1.0 / 3.0)
+					merge_target.trigger_poke(Vector3(0, 0.3, 0), Vector3(0, -0.65, 0))
+					merge_target.trigger_poke2(Vector3(0, -0.3, 0), Vector3(0, 0.5, 0))
+					if props:
+						props.unregister_slime(self)
+					queue_free()
+		else:
+			queue_free()
 		return
-	_target_size = next_size
-	_apply_size()
+
+	# ---- PARENT fission: budding separation ----
+	if is_fissioning:
+		fission_timer += dt
+		var k: float = clampf(fission_timer / fission_duration, 0.0, 1.0)
+		var e := sin(k * PI * 0.5)
+
+		slime_scale = lerpf(fission_start_scale, fission_target_scale, e)
+		target_scale = fission_target_scale
+		_apply_transform()
+
+		var stretch_amt := sin(k * PI) * 0.75
+		if _mat:
+			_mat.set_shader_parameter("uSplitAmt", stretch_amt)
+			_mat.set_shader_parameter("uSplitDir", fission_fwd)
+
+		if k >= 1.0:
+			is_fissioning = false
+			if _mat:
+				_mat.set_shader_parameter("uSplitAmt", 0.0)
+
+	# ---- CLONE budding: emerging from parent ----
+	if is_budding:
+		bud_timer += dt
+		var k: float = clampf(bud_timer / bud_duration, 0.0, 1.0)
+		var e := sin(k * PI * 0.5)
+
+		slime_scale = lerpf(bud_target_scale * 0.25, bud_target_scale, e)
+		target_scale = bud_target_scale
+		_apply_transform()
+
+		if bud_parent and is_instance_valid(bud_parent):
+			var sep_dist := (bud_parent.body_radius * bud_parent.slime_scale + body_radius * slime_scale) * 1.15
+			position = bud_parent.position + bud_fwd * (sep_dist * e)
+			position.y = bud_parent.position.y
+
+		var stretch_amt := sin(k * PI) * 0.75
+		if _mat:
+			_mat.set_shader_parameter("uSplitAmt", stretch_amt)
+			_mat.set_shader_parameter("uSplitDir", -bud_fwd)
+
+		if k >= 1.0:
+			is_budding = false
+			bud_parent = null
+			if _mat:
+				_mat.set_shader_parameter("uSplitAmt", 0.0)
+
+	# --- Handle role-based input or AI driving ---
+	var desired := Vector3.ZERO
+	# Lock movement during clone snap animation; parent anchors/slows during viscous fission
+	if not is_budding:
+		match role:
+			Role.PLAYER:
+				desired = _process_player_input(dt)
+				if is_fissioning:
+					desired *= 0.35
+			Role.FOLLOWER:
+				desired = _process_follower_ai(dt)
+			Role.ROAMER:
+				desired = _process_roamer_ai(dt)
+
+	# --- Liquid transition ---
+	var target_liquid := 1.0 if liquid_mode else 0.0
+	liquid_amt += (target_liquid - liquid_amt) * (1.0 - exp(-12.0 * dt))
+	if _mat:
+		_mat.set_shader_parameter("uLiquid", liquid_amt)
+
+	# --- Horizontal velocity update ---
+	var v_resp := velocity_response * (0.6 if liquid_amt > 0.5 else 1.0)
+	velocity = velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
+	position.x += velocity.x * dt
+	position.z += velocity.z * dt
+
+	# Clamp to arena boundary
+	var flat := Vector2(position.x, position.z).length()
+	if flat > arena_radius:
+		position.x *= arena_radius / flat
+		position.z *= arena_radius / flat
+
+	# --- Vertical motion & climbing on props ---
+	_process_vertical(dt)
+
+	# --- Scale smoothing ---
+	slime_scale += (target_scale - slime_scale) * (1.0 - exp(-scale_response * dt))
+	_apply_transform()
+
+	# --- Record breadcrumbs for followers ---
+	if role == Role.PLAYER:
+		_breadcrumb_timer += dt
+		if _breadcrumb_timer >= 0.1:
+			_breadcrumb_timer = 0.0
+			breadcrumbs.append({"pos": position, "liquid": liquid_mode, "time": _time})
+			if breadcrumbs.size() > 120:
+				breadcrumbs.pop_front()
+
+	# --- Crawl / lean springs ---
+	var speed := velocity.length()
+	speed01 = minf(speed / speed_for_full_crawl, 1.0)
+	if speed > 0.05:
+		_crawl_dir = Vector3(velocity.x, 0.0, velocity.z).normalized()
+	_crawl_phase += speed * dt * crawl_rate
+
+	var lean_target := Vector3(velocity.x * lean_gain * (1.0 - calm), 0.0, velocity.z * lean_gain * (1.0 - calm)) - _lean
+	_lean_vel += lean_target * lean_stiffness * dt
+	_lean_vel += _lean_vel * (-lean_damping * dt)
+	_lean += _lean_vel * dt
+	if _time - touch_time < 0.2:
+		_lean_vel = Vector3.ZERO
+		_lean *= exp(-14.0 * dt)
+
+	# --- Eyes orientation & blink ---
+	if speed > moving_threshold:
+		var diff := atan2(_crawl_dir.x, _crawl_dir.z) - _facing_yaw
+		diff = atan2(sin(diff), cos(diff))
+		_facing_yaw += diff * (1.0 - exp(-facing_response * dt))
+	var blink := blink_closed_amount if fmod(_time, blink_period) > blink_start else 1.0
+
+	# --- Per-frame shader uniforms ---
+	if _mat:
+		_mat.set_shader_parameter("uImpulseTime", _impulse_time)
+		_mat.set_shader_parameter("uImpulse2Time", _impulse2_time)
+		_mat.set_shader_parameter("uMoveDir", _crawl_dir)
+		_mat.set_shader_parameter("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
+		_mat.set_shader_parameter("uCrawl", _crawl_phase)
+		_mat.set_shader_parameter("uLean", _lean)
+		_mat.set_shader_parameter("uRippleIntensity", ripple_base + ripple_per_speed * speed01 + liquid_amt * 0.15)
+		_mat.set_shader_parameter("uFacing", _facing_yaw)
+		_mat.set_shader_parameter("uBlink", blink)
+
+	# --- Engulfing update ---
+	_process_engulf(dt)
 
 
-func _apply_size() -> void:
-	size = _target_size
-	_update_eyes()
-	if _size_tween and _size_tween.is_valid():
-		_size_tween.kill()
-	_size_tween = create_tween()
-	_size_tween.tween_property(self, "scale", Vector3.ONE * size, growth_duration) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	size_changed.emit(size)
-	_queue_eat_sweep()
+func _process_player_input(dt: float) -> Vector3:
+	liquid_mode = Input.is_action_pressed("slime_liquid")
+
+	var in_z := Input.get_axis("move_back", "move_forward")
+	var in_x := Input.get_axis("move_left", "move_right")
+
+	var fwd := Vector3(0, 0, -1)
+	if camera:
+		fwd = -camera.global_transform.basis.z
+		fwd.y = 0.0
+		fwd = fwd.normalized()
+	var right := fwd.cross(Vector3.UP)
+	var desired := fwd * in_z + right * in_x
+
+	if liquid_mode:
+		cur_max = liquid_speed
+	elif Input.is_action_pressed("run"):
+		cur_max = run_speed
+	else:
+		cur_max = walk_speed
+
+	if desired.length_squared() > 0.0:
+		desired = desired.normalized() * cur_max
+	return desired
 
 
-## `area_entered` fires once. If the slime grows past a prop it is already
-## standing on, nothing re-fires, so re-check overlaps after every size change.
-## Otherwise "grow to unlock new food" would not work while standing still.
-func _queue_eat_sweep() -> void:
-	if _sweep_queued or not is_inside_tree():
-		return
-	_sweep_queued = true
-	_sweep_eat_overlaps.call_deferred()
+func _process_follower_ai(dt: float) -> Vector3:
+	if target_leader == null:
+		if props and props.player_slime:
+			target_leader = props.player_slime
+	if target_leader == null or not is_instance_valid(target_leader):
+		return Vector3.ZERO
+
+	var target_pt := target_leader.position
+	liquid_mode = target_leader.liquid_mode
+
+	var trail := target_leader.breadcrumbs
+	if trail.size() > 0:
+		var desired_dist := (target_leader.slime_scale + slime_scale) * 1.5 + 0.6
+		var accum := 0.0
+		var prev := target_leader.position
+		for i in range(trail.size() - 1, -1, -1):
+			var b = trail[i]
+			accum += prev.distance_to(b["pos"])
+			prev = b["pos"]
+			if accum >= desired_dist:
+				target_pt = b["pos"]
+				liquid_mode = b["liquid"]
+				break
+
+	var to_target := target_pt - position
+	to_target.y = 0.0
+	var dist := to_target.length()
+
+	cur_max = liquid_speed if liquid_mode else walk_speed
+	if dist > 8.0:
+		cur_max = run_speed * 1.1
+
+	if dist > 0.8:
+		return to_target.normalized() * cur_max
+	return Vector3.ZERO
 
 
-func _sweep_eat_overlaps() -> void:
-	_sweep_queued = false
-	if _eat_area == null or not is_inside_tree():
-		return
-	for area in _eat_area.get_overlapping_areas():
-		if area.has_method("try_eat") and area.try_eat(size):
-			_eat(area)
+func _process_roamer_ai(dt: float) -> Vector3:
+	_ai_roam_timer += dt
+	_ai_stuck_timer += dt
+
+	if _ai_last_pos.distance_squared_to(position) > 0.2:
+		_ai_stuck_timer = 0.0
+		_ai_last_pos = position
+
+	if _ai_stuck_timer > 2.0:
+		liquid_mode = true
+		_ai_target_prop = null
+		if _ai_stuck_timer > 4.0:
+			var ang := randf() * TAU
+			_ai_target_pos = position + Vector3(cos(ang) * 15.0, 0, sin(ang) * 15.0)
+			_ai_stuck_timer = 0.0
+
+	if (_ai_target_prop == null or _ai_roam_timer > 1.8) and props != null:
+		_ai_roam_timer = 0.0
+		_ai_target_prop = _find_best_food_for_roamer()
+
+	var desired_heading := Vector3.ZERO
+	if _ai_target_prop != null and is_instance_valid(_ai_target_prop.mesh):
+		var target_loc: Vector3 = _ai_target_prop.mesh.position
+		var delta_pos := target_loc - position
+		delta_pos.y = 0.0
+		var dist := delta_pos.length()
+
+		var edible_lim := 1.8 * slime_scale * 0.75
+		if _ai_target_prop.radius < edible_lim:
+			desired_heading = delta_pos.normalized()
+			liquid_mode = (squeeze_k < 0.65)
+		else:
+			if is_on_ground and ground_prop == _ai_target_prop:
+				liquid_mode = true
+				return Vector3.ZERO
+			desired_heading = delta_pos.normalized()
+
+		if squeeze_k < 0.65:
+			liquid_mode = true
+	else:
+		if position.distance_squared_to(_ai_target_pos) < 4.0 or _ai_target_pos == Vector3.ZERO:
+			var ang := randf() * TAU
+			var dist := randf_range(15.0, 45.0)
+			_ai_target_pos = position + Vector3(cos(ang) * dist, 0, sin(ang) * dist)
+		var wander_dir := (_ai_target_pos - position)
+		wander_dir.y = 0.0
+		desired_heading = wander_dir.normalized()
+		liquid_mode = (squeeze_k < 0.7)
+
+	cur_max = liquid_speed if liquid_mode else walk_speed
+	return desired_heading * cur_max
+
+
+func _find_best_food_for_roamer():
+	if props == null:
+		return null
+	var edible_lim := 1.8 * slime_scale * 0.75
+	var best_p = null
+	var best_score := -99999.0
+
+	for p in props.props:
+		if p.state != 0:
+			continue
+		var dist := position.distance_to(p.mesh.position)
+		if dist > 85.0:
+			continue
+		var is_edible: bool = (p.radius < edible_lim)
+		var score := 0.0
+		if is_edible:
+			score = (p.radius * 25.0) - dist * 1.2
+		else:
+			score = (p.radius * 10.0) - dist * 2.5
+		if score > best_score:
+			best_score = score
+			best_p = p
+	return best_p
+
+
+func _process_vertical(dt: float) -> void:
+	# Node position stays firmly at support height; vertex shader flattens from the top down to the floor
+	var target_y := support_y + (height_per_scale * slime_scale)
+	if position.y > target_y + 0.02:
+		vertical_vel -= 22.0 * dt
+		position.y += vertical_vel * dt
+		if position.y < target_y:
+			position.y = target_y
+			vertical_vel = 0.0
+			is_on_ground = true
+	else:
+		position.y = lerpf(position.y, target_y, 1.0 - exp(-16.0 * dt))
+		vertical_vel = 0.0
+		is_on_ground = true
+	# In liquid mode the puddle still must stay at or above the floor — clamp it.
+	var liquid_floor := floor_y + height_per_scale * slime_scale * liquid_height_ratio * 0.5
+	if liquid_amt > 0.1 and position.y < liquid_floor:
+		position.y = liquid_floor
+
+
+func _process_engulf(dt: float) -> void:
+	# Liquid mode (Z key) engulfing:
+	# If on top of an object, or covering an object with the liquid body (except bottom),
+	# the slime drapes over and devours the object!
+	if (liquid_amt > 0.35 or liquid_mode) and props != null:
+		var target_p = null
+		var S := slime_scale
+		var puddle_radius := 1.8 * S * 1.85
+
+		# 1. If standing on top of a prop AND the puddle fully covers it horizontally
+		if ground_prop != null and ground_prop.state == 0:
+			var gm: MeshInstance3D = ground_prop.mesh
+			if gm != null:
+				var ghe: Vector3 = ground_prop.half * gm.scale.x
+				var gprop_r: float = maxf(ghe.x, ghe.z)
+				var gflat_d: float = Vector2(position.x - gm.position.x, position.z - gm.position.z).length()
+				# Only engulf if puddle fully encloses the prop footprint
+				if gflat_d + gprop_r <= puddle_radius * 1.05:
+					target_p = ground_prop
+		if target_p == null:
+			# 2. Check all props to see if the slime is covering or directly over one
+			var best_score := -INF
+			for p in props.props:
+				if p.state != 0:
+					continue
+				var m: MeshInstance3D = p.mesh
+				if m == null:
+					continue
+				var he: Vector3 = p.half * m.scale.x
+				var prop_r: float = maxf(he.x, he.z)
+				var prop_top: float = m.position.y + he.y
+				var prop_center_y: float = m.position.y
+
+				var flat_d: float = Vector2(position.x - m.position.x, position.z - m.position.z).length()
+
+				# Condition: Slime's liquid body FULLY covers the object (strict anti-siphon check!)
+				# flat_d + prop_r <= puddle_radius means the puddle wraps completely around the prop.
+				var covers_horiz := (flat_d + prop_r <= puddle_radius * 1.05)
+				# - Vertically: slime center is at or above prop center
+				var is_above_or_on := (position.y >= prop_center_y - 0.2) or (position.y + height_per_scale * S * liquid_height_ratio >= prop_top - 0.4)
+
+				if covers_horiz and is_above_or_on:
+					var score: float = 100.0 - flat_d
+					if score > best_score:
+						best_score = score
+						target_p = p
+
+		if target_p != null:
+			engulf_target = target_p
+			# Smooth, responsive 0.65s devour time
+			engulf_progress = minf(1.0, engulf_progress + dt / 0.65)
+
+			if _mat and target_p.mesh:
+				var m: MeshInstance3D = target_p.mesh
+				_mat.set_shader_parameter("uDrapePos", (m.position - position) / slime_scale)
+				_mat.set_shader_parameter("uDrapeHalf", target_p.half * m.scale.x / slime_scale)
+				_mat.set_shader_parameter("uDrapeShape", float(target_p.shape) + target_p.sides * 0.01)
+				_mat.set_shader_parameter("uDrapeYaw", m.rotation.y)
+				_mat.set_shader_parameter("uDrapeAmt", engulf_progress)
+
+			if engulf_progress >= 1.0:
+				_devour_prop(target_p)
+				engulf_progress = 0.0
+				engulf_target = null
+				if _mat:
+					_mat.set_shader_parameter("uDrapeAmt", 0.0)
 			return
-	for body in _eat_area.get_overlapping_bodies():
-		if body.has_method("try_eat") and body.try_eat(size):
-			_eat(body)
-			return
+
+	engulf_progress = maxf(0.0, engulf_progress - dt * 2.0)
+	if _mat and engulf_progress <= 0.001:
+		_mat.set_shader_parameter("uDrapeAmt", 0.0)
 
 
-func _on_area_entered(area: Area3D) -> void:
-	if area.has_method("try_eat") and area.try_eat(size):
-		_eat(area)
+func _devour_prop(p) -> void:
+	p.state = 1
+	p.eater = self
+	p.base_scale = p.mesh.scale # store exact scale: can never grow bigger when digesting!
+	p.t = 0.0
+	p.start = p.mesh.position
+	p.off = Vector3(randf() - 0.5, -0.1 + randf() * 0.3, randf() - 0.5)
+	p.total_mass = pow(p.radius, 3.0) * 0.3
+	p.absorbed_mass = 0.0
+	if props:
+		props.eaten += 1
+		props.eaten_changed.emit(props.eaten)
 
 
-func _on_body_entered(body: Node3D) -> void:
-	if body.has_method("try_eat") and body.try_eat(size):
-		_eat(body)
-
-
-func _eat(target: Node3D) -> void:
-	if not target.has_method("absorb"):
+func split_clone(clone_role: Role) -> void:
+	## Split into two independent volume-conserved slimes (each = 0.7937x parent scale).
+	if slime_scale < 0.45 or is_fissioning or is_budding:
 		return
-	var meal_nutrition := 0.0
-	var raw_nutrition = target.get("nutrition")
-	if raw_nutrition != null:
-		meal_nutrition = float(raw_nutrition)
-	var meal_color := _base_color
-	var raw_color = target.get("color")
-	if raw_color is Color:
-		meal_color = raw_color
 
-	target.absorb(self)
-	eaten_count += 1
-	add_nutrition(meal_nutrition)
+	var fwd := _crawl_dir.normalized()
+	if fwd.length_squared() < 0.01:
+		fwd = -camera.global_transform.basis.z if camera else Vector3(0, 0, -1)
+		fwd.y = 0.0
+		fwd = fwd.normalized()
 
-	# The slime takes on a hint of everything it eats.
-	_base_color = _base_color.lerp(meal_color, COLOR_SHIFT_RATE)
-	_material.set_shader_parameter("base_color", _base_color)
+	fission_fwd = -fwd
+	fission_clone_role = clone_role
+	fission_duration = 0.38
+	fission_start_scale = slime_scale
+	fission_target_scale = slime_scale * pow(0.5, 1.0 / 3.0)
+	is_fissioning = true
+	fission_timer = 0.0
 
-	ate.emit(meal_nutrition, meal_color, target.global_position)
+	_spawn_fission_clone()
+
+
+func _spawn_fission_clone() -> void:
+	var prefab := load("res://scenes/slime.tscn") as PackedScene
+	if prefab == null:
+		return
+	var clone := prefab.instantiate() as Slime
+
+	clone.role = fission_clone_role
+	clone.start_scale = fission_target_scale * 0.25
+	clone.target_scale = fission_target_scale
+	clone.slime_scale = clone.start_scale
+	clone.props = props
+	clone.floor_mesh = floor_mesh
+	clone.floor_y = floor_y
+	clone.support_y = support_y
+
+	clone.position = position + fission_fwd * (0.2 * body_radius * fission_target_scale)
+	clone.position.y = position.y
+	clone._facing_yaw = _facing_yaw
+
+	if fission_clone_role == Role.FOLLOWER:
+		clone.target_leader = self
+
+	clone.is_budding = true
+	clone.bud_parent = self
+	clone.bud_timer = 0.0
+	clone.bud_duration = fission_duration
+	clone.bud_target_scale = fission_target_scale
+	clone.bud_fwd = fission_fwd
+
+	get_parent().add_child(clone)
+	if props:
+		props.register_slime(clone)
+
+
+func merge_nearby_clones() -> void:
+	if props == null:
+		return
+	var merge_rad := (body_radius * slime_scale) * 3.4 + 2.0
+	var to_merge: Array[Slime] = []
+
+	for s in props.registered_slimes:
+		if s == self or not is_instance_valid(s) or s.is_merging:
+			continue
+		if position.distance_to(s.position) <= merge_rad + (s.body_radius * s.slime_scale):
+			to_merge.append(s)
+
+	if to_merge.is_empty():
+		return
+
+	for s in to_merge:
+		s.is_merging = true
+		s.merge_target = self
+		s.merge_timer = 0.0
+		s.merge_duration = 0.42
+		s.merge_source_scale = s.slime_scale
+		s.velocity = Vector3.ZERO
+
+	trigger_poke(Vector3(0, 0.3, 0), Vector3(0, -0.6, 0))
+
+
+func set_shader_param(param: StringName, value: Variant) -> void:
+	if _mat:
+		_mat.set_shader_parameter(param, value)
+
+
+func _apply_transform() -> void:
+	scale = Vector3.ONE * slime_scale

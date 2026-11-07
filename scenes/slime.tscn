@@ -1,106 +1,69 @@
-[gd_scene load_steps=13 format=3]
+[gd_scene format=3 uid="uid://drulaqw3tv8fk"]
 
-[ext_resource type="Script" path="res://scripts/slime.gd" id="1_slime"]
-[ext_resource type="Shader" path="res://shaders/slime.gdshader" id="2_slime_shader"]
-[ext_resource type="Shader" path="res://shaders/slime_outline.gdshader" id="3_outline_shader"]
+[ext_resource type="Shader" uid="uid://cdylotpifnx5w" path="res://shaders/slime.gdshader" id="1_shader"]
+[ext_resource type="Script" uid="uid://d0v3rofmqon45" path="res://scripts/slime.gd" id="2_script"]
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_outline"]
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_instance"]
 render_priority = 0
-shader = ExtResource("3_outline_shader")
-shader_parameter/outline_width = 0.03
-shader_parameter/outline_color = Color(0.09, 0.07, 0.12, 1)
-
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_slime"]
-render_priority = 0
-next_pass = SubResource("ShaderMaterial_outline")
-shader = ExtResource("2_slime_shader")
-shader_parameter/base_color = Color(0.45, 0.92, 0.7, 1)
-shader_parameter/alpha = 0.62
-shader_parameter/wobble_amplitude = 0.04
-shader_parameter/wobble_speed = 4.2
-shader_parameter/flash = 0.0
-shader_parameter/rim_color = Color(0.95, 1, 0.96, 1)
-shader_parameter/rim_strength = 0.32
-shader_parameter/flash_color = Color(1, 0.35, 0.4, 1)
+shader = ExtResource("1_shader")
+shader_parameter/uJiggleStrength = 1.0
+shader_parameter/uDispersion = 0.85
+shader_parameter/uRefractionStrength = 0.32
+shader_parameter/uRippleNoiseScale = 1.65
+shader_parameter/uBubbleNoiseScale = 3.5
+shader_parameter/uRimStrength = 1.15
+shader_parameter/uOpacity = 0.48
+shader_parameter/uNightMode = 0.0
+shader_parameter/uTopGlow = Vector3(0.08, 0.18, 0.28)
+shader_parameter/uBubbleBoost = 1.4
+shader_parameter/uDayShallow = Color(0.52, 0.82, 0.98, 1)
+shader_parameter/uDayDeep = Color(0.28, 0.62, 0.9, 1)
+shader_parameter/uNightShallow = Color(0.22, 0.64, 0.94, 1)
+shader_parameter/uNightDeep = Color(0.08, 0.32, 0.64, 1)
+shader_parameter/uRimDay = Color(0.8, 0.96, 1, 1)
+shader_parameter/uRimNight = Color(0.62, 0.92, 1, 1)
+shader_parameter/uOutlineDay = Color(0.16, 0.34, 0.52, 1)
+shader_parameter/uOutlineNight = Color(0.04, 0.12, 0.24, 1)
+shader_parameter/uCausticA = Color(0.18, 0.92, 0.62, 1)
+shader_parameter/uCausticB = Color(0.42, 0.98, 0.35, 1)
+shader_parameter/uBubbleColor = Color(0.85, 1, 0.95, 1)
+shader_parameter/uEyeColor = Color(1, 1, 1, 1)
+shader_parameter/uEyeSeparation = 0.32
+shader_parameter/uEyeSize = Vector2(0.11, 0.17)
+shader_parameter/uEyeElevation = 0.12
+shader_parameter/uMelt = 0.28
+shader_parameter/uImpulseTime = 10.0
+shader_parameter/uImpulsePos = Vector3(0, 0.5, 1)
+shader_parameter/uImpulseVector = Vector3(0, 0, 0)
+shader_parameter/uImpulse2Time = 10.0
+shader_parameter/uImpulse2Pos = Vector3(0, 0.5, 1)
+shader_parameter/uImpulse2Vector = Vector3(0, 0, 0)
+shader_parameter/uMoveDir = Vector3(0, 0, 1)
+shader_parameter/uMoveAmt = 0.0
+shader_parameter/uCrawl = 0.0
+shader_parameter/uLean = Vector3(0, 0, 0)
+shader_parameter/uRippleIntensity = 0.12
+shader_parameter/uFacing = 0.45
+shader_parameter/uBlink = 1.0
+shader_parameter/uBudAmt = 0.0
+shader_parameter/uBudDir = Vector3(0, 0, -1)
+shader_parameter/uBudScale = 0.0
+shader_parameter/uSplitAmt = 0.0
+shader_parameter/uSplitDir = Vector3(0, 0, -1)
 
 [sub_resource type="SphereMesh" id="SphereMesh_body"]
-radius = 0.5
-height = 1.0
+radius = 1.6
+height = 3.2
+radial_segments = 120
+rings = 90
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_eye"]
-shading_mode = 0
-albedo_color = Color(1, 1, 1, 1)
-
-[sub_resource type="SphereMesh" id="SphereMesh_eye"]
-radius = 0.1
-height = 0.2
-radial_segments = 12
-rings = 6
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_pupil"]
-shading_mode = 0
-albedo_color = Color(0.05, 0.04, 0.08, 1)
-
-[sub_resource type="SphereMesh" id="SphereMesh_pupil"]
-radius = 0.05
-height = 0.1
-radial_segments = 10
-rings = 5
-
-[sub_resource type="SphereShape3D" id="SphereShape_body"]
-radius = 0.5
-
-[sub_resource type="SphereShape3D" id="SphereShape_eat"]
-radius = 0.95
-
-[node name="Slime" type="CharacterBody3D" node_paths=PackedStringArray("body_mesh", "left_pupil", "right_pupil", "eat_area")]
-collision_layer = 2
-collision_mask = 5
-script = ExtResource("1_slime")
-body_mesh = NodePath("Body")
-left_pupil = NodePath("Body/LeftEye/Pupil")
-right_pupil = NodePath("Body/RightEye/Pupil")
-eat_area = NodePath("EatArea")
+[node name="Slime" type="Node3D" node_paths=PackedStringArray("body")]
+script = ExtResource("2_script")
+body = NodePath("Body")
 
 [node name="Body" type="MeshInstance3D" parent="."]
+material_override = SubResource("ShaderMaterial_instance")
 cast_shadow = 0
-material_override = SubResource("ShaderMaterial_slime")
+extra_cull_margin = 4.0
 mesh = SubResource("SphereMesh_body")
 
-[node name="ShadowProxy" type="MeshInstance3D" parent="."]
-cast_shadow = 3
-mesh = SubResource("SphereMesh_body")
-
-[node name="LeftEye" type="MeshInstance3D" parent="Body"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.17, 0.1, 0.42)
-cast_shadow = 0
-material_override = SubResource("StandardMaterial3D_eye")
-mesh = SubResource("SphereMesh_eye")
-
-[node name="Pupil" type="MeshInstance3D" parent="Body/LeftEye"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.06)
-cast_shadow = 0
-material_override = SubResource("StandardMaterial3D_pupil")
-mesh = SubResource("SphereMesh_pupil")
-
-[node name="RightEye" type="MeshInstance3D" parent="Body"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.17, 0.1, 0.42)
-cast_shadow = 0
-material_override = SubResource("StandardMaterial3D_eye")
-mesh = SubResource("SphereMesh_eye")
-
-[node name="Pupil" type="MeshInstance3D" parent="Body/RightEye"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.06)
-cast_shadow = 0
-material_override = SubResource("StandardMaterial3D_pupil")
-mesh = SubResource("SphereMesh_pupil")
-
-[node name="Collision" type="CollisionShape3D" parent="."]
-shape = SubResource("SphereShape_body")
-
-[node name="EatArea" type="Area3D" parent="."]
-collision_layer = 0
-collision_mask = 12
-
-[node name="EatShape" type="CollisionShape3D" parent="EatArea"]
-shape = SubResource("SphereShape_eat")
