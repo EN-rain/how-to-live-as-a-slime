@@ -569,17 +569,28 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 	if best_w < INF:
 		var fit := clampf((best_w * 0.5 - 0.02 * S) / r_max, effective_min_squeeze, 1.0)
 		if fit < 1.0:
-			var to_gap_vec := spx - best_center
-			var dist_flow := absf(to_gap_vec.dot(best_flow_dir))
-			var dist_lat := absf(to_gap_vec.dot(best_dir))
-			# Squeeze begins on physical contact as the slime's front boundary reaches the opening
-			# (pillar depth half ~0.6m + slime radius ~2.15m = ~2.75m = ~1.32 * reach)
-			var touch_dist := reach * 1.35
-			if dist_flow < touch_dist and dist_lat < (best_w * 0.5 + reach):
-				var prox := clampf(1.0 - dist_flow / touch_dist, 0.0, 1.0)
-				prox = prox * prox * (3.0 - 2.0 * prox)
-				var lat_factor := clampf(1.0 - dist_lat / (best_w * 0.5 + reach * 0.8), 0.0, 1.0)
-				target = lerpf(1.0, fit, prox * lat_factor)
+			var to_gap_vec := best_center - spx
+			var dist_flow := to_gap_vec.x * best_flow_dir.x + to_gap_vec.y * best_flow_dir.y
+			var dist_lat := absf(to_gap_vec.x * best_dir.x + to_gap_vec.y * best_dir.y)
+
+			var corridor_half_len := 0.6 * S
+			var entrance_flow := dist_flow - corridor_half_len # distance from slime center to entrance
+			var exit_flow := dist_flow + corridor_half_len     # distance from slime center to exit
+
+			var max_lat := best_w * 0.5 + reach * 0.8
+			if dist_lat < max_lat:
+				if entrance_flow > 0.0 and entrance_flow < reach * 1.5:
+					# Slime front reaches entrance: squeeze smoothly from 1.0 down to fit
+					var t_enter := clampf((reach * 1.5 - entrance_flow) / (reach * 1.2), 0.0, 1.0)
+					t_enter = t_enter * t_enter * (3.0 - 2.0 * t_enter)
+					var lat_factor := clampf(1.0 - dist_lat / max_lat, 0.0, 1.0)
+					target = lerpf(1.0, fit, t_enter * lat_factor)
+				elif entrance_flow <= 0.0 and exit_flow > -reach * 1.2:
+					# Inside corridor: maintain fit squeeze until back exits
+					target = fit
+				elif exit_flow <= -reach * 1.2:
+					# Fully exited corridor: snap back to round
+					target = 1.0
 
 	# Fix 16: Once slime has fully passed through, release squeeze quickly using squeeze_in_rate
 	var rate: float
@@ -602,9 +613,11 @@ func _update_slime_squeeze(s: Slime, dt: float) -> void:
 		# Smooth funneling force: gently guide slime toward the gap centerline as it moves
 		var lateral_offset := (spx - best_center).dot(best_dir)
 		var to_gap := Vector3(best_center.x - sp.x, 0.0, best_center.y - sp.z)
-		var moving_toward := s.velocity.dot(to_gap) > 0.0 or to_gap.length() < reach * 1.5
-		if moving_toward and (spx - best_center).length() < reach * 2.2:
-			var align_factor := (1.0 - s.squeeze_k) * clampf(1.0 - absf(lateral_offset) / (reach * 1.6), 0.0, 1.0)
+		var moving_toward := s.velocity.dot(to_gap) > -0.5 or to_gap.length() < reach * 2.0
+		if moving_toward and (spx - best_center).length() < reach * 2.5:
+			var dist_to_gap := (spx - best_center).length()
+			var dist_factor := clampf(1.0 - dist_to_gap / (reach * 2.2), 0.0, 1.0)
+			var align_factor := clampf(1.0 - absf(lateral_offset) / (reach * 1.8), 0.0, 1.0) * maxf(0.35, dist_factor)
 			# Guide firmly along gap centerline
 			var funnel_push := -Vector3(best_dir.x, 0.0, best_dir.y) * lateral_offset * align_factor * 12.0 * dt
 			s.position += funnel_push
@@ -695,19 +708,38 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		var nz0 := dz / d
 		var inward_speed := s.velocity.x * nx0 + s.velocity.z * nz0
 
-		# Advance engulf front when pushing inward; push back out if backing away
+		# Resistance factor: 0.0 for tiny items, ramping up steeply for objects near slime size
+		var size_resistance := clampf((vol_ratio - 0.20) / 0.80, 0.0, 1.0)
+
+		# 1. Viscous Speed Drag:
+		# Pushing into objects near slime size heavily resists forward movement down to a crawl
+		if inward_speed > 0.0:
+			var allowed_speed := lerpf(s.cur_max, s.cur_max * 0.15, pow(size_resistance, 1.4))
+			if inward_speed > allowed_speed:
+				var excess := inward_speed - allowed_speed
+				s.velocity.x -= nx0 * excess
+				s.velocity.z -= nz0 * excess
+				inward_speed = allowed_speed
+
+		# 2. Advance Engulf Front:
+		# Tiny props (< 20%): fast gulp (rate ~ 3.5 - 4.5)
+		# Medium props (50%): steady strain (rate ~ 1.0)
+		# Props near slime size (> 80%): heavy resistance, steep slowdown (rate ~ 0.06 - 0.2)
 		if inward_speed > 0.1:
-			# Advance rate scales down as prop size approaches slime size:
-			# < 10% ratio: nearly instant (rate ~ 5.0)
-			# 50% ratio: moderate strain (rate ~ 1.5)
-			# 90% ratio: heavy wall strain (rate ~ 0.35)
-			var advance_rate := 4.0 * pow(1.0 - vol_ratio, 1.6) + 0.25
+			var size_factor := pow(maxf(0.0, 1.0 - vol_ratio), 1.8)
+			var advance_rate := 3.8 * size_factor + 0.06 * (1.0 - size_resistance * 0.85)
 			p.engulf_front = minf(1.0, p.engulf_front + advance_rate * dt)
 		else:
-			# Push back: if player stops pushing, engulf front recedes
-			p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
+			# Elastic push back: if player lets go or stops pushing,
+			# an object near slime size pushes back forcefully!
+			var pushback_rate := 1.2 + 3.0 * size_resistance
+			p.engulf_front = maxf(0.0, p.engulf_front - dt * pushback_rate)
+			var recoil := 2.5 * size_resistance * (1.0 - p.engulf_front)
+			s.velocity.x -= nx0 * recoil * dt
+			s.velocity.z -= nz0 * recoil * dt
 
-		# Physical positional constraint: slime body cannot penetrate deeper than allowed by current engulf_front!
+		# 3. Physical Positional Constraint:
+		# Slime body cannot penetrate deeper than allowed by current engulf_front!
 		var max_allowed_pen := (sr_p + ro) * p.engulf_front
 		var current_pen := target
 		if current_pen > max_allowed_pen:
@@ -800,8 +832,17 @@ func _solve_solid_collisions(s: Slime, dt: float) -> void:
 			for c in contacts:
 				var pen := _calc_prop_penetration(s, c.prop, c.c_r)
 				if pen > 0.001:
-					s.position.x += c.normal.x * pen * 0.8
-					s.position.z += c.normal.z * pen * 0.8
+					var push := c.normal * pen * 0.75
+					if s.cur_gap_w < INF and s.sq_dir.length_squared() > 0.01:
+						# Never let single-wall lateral push overshoot past the gap centerline
+						var lat_axis := Vector3(s.sq_dir.x, 0.0, s.sq_dir.y)
+						var lat_push := push.dot(lat_axis)
+						var cur_offset := (Vector2(s.position.x, s.position.z) - s.cur_gap_center).dot(Vector2(lat_axis.x, lat_axis.z))
+						if (cur_offset > 0.0 and lat_push < 0.0) or (cur_offset < 0.0 and lat_push > 0.0):
+							var max_push := absf(cur_offset)
+							if absf(lat_push) > max_push:
+								push -= lat_axis * (lat_push - signf(lat_push) * max_push)
+					s.position += push
 
 	# Primary contact for splat & stick
 	var c0 := contacts[0]
@@ -965,7 +1006,14 @@ func _detect_prop_contact(s: Slime, p: PropData) -> ContactInfo:
 		var unz := world_ez / dir_len
 
 		var r_gap := maxf(r * s.squeeze_k, 0.05 * S)
-		var r_flow := maxf(r * (1.0 + 0.5 * (1.0 - s.squeeze_k)), 0.05 * S)
+		# Only stretch along flow when aligned and within the gap corridor,
+		# never when approaching or hitting outside front faces!
+		var gap_corridor_factor := 1.0
+		if s.cur_gap_w < INF and sq_axis.length_squared() > 0.01:
+			var to_gap := Vector2(sp.x - s.cur_gap_center.x, sp.z - s.cur_gap_center.y)
+			var dist_flow := absf(to_gap.x * flow_axis.x + to_gap.y * flow_axis.z)
+			gap_corridor_factor = clampf(1.0 - maxf(0.0, dist_flow - he.z) / (0.8 * S), 0.0, 1.0)
+		var r_flow := maxf(r * (1.0 + 0.5 * (1.0 - s.squeeze_k) * gap_corridor_factor), 0.05 * S)
 		var effective_r := r
 		if sq_axis.length_squared() > 0.01:
 			var p_gap := absf(unx * sq_axis.x + unz * sq_axis.z)
@@ -1272,6 +1320,9 @@ func _update_eat_uniforms(s: Slime) -> void:
 		eat_param[i] = Vector3(float(p.shape) + p.sides * 0.01, 1.0, p.mesh.rotation.y + p.phase)
 		box_half[i] = _box_half(p, S)
 		var a := minf(1.0, p.pd / p.p_thr)
+		var vr := clampf(p.real_volume / maxf(1e-4, s.get_volume()), 0.0, 1.0)
+		var strain_boost := 1.0 + 0.45 * clampf((vr - 0.25) / 0.75, 0.0, 1.0)
+		a = minf(1.0, a * strain_boost)
 		if a > pa:
 			pa = a
 			press_dir = Vector3(dx / d, 0, dz / d)

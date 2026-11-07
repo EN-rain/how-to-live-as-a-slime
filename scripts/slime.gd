@@ -429,7 +429,9 @@ func _process(delta: float) -> void:
 	speed01 = minf(speed / speed_for_full_crawl, 1.0)
 	if speed > 0.05:
 		_crawl_dir = Vector3(velocity.x, 0.0, velocity.z).normalized()
-	_crawl_phase += speed * dt * crawl_rate
+	# Heavy crawl struggle when straining against an edible object near slime size
+	var crawl_strain := 1.0 - clampf(press_amt * 0.55, 0.0, 0.6)
+	_crawl_phase += speed * dt * crawl_rate * crawl_strain
 
 	var lean_target := Vector3(velocity.x * lean_gain * (1.0 - calm), 0.0, velocity.z * lean_gain * (1.0 - calm)) - _lean
 	_lean_vel += lean_target * lean_stiffness * dt
@@ -454,7 +456,7 @@ func _process(delta: float) -> void:
 		_mat.set_shader_parameter("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
 		_mat.set_shader_parameter("uCrawl", _crawl_phase)
 		_mat.set_shader_parameter("uLean", _lean)
-		_mat.set_shader_parameter("uRippleIntensity", ripple_base + ripple_per_speed * speed01 + liquid_amt * 0.15)
+		_mat.set_shader_parameter("uRippleIntensity", ripple_base + ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28)
 		_mat.set_shader_parameter("uFacing", _facing_yaw)
 		_mat.set_shader_parameter("uBlink", blink)
 

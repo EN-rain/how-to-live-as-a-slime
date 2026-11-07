@@ -75,10 +75,9 @@ func _process(_delta: float) -> void:
 		_update_camera()
 	else:
 		target.y = lerpf(target.y, target_look_y, 0.1)
-	if follow.speed01 > follow_speed_threshold:
-		target.x = follow.position.x
-		target.z = follow.position.z
-		_update_camera()
+	target.x = follow.position.x
+	target.z = follow.position.z
+	_update_camera()
 
 
 func _update_camera() -> void:

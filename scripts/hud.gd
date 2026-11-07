@@ -71,7 +71,14 @@ func _process(_delta: float) -> void:
 			break
 
 	if active_engulf_p != null:
-		text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
+		var s_vol: float = slime.get_volume()
+		var vr: float = active_engulf_p.real_volume / maxf(1e-4, s_vol)
+		if vr >= 0.75:
+			text += "  ·  Engulfing %d%% [Heavy Resistance]" % int(active_engulf_p.engulf_front * 100.0)
+		elif vr >= 0.45:
+			text += "  ·  Engulfing %d%% [Resisting]" % int(active_engulf_p.engulf_front * 100.0)
+		else:
+			text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
 	elif slime.engulf_progress > 0.05:
 		text += "  ·  Z-Drape %d%%" % int(slime.engulf_progress * 100.0)
 	elif slime.liquid_amt > 0.5:
