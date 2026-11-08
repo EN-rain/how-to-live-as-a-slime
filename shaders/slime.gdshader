@@ -67,10 +67,10 @@ uniform vec3 uSplatDir = vec3(0.0, 0.0, 1.0);
 uniform float uSplat = 0.0;
 uniform float uSpread = 0.0;
 uniform float uWall = 2.15;
-uniform vec3 uSolidPos[2];
-uniform vec3 uSolidParam[2];
-uniform vec3 uSolidHalf[2];
-uniform vec3 uSolidDir[2];
+uniform vec3 uSolidPos[4];
+uniform vec3 uSolidParam[4];
+uniform vec3 uSolidHalf[4];
+uniform vec3 uSolidDir[4];
 uniform float uRippleIntensity = 0.12;
 uniform float uFacing = 0.45;
 uniform float uBlink = 1.0;
@@ -94,6 +94,9 @@ uniform float uSkinLocal = 0.02;
 uniform float uLiquid = 0.0;
 uniform float uLiquidHeight = 1.0;
 uniform float uLiquidSpread = 1.0;
+// Mesh-local radius of the rest sphere, so tuning.reference_radius drives the
+// vertical profile instead of a second hardcoded copy of the same constant.
+uniform float uRefRadius = 1.6;
 
 // Engulf drape mode (holding Z on top of a larger object)
 uniform vec3 uDrapePos = vec3(0.0);
@@ -103,9 +106,17 @@ uniform float uDrapeYaw = 0.0;
 uniform float uDrapeAmt = 0.0;
 
 // Budding fission (split animation for E and Q): soft teardrop stretch toward the
-// separating partner, driven by the neck-snap impulse on both sides.
+// separating partner, driven by the neck-snap impulse on both sides. While
+// uSplitNeckRadius is non-zero the partner's centre (mesh-local) and the shared neck
+// radius sculpt the facing hemisphere onto the world-space seam between the halves.
 uniform float uSplitAmt = 0.0;
 uniform vec3 uSplitDir = vec3(0.0, 0.0, -1.0);
+uniform vec3 uSplitPartnerLocal = vec3(0.0);
+uniform float uSplitNeckRadius = 0.0;
+
+// 1.0 on distant/small clones: skips the noise-driven bubble field and samples the
+// screen texture once instead of four times. Never changes the silhouette.
+uniform float uShaderLOD = 0.0;
 
 uniform sampler2D tRefraction : hint_screen_texture, repeat_disable, filter_linear;
 
@@ -240,32 +251,71 @@ vec3 solidPushLocal(vec3 q, float shape, vec3 h) {
 	return vec3(f.y * mag, 0.0, f.z * mag);
 }
 
-// Same tap pattern as dentPush (a small disc of taps facing the obstacle) so the push is averaged, not aliased.
+// Conforms the slime surface around an obstacle (both in normal posture and Z puddle posture)
+// so the body visibly molds/compresses against narrow passage walls without clipping through
+// the obstacle or poking out its far side.
 vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
 	float cy = cos(yaw);
 	float sy = sin(yaw);
 	vec3 dv = p - c;
 	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
-	vec3 nL = vec3(nOv.x * cy - nOv.z * sy, 0.0, nOv.x * sy + nOv.z * cy);
-	vec3 u = vec3(-nL.z, 0.0, nL.x);
-	vec3 v = vec3(0.0, 1.0, 0.0);
-	float R = blur;
-	vec3 acc = solidPushLocal(q, shape, h) * 0.28;
-	acc += solidPushLocal(q + u * R, shape, h) * 0.12;
-	acc += solidPushLocal(q - u * R, shape, h) * 0.12;
-	acc += solidPushLocal(q + v * R, shape, h) * 0.12;
-	acc += solidPushLocal(q - v * R, shape, h) * 0.12;
-	acc += solidPushLocal(q + (u + v) * R * 0.7071, shape, h) * 0.06;
-	acc += solidPushLocal(q + (u - v) * R * 0.7071, shape, h) * 0.06;
-	acc += solidPushLocal(q + (-u + v) * R * 0.7071, shape, h) * 0.06;
-	acc += solidPushLocal(q + (-u - v) * R * 0.7071, shape, h) * 0.06;
-	return vec3(acc.x * cy + acc.z * sy, acc.y, -acc.x * sy + acc.z * cy);
+	if (q.y > h.y + 0.25 + blur || q.y < -h.y - blur) return vec3(0.0);
+
+	// Slime center (0, p.y, 0) in obstacle local coordinates
+	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
+	float winY = 1.0 - smoothstep(-0.02, 0.22, q.y - h.y);
+	float kind = floor(shape + 0.005);
+
+	vec2 pushXZ = vec2(0.0);
+	float compressAmt = 0.0;
+
+	if (kind < 0.5) {
+		float ox = abs(qCenter.x) - h.x;
+		float oz = abs(qCenter.y) - h.z;
+		float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
+		float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
+
+		float penX = max(0.0, (h.x + SOLID_OFFSET) - sx * q.x);
+		float wz = 1.0 - smoothstep(h.z - 0.04, h.z + 0.34, abs(q.z));
+		vec2 pushX = vec2(sx * penX * wz, 0.0);
+
+		float penZ = max(0.0, (h.z + SOLID_OFFSET) - sz * q.z);
+		float wx = 1.0 - smoothstep(h.x - 0.04, h.x + 0.34, abs(q.x));
+		vec2 pushZ = vec2(0.0, sz * penZ * wx);
+
+		float faceBlend = smoothstep(-0.20, 0.20, ox - oz);
+		pushXZ = mix(pushZ, pushX, faceBlend) * winY;
+		compressAmt = mix(penZ * wx, penX * wz, faceBlend) * winY;
+	} else {
+		float R = h.x;
+		if (kind > 1.5) R *= clamp(1.0 - (q.y + h.y) / max(2.0 * h.y, 1e-4), 0.06, 1.0);
+		float centerDist = length(qCenter);
+		vec2 nDir = centerDist > 1e-4 ? (qCenter / centerDist) : vec2(1.0, 0.0);
+		vec2 uDir = vec2(-nDir.y, nDir.x);
+		float along = dot(q.xz, nDir);
+		float lat = dot(q.xz, uDir);
+		float wu = 1.0 - smoothstep(R - 0.04, R + 0.34, abs(lat));
+		float rNorm = clamp(abs(lat) / max(R + SOLID_OFFSET, 1e-4), 0.0, 1.0);
+		float arch = sqrt(max(0.0, 1.0 - rNorm * rNorm)) * (R + SOLID_OFFSET);
+		float penC = max(0.0, arch - along);
+		pushXZ = nDir * (penC * wu * winY);
+		compressAmt = penC * wu * winY;
+	}
+
+	float rimLift = min(compressAmt, 0.9) * 0.24 * smoothstep(-0.35, 0.15, -abs(compressAmt - 0.35));
+	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
+	return vec3(worldPushXZ.x, rimLift, worldPushXZ.y);
+}
+
+float smin_neck(float a, float b, float k) {
+	float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+	return mix(b, a, h) - k * h * (1.0 - h);
 }
 
 vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	vec3 p = pos;
 
-	float height01 = clamp((p.y / 1.6 + 1.0) * 0.5, 0.0, 1.0);
+	float height01 = clamp((p.y / uRefRadius + 1.0) * 0.5, 0.0, 1.0);
 	float bellyCurve = sin(height01 * 3.14159265);
 	float lowerBulge = pow(1.0 - height01, 1.35) * smoothstep(0.0, 0.22, height01);
 	float bellySpread = 1.0 + (lowerBulge * 0.34 + bellyCurve * 0.08) * (0.8 + uMelt * 1.1);
@@ -273,7 +323,7 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 
 	p.y *= (0.86 - uMelt * 0.22);
 
-	float groundFloor = -1.6 * (0.86 - uMelt * 0.22);
+	float groundFloor = -uRefRadius * (0.86 - uMelt * 0.22);
 
 	float baseH = p.y - groundFloor;
 	if (baseH < 0.9) {
@@ -281,13 +331,13 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		p.y = groundFloor + 0.9 * (2.0 * tB * tB - tB * tB * tB);
 	}
 
-	if (uLiquid > 0.001) {
-		// Flatten/spread multipliers come from the resolved posture, so the rendered
-		// body matches the collision envelope (including overhead compression).
+	if (abs(uLiquidHeight - 1.0) > 0.001 || uLiquid > 0.001) {
 		float liqH = max(uLiquidHeight, 0.01);
 		float liqR = max(uLiquidSpread, 0.01);
 		p.xz *= liqR;
 		p.y = groundFloor + (p.y - groundFloor) * liqH;
+	}
+	if (uLiquid > 0.001) {
 
 		// Directional flow surge: the leading edge surges forward in movement direction.
 		// Capped to the collision skin so it can never push the surface past the hull.
@@ -309,27 +359,13 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		p.y += capRipple * smoothstep(0.0, 0.35, p.y - groundFloor);
 	}
 
-	// Squeeze: the hull bakes the model's lateral, longitudinal and height factors,
-	// so the shader applies exactly the same scaling about the body origin. The
-	// gap-centred neck is an ADDITIONAL inward modulation only — it can never widen
-	// a vertex past the uniform factor, which keeps the surface inside the hull.
-	{
-		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
-		vec2 fwdFlow = vec2(-sqd.y, sqd.x);
-		vec2 pLocal = p.xz - uGapLocal.xz;
-		float sqa = dot(pLocal, sqd);
-		float flowDist = dot(pLocal, fwdFlow);
-		float neckMat = uSqueeze * exp(-flowDist * flowDist * 1.6) * 0.35;
-		float latScale = max(0.05, uSqueezeLat * (1.0 - neckMat));
-		p.xz = sqd * (sqa * latScale) + fwdFlow * (flowDist * uSqueezeLong) + uGapLocal.xz;
-		p.y = groundFloor + (p.y - groundFloor) * uSqueezeHeight;
-	}
+	// Body stays circular in XZ (never stretched or squashed into an oval).
+	p.y = groundFloor + (p.y - groundFloor) * uSqueezeHeight;
 
 	// ---- Sticky Droplet Budding (E and Q split) ----
-	// Organic fluid separation: the bridge stretches toward the partner, an
-	// hourglass waist pinches around the neck root, the neck thins vertically,
-	// and the rear bulges to conserve visual volume.
-	if (uSplitAmt > 0.001) {
+	// Organic fluid separation: teardrop bridge stretches toward the partner,
+	// tapering smoothly inward without flaring, while the facing cap forms a rounded dome.
+	if (uSplitAmt > 0.001 || uSplitNeckRadius > 0.001) {
 		vec2 sdir = normalize(uSplitDir.xz + vec2(0.0001));
 		vec2 sperp = vec2(-sdir.y, sdir.x);
 		float sproj = dot(p.xz, sdir);
@@ -337,21 +373,42 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 
 		// Forward stretch towards the separating partner (pulls out a gooey neck)
 		float forwardWeight = smoothstep(-0.25, 1.4, sproj);
-		float stretch = forwardWeight * uSplitAmt * 0.70;
+		float stretch = forwardWeight * uSplitAmt * 0.65;
 		p.xz += sdir * stretch;
 
-		// Hourglass waist pinch: constricts the sides inward near the neck root
-		float waistMask = smoothstep(-0.2, 0.45, sproj) * (1.0 - smoothstep(0.75, 1.6, sproj));
-		float pinch = waistMask * uSplitAmt * 0.42;
+		// Monotonic teardrop taper: smoothly constricts inward towards the neck tip (never flaring back out)
+		float taperMask = smoothstep(-0.15, 1.4, sproj);
+		float pinch = taperMask * uSplitAmt * 0.45;
 		p.xz -= sperp * (sperpd * pinch);
 
 		// Vertical thinning of the connecting neck
-		float vertThin = smoothstep(0.1, 1.2, sproj) * uSplitAmt * 0.25;
+		float vertThin = smoothstep(0.0, 1.3, sproj) * uSplitAmt * 0.30;
 		p.y = mix(p.y, groundFloor + (p.y - groundFloor) * (1.0 - vertThin), forwardWeight);
 
 		// Rear bulge to conserve visual volume while being pulled forward
 		float backWeight = 1.0 - smoothstep(-1.1, 0.1, sproj);
 		p.xz -= sdir * (backWeight * uSplitAmt * 0.18);
+
+		// World-coupled neck: rounded dome cap meeting the partner at the seam plane
+		if (uSplitNeckRadius > 0.001) {
+			float pdistSq = dot(uSplitPartnerLocal.xz, uSplitPartnerLocal.xz);
+			if (pdistSq > 1e-5) {
+				float pdist = sqrt(pdistSq);
+				vec2 pdir = uSplitPartnerLocal.xz / pdist;
+				float proj = dot(p.xz, pdir);
+				float radial = length(p.xz - pdir * proj);
+				float faceW = smoothstep(0.30 * uRefRadius, 0.95 * uRefRadius, proj)
+					* smoothstep(0.0, 0.45 * uRefRadius, pdist);
+				float seam = pdist * 0.5;
+				float seamRadius = smin_neck(radial, uSplitNeckRadius, 0.08);
+				float normR = clamp(seamRadius / max(uSplitNeckRadius, 0.001), 0.0, 1.0);
+				float capDome = sqrt(max(0.0, 1.0 - normR * normR)) * 0.18 * uSplitNeckRadius;
+				vec2 radialDir = radial > 1e-4 ? (p.xz - pdir * proj) / radial : vec2(1.0, 0.0);
+				vec2 target = pdir * (seam - capDome) + radialDir * seamRadius;
+				p.xz = mix(p.xz, target, faceW * 0.85);
+				p.y = mix(p.y, groundFloor + (p.y - groundFloor) * 0.62, faceW * 0.55);
+			}
+		}
 	}
 
 	float breathe = sin(t * 2.0) * 0.022 * uJiggleStrength;
@@ -392,27 +449,11 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 
 	float effPress = uPressAmt * solidBlend;
 	if (effPress > 0.001) {
-		vec2 pd2 = normalize(uPressDir.xz + vec2(0.0001));
-		float al = dot(p.xz, pd2);
-		vec2 pp = p.xz - pd2 * al;
-		float anchor = 1.9;
-		al = anchor + (al - anchor) * (1.0 - 0.12 * effPress);
-		p.xz = pd2 * al + pp * (1.0 + 0.07 * effPress);
-		p.y = groundFloor + (p.y - groundFloor) * (1.0 + 0.05 * effPress);
+		p.y = groundFloor + (p.y - groundFloor) * (1.0 + 0.03 * effPress);
 	}
-	float effSplat = uSplat * solidBlend;
 	float effSpread = uSpread * solidBlend;
-	if (effSplat > 0.001 || effSpread > 0.001) {
-		// Splat model: the body compresses toward the wall (anchored at the contact plane), the top carries on forward
-		// while the floor-gripping base lags, and the mass spreads sideways/up with a slower lag (viscous).
-		vec2 sd = normalize(uSplatDir.xz + vec2(0.0001));
-		float sa = dot(p.xz, sd);
-		vec2 sperp = p.xz - sd * sa;
-		float wallS = uWall;
-		sa = wallS + (sa - wallS) * (1.0 - 0.34 * effSplat);
-		sa += effSplat * 0.16 * (height01 - 0.15);
-		p.xz = sd * sa + sperp * (1.0 + 0.34 * effSpread);
-		p.y = groundFloor + (p.y - groundFloor) * (1.0 + 0.10 * effSpread);
+	if (effSpread > 0.001) {
+		p.y = groundFloor + (p.y - groundFloor) * (1.0 + 0.04 * effSpread);
 	}
 	p.y = max(p.y, groundFloor);
 
@@ -432,14 +473,12 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	p.y += uMoveAmt * 0.07 * tw * twMask;
 	p.xz += norm.xz * uMoveAmt * 0.03 * tw * twMask;
 
-	// Wrap the body around whatever it is squashed against — faded out in liquid mode or heavy squeeze.
-	float dentBlend = solidBlend * (1.0 - clamp(uSqueeze, 0.0, 1.0) * 0.65);
-	for (int i = 0; i < 2; i++) {
-		float solidAmt = uSolidParam[i].y * dentBlend;
+	// Conform the body around nearby obstacles in both normal and liquid postures.
+	for (int i = 0; i < 4; i++) {
+		float solidAmt = uSolidParam[i].y;
 		if (solidAmt > 0.001) {
-			float ring = length(solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.55, uSolidDir[i]));
-			p += norm * ring * 0.3 * solidAmt;
-			p += solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.15, uSolidDir[i]) * solidAmt;
+			vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
+			p += dent * solidAmt;
 		}
 	}
 
@@ -590,10 +629,21 @@ void fragment() {
 	vec2 uvGY = clamp(screenUV - totalDistortion * (1.0 + 0.10 * uDispersion) - dir * disp * 0.25, vec2(0.002), vec2(0.998));
 	vec2 uvB = clamp(screenUV - totalDistortion * (1.0 + 0.22 * uDispersion) - dir * disp * 0.55, vec2(0.002), vec2(0.998));
 
-	vec3 sR = sampleScreen(uvR);
-	vec3 sG = sampleScreen(uvG);
-	vec3 sGY = sampleScreen(uvGY);
-	vec3 sB = sampleScreen(uvB);
+	vec3 sR;
+	vec3 sG;
+	vec3 sGY;
+	vec3 sB;
+	if (uShaderLOD > 0.5) {
+		sG = sampleScreen(uvG);
+		sR = sG;
+		sGY = sG;
+		sB = sG;
+	} else {
+		sR = sampleScreen(uvR);
+		sG = sampleScreen(uvG);
+		sGY = sampleScreen(uvGY);
+		sB = sampleScreen(uvB);
+	}
 
 	vec3 refractedColor = vec3(sR.r, mix(sG.g, sGY.g, 0.5), sB.b);
 
@@ -622,9 +672,12 @@ void fragment() {
 	color = mix(color, rimColor, clamp(innerRim * 0.78, 0.0, 0.92));
 
 	vec3 localP = vLocalPos * uBubbleNoiseScale + vec3(0.0, t * 0.6, 0.0);
-	float bubbleNoise1 = snoise(localP);
-	float bubbleNoise2 = snoise(localP * 2.2 - vec3(0.0, t * 1.1, 0.0));
-	float bubbleField = smoothstep(0.55, 0.72, bubbleNoise1) * smoothstep(0.4, 0.6, bubbleNoise2);
+	float bubbleField = 0.0;
+	if (uShaderLOD < 0.5) {
+		float bubbleNoise1 = snoise(localP);
+		float bubbleNoise2 = snoise(localP * 2.2 - vec3(0.0, t * 1.1, 0.0));
+		bubbleField = smoothstep(0.55, 0.72, bubbleNoise1) * smoothstep(0.4, 0.6, bubbleNoise2);
+	}
 	float depthFactor = smoothstep(-0.8, 0.6, vLocalPos.y);
 	vec3 bubbleColor = lin2srgb(uBubbleColor) * uBubbleBoost;
 	color = mix(color, bubbleColor, bubbleField * depthFactor * 0.55 * clamp(uRippleIntensity * 2.0, 0.2, 1.5));

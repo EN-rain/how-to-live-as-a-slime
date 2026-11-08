@@ -62,6 +62,7 @@ func _ready() -> void:
 		generated.free()
 	props.props.clear()
 	props.eaten = 0
+	props.rebuild_grid()
 
 	Input.action_release("move_forward")
 	Input.action_release("move_back")
@@ -364,6 +365,7 @@ func _add_box(center: Vector3, size: Vector3) -> void:
 	p.calc_real_volume()
 	props._attach_collider(p)
 	props.props.append(p)
+	props.rebuild_grid()
 	fixtures.append(p)
 
 
@@ -385,6 +387,7 @@ func _add_edible_box(center: Vector3, size: Vector3) -> void:
 	p.calc_real_volume()
 	props._attach_collider(p)
 	props.props.append(p)
+	props.rebuild_grid()
 	fixtures.append(p)
 
 
@@ -434,6 +437,7 @@ func _clear_fixtures() -> void:
 		if p.mesh != null and is_instance_valid(p.mesh):
 			p.mesh.free()
 	fixtures.clear()
+	props.rebuild_grid()
 
 
 func _reset_player(flat_pos: Vector3, reset_scale := true) -> void:

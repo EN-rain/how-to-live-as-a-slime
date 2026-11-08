@@ -22,6 +22,10 @@ extends Resource
 @export var liquid_climb_reach := 0.75
 @export var slide_iterations := 4
 @export var recovery_iterations := 6
+## Resolve slime-vs-slime overlap analytically from the shape model instead of
+## relying on the static proxies and the generic sweep. Partner hulls stay in the
+## sweep for movement intent; separation itself only tests level geometry.
+@export var use_analytic_slime_collision := true
 
 @export_group("Size")
 @export var start_scale := 1.0
@@ -44,23 +48,29 @@ extends Resource
 ## applied identically to collision, shader, picking, shadows and coverage.
 @export var liquid_spread_ratio := 2.13
 ## Minimum legal lateral squeeze for normal posture, as a fraction of rest width.
-## A firm blob may squish somewhat, but not enough to thread a 1.4 m gate.
-@export_range(0.05, 1.0, 0.01) var min_normal_squeeze := 0.6
+## Matches the visible Core Sphere diameter (~0.88 m at scale 1.0).
+@export_range(0.05, 1.0, 0.01) var min_normal_squeeze := 0.22
 ## Minimum legal lateral squeeze for liquid posture, as a fraction of rest width.
 @export_range(0.05, 1.0, 0.01) var min_liquid_squeeze := 0.12
+## Inner clearance sphere radius ratio relative to the legal minimum squeeze.
+## Represents the invisible core: if an area fits this sphere, the slime's body conforms and goes through.
+@export var core_sphere_radius_ratio := 0.95
 ## Minimum legal liquid height ratio under overhead compression.
-@export_range(0.02, 1.0, 0.01) var min_liquid_height_ratio := 0.06
+@export_range(0.02, 1.0, 0.01) var min_liquid_height_ratio := 0.22
 ## Permit normal (non-liquid) posture to compress vertically under a low ceiling.
-@export var allow_normal_vertical_compression := false
+@export var allow_normal_vertical_compression := true
 ## Skin gap kept between the collision envelope and obstacles.
 @export var skin := 0.02
+## Latch passages through a 5-state machine (approach ramp, inside/exiting hold).
+## Off reverts to the legacy "any latched hint" behaviour.
+@export var use_passage_fsm := true
 ## Visual longitudinal stretch per unit of lateral squeeze. Stylized: the collision
 ## envelope stays a compact ellipse, otherwise a stretched neck would block itself.
-@export var squeeze_elongation := 0.85
+@export var squeeze_elongation := 0.0
 ## Vertical gain per unit of lateral squeeze in normal posture.
-@export var squeeze_height_gain := 0.35
-@export var squeeze_in_rate := 16.0
-@export var squeeze_out_rate := 5.0
+@export var squeeze_height_gain := 0.0
+@export var squeeze_in_rate := 36.0
+@export var squeeze_out_rate := 8.0
 ## Liquid blend rate (1/s) driving the Z-key melt/reform transition.
 @export var liquid_blend_rate := 2.8
 
@@ -97,6 +107,10 @@ extends Resource
 @export var bud_duration := 0.58
 @export var merge_duration := 0.42
 @export var min_split_scale := 0.45
+## Bilateral coupled split: the bud spawns inside the parent's silhouette, both
+## halves separate from their shared centre, and the facing surfaces are sculpted
+## into a world-space hourglass that pinches to zero at the snap point.
+@export var use_coupled_split := true
 @export var merge_range_factor := 2.5
 
 @export_group("AI")
@@ -115,3 +129,32 @@ extends Resource
 
 func volume_per_scale_cubed() -> float:
 	return (4.0 / 3.0) * PI * pow(volume_radius, 3.0)
+
+
+## Clamp authored values into the ranges the solver can honor. Runs whenever a shape
+## model is configured, so a bad Inspector value degrades to a safe bound instead of
+## producing a divide-by-zero, a zero-size step budget or a negative duration.
+func validate() -> void:
+	reference_radius = maxf(reference_radius, 0.1)
+	volume_radius = maxf(volume_radius, 0.1)
+	arena_radius = maxf(arena_radius, 1.0)
+	max_step_fraction = clampf(max_step_fraction, 0.05, 1.0)
+	slide_iterations = maxi(slide_iterations, 1)
+	recovery_iterations = maxi(recovery_iterations, 1)
+	gravity = maxf(gravity, 0.0)
+	scale_response = maxf(scale_response, 0.1)
+	velocity_response = maxf(velocity_response, 0.1)
+	climb_reach = maxf(climb_reach, 0.0)
+	liquid_climb_reach = maxf(liquid_climb_reach, 0.0)
+	skin = clampf(skin, 0.0, 0.25)
+	melt = clampf(melt, 0.0, 1.5)
+	liquid_height_ratio = clampf(liquid_height_ratio, 0.02, 1.0)
+	liquid_spread_ratio = maxf(liquid_spread_ratio, 0.2)
+	min_liquid_squeeze = clampf(min_liquid_squeeze, 0.05, 1.0)
+	min_normal_squeeze = clampf(min_normal_squeeze, min_liquid_squeeze, 1.0)
+	min_liquid_height_ratio = clampf(min_liquid_height_ratio, 0.02,
+			minf(1.0, liquid_height_ratio))
+	fission_duration = maxf(fission_duration, 0.1)
+	bud_duration = maxf(bud_duration, 0.1)
+	merge_duration = maxf(merge_duration, 0.05)
+	min_split_scale = clampf(min_split_scale, 0.05, 0.99)

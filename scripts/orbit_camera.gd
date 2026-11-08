@@ -82,7 +82,7 @@ func _process(_delta: float) -> void:
 		_last_scale = s
 		_update_camera()
 	else:
-		target.y = lerpf(target.y, target_look_y, 0.1)
+		target.y = lerpf(target.y, target_look_y, 1.0 - exp(-6.0 * _delta))
 	if _engaged:
 		target.x = follow.position.x
 		target.z = follow.position.z

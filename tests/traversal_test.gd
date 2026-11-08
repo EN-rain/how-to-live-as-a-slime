@@ -9,6 +9,11 @@ func _initialize() -> void:
 		quit(1)
 		return
 	var main := main_scene.instantiate()
+	# Force the ecosystem's authored seed: world generation, prop detail RNG and the
+	# slime-local clone streams all derive from it, so every run is reproducible.
+	var props := main.get_node_or_null("Ecosystem") as SlimeProps
+	if props != null:
+		props.spawn_seed = 20240607
 	root.add_child(main)
 
 	var driver: Node = (load("res://tests/traversal_driver.gd") as GDScript).new()

@@ -44,19 +44,32 @@ var semi_b := 2.0
 
 var shape: ConvexPolygonShape3D
 
+## Process-wide instrumentation (F3 overlay). Totals; the HUD derives per-tick rates.
+static var debug_rebuild_count := 0
+static var debug_baked_points_count := 0
+
+## Quantized posture -> immutable baked hull variants, shared by every slime. A
+## continuous posture change usually lands in the same bucket and reuses the same
+## shape, so near-steady squeezes stop rebuilding convex hulls every tick.
+const HULL_CACHE_MAX := 512
+static var _hull_cache := {}
+static var _hull_order: Array = []
+
 var _unit_points := PackedVector3Array()
 var _rest_radius_table := PackedFloat32Array()
-var _last_key := ""
+var _last_key_int := -1
 var _resolved_points := PackedVector3Array()
+var _resolved_dims := Vector3.ZERO
 
 
 func configure(t: SlimeTuning) -> void:
 	tuning = t
+	t.validate()
 	var k := 0.86 - t.melt * 0.22
 	rest_half_height = t.reference_radius * k
 	rest_full_height = 2.0 * rest_half_height
 	_build_rest_profile()
-	_last_key = ""
+	_last_key_int = -1
 	if shape == null:
 		shape = ConvexPolygonShape3D.new()
 
@@ -129,22 +142,29 @@ func resolve(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: 
 	if p_axis.length_squared() > 1e-6:
 		axis = Vector3(p_axis.x, 0.0, p_axis.z).normalized()
 	spread = pow(maxf(height_ratio, 1e-3), -0.5)
-	flow_stretch = 1.0 + (1.0 - squeeze) * tuning.squeeze_elongation
-	height_boost = 1.0 + (1.0 - squeeze) * tuning.squeeze_height_gain * (1.0 - liquid)
-	full_height = rest_full_height * scale * height_ratio * height_boost
+	flow_stretch = squeeze
+	height_boost = 1.0
+	full_height = rest_full_height * scale * height_ratio
 	semi_a = rest_max_radius * scale * spread * squeeze
-	semi_b = rest_max_radius * scale * spread * flow_stretch
-	var key := "%.4f|%.4f|%.4f|%.4f|%.4f|%.4f" % [scale, liquid, height_ratio, squeeze, axis.x, axis.z]
-	if key == _last_key:
+	semi_b = semi_a
+	var key := posture_key_for(scale, liquid, height_ratio, squeeze, axis)
+	var e := _cache_entry(scale, liquid, height_ratio, squeeze, axis)
+	var dims: Vector3 = e["dims"]
+	if key == _last_key_int and dims == _resolved_dims:
 		return false
-	_last_key = key
-	_rebuild()
+	_last_key_int = key
+	_resolved_points = e["points"]
+	_resolved_dims = dims
+	shape = _variant(e, 0)
 	return true
 
 
 func _rebuild() -> void:
-	_resolved_points = baked_points(scale, liquid, height_ratio, squeeze, axis)
-	shape.set_points(_resolved_points)
+	debug_rebuild_count += 1
+	var e := _cache_entry(scale, liquid, height_ratio, squeeze, axis)
+	_resolved_points = e["points"]
+	_resolved_dims = e["dims"]
+	shape = _variant(e, 0)
 
 
 ## The baked envelope for the currently resolved posture, shared by every probe that
@@ -153,36 +173,143 @@ func resolved_points() -> PackedVector3Array:
 	return _resolved_points
 
 
-## Bake envelope points (foot at origin, world orientation) for arbitrary dimensions
-## without mutating the resolved state. Used for transition/expansion probes.
-func baked_points(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> PackedVector3Array:
-	var ax := Vector3(p_axis.x, 0.0, p_axis.z)
-	if ax.length_squared() < 1e-8:
-		ax = Vector3(1, 0, 0)
-	ax = ax.normalized()
-	var perp := Vector3(-ax.z, 0.0, ax.x)
+## Signature of the currently resolved posture; lets callers cache derived hulls
+## (e.g. eroded probes) and rebuild them only when the posture actually changes.
+func posture_key() -> int:
+	return _last_key_int
+
+
+## Canonical integer signature of a posture. Coarse enough that a smooth transition
+## reuses buckets, fine enough that the hull never strays more than half a step from
+## the rendered dimensions (~0.25% of the radius).
+static func posture_key_for(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, _p_axis: Vector3) -> int:
+	var sx := int(roundf(p_scale * 200.0))
+	var lq := int(roundf(p_liquid * 100.0))
+	var hr := int(roundf(p_height_ratio * 100.0))
+	var sq := int(roundf(p_squeeze * 200.0))
+	return (sx << 40) | (lq << 32) | (hr << 24) | (sq << 16)
+
+
+## Cache entry for one quantized posture bucket. The entry is CONSERVATIVE: it
+## stores the largest support extents (across-axis, along-axis, height) seen in the
+## bucket, so the hull always contains every posture that maps to it. A quantized
+## hull may therefore block up to a centimetre early but can never let the rendered
+## body clip into geometry the physics hull considers clear.
+func _cache_entry(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> Dictionary:
+	var key := posture_key_for(p_scale, p_liquid, p_height_ratio, p_squeeze, p_axis)
+	var dims := _envelope_dims(p_scale, p_liquid, p_height_ratio, p_squeeze)
+	var ax := _canonical_axis(p_axis)
+	var e = _hull_cache.get(key)
+	if e != null:
+		var have: Vector3 = e["dims"]
+		if dims.x <= have.x and dims.y <= have.y and dims.z <= have.z:
+			return e
+		dims = Vector3(maxf(have.x, dims.x), maxf(have.y, dims.y), maxf(have.z, dims.z))
+		e["dims"] = dims
+		e["axis"] = ax
+		e["points"] = _bake_dims(dims, ax)
+		e["raw"] = null
+		e["e2"] = null
+		e["e05"] = null
+		return e
+	e = {"dims": dims, "axis": ax, "points": _bake_dims(dims, ax), "raw": null, "e2": null, "e05": null}
+	_hull_cache[key] = e
+	_hull_order.append(key)
+	while _hull_order.size() > HULL_CACHE_MAX:
+		_hull_cache.erase(_hull_order.pop_front())
+	return e
+
+
+## Support extents of a posture: circular horizontal radius (x == y) and full height (z).
+func _envelope_dims(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float) -> Vector3:
 	var sq := clampf(p_squeeze, lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, p_liquid), 1.0)
 	var spr := pow(maxf(p_height_ratio, 1e-3), -0.5)
-	var stretch := 1.0 + (1.0 - sq) * tuning.squeeze_elongation
-	var boost := 1.0 + (1.0 - sq) * tuning.squeeze_height_gain * (1.0 - p_liquid)
+	var r := p_scale * spr * sq
+	return Vector3(r, r, p_scale * p_height_ratio)
+
+
+func _canonical_axis(p_axis: Vector3) -> Vector3:
+	var ax := Vector3(p_axis.x, 0.0, p_axis.z)
+	if ax.length_squared() < 1e-8:
+		return Vector3.RIGHT
+	return ax.normalized()
+
+
+## Bake the unit profile at explicit support extents (circular in XZ, never oval).
+func _bake_dims(dims: Vector3, _axis: Vector3) -> PackedVector3Array:
+	var n := _unit_points.size()
+	var pts := PackedVector3Array()
+	pts.resize(n)
+	var rx := dims.x
+	var ry := dims.z
+	for i in n:
+		var p := _unit_points[i]
+		pts[i] = Vector3(p.x * rx, p.y * ry, p.z * rx)
+	return pts
+
+
+func cached_points(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> PackedVector3Array:
+	return _cache_entry(p_scale, p_liquid, p_height_ratio, p_squeeze, p_axis)["points"]
+
+
+## variant: 0 = raw hull, 1 = eroded by 2*skin (posture legality), 2 = eroded by
+## 0.5*skin (clearance). Variants build lazily so a miss only pays for what is queried.
+func cached_shape(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3, variant := 0) -> ConvexPolygonShape3D:
+	return _variant(_cache_entry(p_scale, p_liquid, p_height_ratio, p_squeeze, p_axis), variant)
+
+
+func _variant(e: Dictionary, variant: int) -> ConvexPolygonShape3D:
+	var field := "raw"
+	var margin := 0.0
+	if variant == 1:
+		field = "e2"
+		margin = tuning.skin * 2.0
+	elif variant == 2:
+		field = "e05"
+		margin = tuning.skin * 0.5
+	if e[field] == null:
+		var pts: PackedVector3Array = e["points"]
+		if margin > 0.0:
+			pts = erode_points(pts.duplicate(), margin)
+		e[field] = _shape_from(pts)
+	return e[field]
+
+
+static func _shape_from(pts: PackedVector3Array) -> ConvexPolygonShape3D:
+	var s := ConvexPolygonShape3D.new()
+	s.set_points(pts)
+	return s
+
+
+## Radial + top erosion, shared by the hull cache and the motor's ad-hoc probes.
+static func erode_points(pts: PackedVector3Array, margin: float) -> PackedVector3Array:
+	var n := pts.size()
+	var top := 0.0
+	for i in n:
+		top = maxf(top, pts[i].y)
+	top = maxf(0.0, top - margin)
+	for i in n:
+		var p := pts[i]
+		var r := sqrt(p.x * p.x + p.z * p.z)
+		var f := maxf(0.0, r - margin) / maxf(r, 1e-5)
+		pts[i] = Vector3(p.x * f, minf(p.y, top), p.z * f)
+	return pts
+
+
+## Bake envelope points (foot at origin, world orientation) for arbitrary dimensions
+## without mutating the resolved state. Used for transition/expansion probes.
+func baked_points(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, _p_axis: Vector3) -> PackedVector3Array:
+	debug_baked_points_count += 1
+	var sq := clampf(p_squeeze, lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, p_liquid), 1.0)
+	var spr := pow(maxf(p_height_ratio, 1e-3), -0.5)
 	var sa := p_scale * spr * sq
-	var sb := p_scale * spr * stretch
-	var sv := p_scale * p_height_ratio * boost
-	var axx := ax.x
-	var axz := ax.z
-	var px := perp.x
-	var pz := perp.z
+	var sv := p_scale * p_height_ratio
 	var n := _unit_points.size()
 	var pts := PackedVector3Array()
 	pts.resize(n)
 	for i in n:
 		var p := _unit_points[i]
-		var along := p.x * axx + p.z * axz
-		var across := p.x * px + p.z * pz
-		pts[i] = Vector3(
-			axx * along * sa + px * across * sb,
-			p.y * sv,
-			axz * along * sa + pz * across * sb)
+		pts[i] = Vector3(p.x * sa, p.y * sv, p.z * sa)
 	return pts
 
 
@@ -194,42 +321,20 @@ func query_transform() -> Transform3D:
 	return Transform3D(Basis.IDENTITY, foot)
 
 
-## Max horizontal extent of the resolved body along a horizontal direction.
-func horizontal_support(dir: Vector3) -> float:
-	var d := Vector3(dir.x, 0.0, dir.z)
-	if d.length_squared() < 1e-8:
-		return semi_a
-	d = d.normalized()
-	var perp := Vector3(-axis.z, 0.0, axis.x)
-	var ca := d.dot(axis)
-	var cb := d.dot(perp)
-	return sqrt(semi_a * semi_a * ca * ca + semi_b * semi_b * cb * cb)
+## Max horizontal extent of the resolved body along any horizontal direction (circular).
+func horizontal_support(_dir: Vector3) -> float:
+	return semi_a
 
 
-## Current body radius at a world height, along a horizontal direction.
-func world_radius_at(world_y: float, dir: Vector3) -> float:
-	# Above the body there is no cross-section; use the widest horizontal extent so
-	# the engulf backstop still works for a puddle (its apex ring has zero radius).
+## Current body radius at a world height (circular in XZ).
+func world_radius_at(world_y: float, _dir: Vector3) -> float:
 	if world_y >= foot.y + full_height:
-		return horizontal_support(dir)
-	var rest_h := (world_y - foot.y) / maxf(1e-6, scale * height_ratio * height_boost)
-	var r := rest_radius_at(rest_h) * scale * spread
-	var d := Vector3(dir.x, 0.0, dir.z)
-	if d.length_squared() < 1e-8:
-		return r
-	d = d.normalized()
-	var perp := Vector3(-axis.z, 0.0, axis.x)
-	var ca := d.dot(axis)
-	var cb := d.dot(perp)
-	var fa := ca * squeeze
-	var fb := cb * flow_stretch
-	var m := sqrt(fa * fa + fb * fb)
-	return r * maxf(m, 1e-4)
+		return semi_a
+	var rest_h := (world_y - foot.y) / maxf(1e-6, scale * height_ratio)
+	return rest_radius_at(rest_h) * scale * spread * squeeze
 
 
 ## Convert a world offset from the actor root into mesh-local shader units.
-## The shader subtracts `uGapLocal` AFTER the liquid spread multiply, so the
-## horizontal components must be divided by scale * spread as well.
 func mesh_local(world_offset: Vector3) -> Vector3:
 	var s := maxf(1e-6, scale)
 	var r := maxf(1e-6, spread)
@@ -238,3 +343,18 @@ func mesh_local(world_offset: Vector3) -> Vector3:
 
 func center() -> Vector3:
 	return foot + Vector3(0, full_height * 0.5, 0)
+
+
+## Inner clearance sphere radius: if an opening fits this radius, the slime goes through.
+func core_sphere_radius() -> float:
+	var r := rest_max_radius * scale * spread * min_squeeze()
+	return maxf(r, 0.05)
+
+
+func core_sphere_center() -> Vector3:
+	return center()
+
+
+## Cached circular inner core hull at the posture's minimum legal radius.
+func core_shape(variant := 1) -> ConvexPolygonShape3D:
+	return cached_shape(scale, liquid, height_ratio, min_squeeze(), Vector3.RIGHT, variant)
