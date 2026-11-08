@@ -1360,7 +1360,7 @@ func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 		var cn := _closest_and_normal(p, Vector3(sp.x, m.y, sp.z))
 		var pt: Vector3 = cn["point"]
 		var surf_dist := Vector2(pt.x - sp.x, pt.z - sp.z).length()
-		if surf_dist <= vis_r + 0.80:
+		if surf_dist <= vis_r + 0.12:
 			candidates.append({"prop": p, "dist": surf_dist, "cn": cn})
 
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["dist"]) < float(b["dist"]))
@@ -1368,14 +1368,15 @@ func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 	for i in count:
 		var entry: Dictionary = candidates[i]
 		var p: PropData = entry["prop"]
+		var surf_dist: float = entry["dist"]
 		var cn: Dictionary = entry["cn"]
 		var n_out: Vector3 = cn["normal"]
 		var m := p.mesh.global_position
 		_solid_pos_buf[i] = (m - sp) / S
 		_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
-		var weight := 1.0
+		var weight := clampf((vis_r + 0.10 - surf_dist) / 0.10, 0.0, 1.0)
 		if is_edible_by_push(s, p) and p.last_presser == s and p.engulf_front > 0.01:
-			weight = clampf(1.0 - pow(p.engulf_front, 1.5) * 0.85, 0.15, 1.0)
+			weight *= clampf(1.0 - pow(p.engulf_front, 1.5) * 0.85, 0.15, 1.0)
 		_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
 		_solid_half_buf[i] = _box_half(p, S)
 
