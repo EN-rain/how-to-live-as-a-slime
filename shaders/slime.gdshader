@@ -258,22 +258,23 @@ float smax0(float a, float k) {
 	return (a > k) ? a : (t * t) / (4.0 * k);
 }
 
-// Conforms the slime surface around an obstacle with C1-continuous derivatives everywhere.
-// Tight contact margins ensure deformation starts only on actual contact and releases immediately when leaving.
+// Conforms the slime surface around an obstacle using proportional half-space scaling.
+// Each obstacle scales only the half of the slime facing it (0 at center -> W at rim),
+// so left and right obstacles never cross or fold the center dome, and release is instant.
 vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
 	float cy = cos(yaw);
 	float sy = sin(yaw);
 
-	float rVert = length(p.xz);
-	float maxBellyR = uRefRadius * 1.24;
-	float rho = clamp(rVert / maxBellyR, 0.0, 1.0);
-
 	vec3 dv = p - c;
 	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
-	vec3 H = h + vec3(0.04);
+	vec3 H = h + vec3(0.05);
 	if (q.y > H.y + 0.18 || q.y < -H.y - 0.18) return vec3(0.0);
 
-	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
+	// Slime center -> obstacle center in obstacle-rotatedXZ coordinates
+	vec2 cRot = vec2(c.x * cy - c.z * sy, c.x * sy + c.z * cy);
+	// Vertex position relative to slime center (0,0) in obstacle-rotated XZ coordinates
+	vec2 pRot = vec2(p.x * cy - p.z * sy, p.x * sy + p.z * cy);
+
 	float groundFloorLocal = -uRefRadius * (0.86 - uMelt * 0.22);
 
 	// Overhead roof / tunnel ceiling check
@@ -287,38 +288,48 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 	float winY = 1.0 - smoothstep(H.y - 0.02, H.y + 0.16, q.y);
 	if (winY <= 0.001) return vec3(0.0);
 
-	float ox = abs(qCenter.x) - h.x;
-	float oz = abs(qCenter.y) - h.z;
-	float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
-	float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
+	float maxBellyR = uRefRadius * 1.24;
+	float rVert = length(p.xz);
+	float rho = clamp(rVert / maxBellyR, 0.0, 1.0);
 
-	// How far the slime's outer belly rim penetrates the box along X and Z
-	float rimOverlapX = max(0.0, maxBellyR - max(ox, 0.0));
-	float rimOverlapZ = max(0.0, maxBellyR - max(oz, 0.0));
-	// Upper dome only rounds inward proportionally to actual rim overlap with the obstacle
-	float domeAssist = (1.0 - smoothstep(0.20, 0.95, rho)) * 0.32;
+	// Available clearance from slime center (0,0) to the obstacle's near X-wall and Z-wall
+	float clearX = max(abs(cRot.x) - H.x, 0.12);
+	float clearZ = max(abs(cRot.y) - H.z, 0.12);
 
-	// Tight C1 push along X face (weighted by Z span)
-	float penX = smax0(H.x + rimOverlapX * domeAssist - sx * q.x, 0.08);
-	float wz = 1.0 - smoothstep(h.z - 0.02, h.z + 0.24, abs(q.z));
-	vec2 pushX = vec2(sx * penX * wz, 0.0);
+	// Sign pointing from slime center toward the obstacle (+1 or -1)
+	float dirToObsX = cRot.x >= 0.0 ? 1.0 : -1.0;
+	float dirToObsZ = cRot.y >= 0.0 ? 1.0 : -1.0;
 
-	// Tight C1 push along Z face (weighted by X span)
-	float penZ = smax0(H.z + rimOverlapZ * domeAssist - sz * q.z, 0.08);
-	float wx = 1.0 - smoothstep(h.x - 0.02, h.x + 0.24, abs(q.x));
-	vec2 pushZ = vec2(0.0, sz * penZ * wx);
+	// Only vertices on the obstacle's side of the slime center (proj > 0) are compressed toward clearX/clearZ
+	float projX = dirToObsX * pRot.x;
+	float projZ = dirToObsZ * pRot.y;
+	float halfMaskX = smoothstep(0.0, 0.14, projX);
+	float halfMaskZ = smoothstep(0.0, 0.14, projZ);
 
+	// Proportional compression ratio (0 when clear >= maxBellyR, up to 1 - clear/maxBellyR when touching)
+	float ratioX = smax0(1.0 - clearX / maxBellyR, 0.04);
+	float ratioZ = smax0(1.0 - clearZ / maxBellyR, 0.04);
+
+	float wz = 1.0 - smoothstep(h.z - 0.02, h.z + 0.26, abs(q.z));
+	float wx = 1.0 - smoothstep(h.x - 0.02, h.x + 0.26, abs(q.x));
+
+	// Push inward (towards slime center) proportionally to pRot so rings stay evenly ordered and never fold
+	vec2 pushX = vec2(-pRot.x * ratioX * halfMaskX * wz, 0.0);
+	vec2 pushZ = vec2(0.0, -pRot.y * ratioZ * halfMaskZ * wx);
+
+	float ox = abs(cRot.x) - h.x;
+	float oz = abs(cRot.y) - h.z;
 	float inX = h.x - abs(q.x);
 	float inZ = h.z - abs(q.z);
 	float cornerFaceW = smoothstep(-0.20, 0.20, inZ - inX);
 	float sideOnlyX = smoothstep(-0.10, 0.10, ox);
 	float sideOnlyZ = smoothstep(-0.10, 0.10, oz);
 	float faceW = mix(sideOnlyX, cornerFaceW, sideOnlyX * sideOnlyZ);
-	float cornerBoost = 1.0 + 1.68 * faceW * (1.0 - faceW);
-	vec2 pushXZ = mix(pushZ, pushX, faceW) * (cornerBoost * winY);
+
+	vec2 pushXZ = mix(pushZ, pushX, faceW) * winY;
 
 	float compressAmt = length(pushXZ);
-	float domeLift = smax0(compressAmt - 0.02, 0.08) * 0.12 * (1.0 - rho * 0.60) * smoothstep(-0.8, 0.4, p.y);
+	float domeLift = smax0(compressAmt - 0.02, 0.08) * 0.12 * (1.0 - rho * 0.55) * smoothstep(-0.8, 0.4, p.y);
 	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
 	return vec3(worldPushXZ.x, domeLift, worldPushXZ.y);
 }
