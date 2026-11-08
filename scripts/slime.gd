@@ -487,13 +487,13 @@ static func _lod_mesh(level: int) -> SphereMesh:
 		var hi := SphereMesh.new()
 		hi.radius = 1.6
 		hi.height = 3.2
-		hi.radial_segments = 64
-		hi.rings = 48
+		hi.radial_segments = 40
+		hi.rings = 28
 		var lo := SphereMesh.new()
 		lo.radius = 1.6
 		lo.height = 3.2
-		lo.radial_segments = 24
-		lo.rings = 16
+		lo.radial_segments = 20
+		lo.rings = 14
 		_lod_meshes = [hi, lo]
 	return _lod_meshes[clampi(level, 0, _lod_meshes.size() - 1)]
 

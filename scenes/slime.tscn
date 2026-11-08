@@ -53,8 +53,8 @@ shader_parameter/uSplitDir = Vector3(0, 0, -1)
 [sub_resource type="SphereMesh" id="SphereMesh_body"]
 radius = 1.6
 height = 3.2
-radial_segments = 64
-rings = 48
+radial_segments = 40
+rings = 28
 
 [node name="Slime" type="Node3D" node_paths=PackedStringArray("body")]
 script = ExtResource("2_script")

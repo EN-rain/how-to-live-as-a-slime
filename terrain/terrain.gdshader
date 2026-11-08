@@ -1,69 +1,99 @@
 shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_disabled;
 
-group_uniforms TerrainTexture;
-uniform sampler2D terrain_texture : source_color, filter_linear_mipmap, repeat_enable;
-uniform sampler2D terrain_normal : hint_normal, filter_linear_mipmap, repeat_enable;
-uniform vec3 terrain_tint : source_color = vec3(0.56, 0.42, 0.28);
-uniform vec3 terrain_dark_tint : source_color = vec3(0.38, 0.27, 0.18);
-uniform float terrain_uv_scale : hint_range(0.01, 2.0, 0.01) = 0.12;
-uniform float terrain_roughness : hint_range(0.0, 1.0, 0.01) = 0.88;
+group_uniforms MeadowGrass;
+uniform vec3 grass_sun_color : source_color = vec3(0.45, 0.75, 0.26);
+uniform vec3 grass_mid_color : source_color = vec3(0.29, 0.60, 0.20);
+uniform vec3 grass_deep_color : source_color = vec3(0.18, 0.44, 0.15);
 
-group_uniforms GrassTexture;
-uniform sampler2D grass_texture : source_color, filter_linear_mipmap, repeat_enable;
-uniform sampler2D grass_normal : hint_normal, filter_linear_mipmap, repeat_enable;
-uniform vec3 grass_light_tint : source_color = vec3(0.42, 0.74, 0.28);
-uniform vec3 grass_dark_tint : source_color = vec3(0.22, 0.52, 0.18);
-uniform float grass_uv_scale : hint_range(0.01, 2.0, 0.01) = 0.18;
-uniform float grass_roughness : hint_range(0.0, 1.0, 0.01) = 0.72;
+group_uniforms SoilAndRock;
+uniform vec3 dirt_light_color : source_color = vec3(0.58, 0.44, 0.30);
+uniform vec3 dirt_dark_color : source_color = vec3(0.39, 0.28, 0.18);
+uniform vec3 rock_light_color : source_color = vec3(0.52, 0.50, 0.47);
+uniform vec3 rock_dark_color : source_color = vec3(0.34, 0.32, 0.30);
 
-group_uniforms Blending;
-uniform sampler2D blend_noise : filter_linear_mipmap, repeat_enable;
-uniform float blend_uv_scale : hint_range(0.005, 0.5, 0.005) = 0.035;
-uniform float slope_threshold : hint_range(0.0, 1.0, 0.01) = 0.82;
-uniform float slope_softness : hint_range(0.01, 0.5, 0.01) = 0.12;
-uniform float patch_strength : hint_range(0.0, 1.0, 0.01) = 0.28;
-uniform float normal_strength : hint_range(0.0, 2.0, 0.05) = 0.65;
+group_uniforms SurfaceTuning;
+uniform float detail_scale : hint_range(0.5, 10.0, 0.1) = 2.4;
+uniform float micro_scale : hint_range(5.0, 40.0, 0.5) = 18.0;
+uniform float macro_scale : hint_range(0.01, 0.3, 0.005) = 0.07;
+uniform float slope_threshold : hint_range(0.5, 0.98, 0.01) = 0.85;
+uniform float slope_softness : hint_range(0.02, 0.3, 0.01) = 0.08;
+uniform float dirt_patch_amount : hint_range(0.0, 1.0, 0.01) = 0.26;
+uniform float relief_strength : hint_range(0.0, 0.5, 0.01) = 0.22;
+uniform float surface_roughness : hint_range(0.0, 1.0, 0.01) = 0.92;
 
-varying vec3 v_world_pos;
-varying vec3 v_world_normal;
+varying vec2 v_xz;
+varying float v_macro_n;
+varying float v_rock_mask;
+varying float v_height_shade;
+
+float hash21(vec2 p) {
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
+}
+
+float value_noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	float a = hash21(i);
+	float b = hash21(i + vec2(1.0, 0.0));
+	float c = hash21(i + vec2(0.0, 1.0));
+	float d = hash21(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
 
 void vertex() {
-	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	v_world_normal = normalize((MODEL_NORMAL_MATRIX * NORMAL));
+	vec3 world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 world_normal = normalize(MODEL_NORMAL_MATRIX * NORMAL);
+	v_xz = world_pos.xz;
+
+	// Precompute low-frequency macro noise, slope rock mask, and height shading per-vertex (400x cheaper than per-pixel)
+	float m1 = value_noise(v_xz * macro_scale + vec2(11.3, -7.9));
+	float m2 = value_noise(v_xz * (macro_scale * 2.1) + vec2(-5.4, 19.1));
+	v_macro_n = m1 * 0.65 + m2 * 0.35;
+
+	float upness = clamp(world_normal.y, 0.0, 1.0);
+	v_rock_mask = 1.0 - smoothstep(slope_threshold - slope_softness, slope_threshold + slope_softness, upness);
+	v_height_shade = clamp(0.95 + world_pos.y * 0.025, 0.86, 1.10);
 }
 
 void fragment() {
-	vec2 terrain_uv = v_world_pos.xz * terrain_uv_scale;
-	vec2 grass_uv = v_world_pos.xz * grass_uv_scale;
-	vec2 macro_uv = v_world_pos.xz * blend_uv_scale;
+	// Only 3 fast value_noise evaluations per pixel total
+	float n_med_a = value_noise(v_xz * detail_scale);
+	float n_med_b = value_noise(v_xz * (detail_scale * 2.3) + vec2(17.1, 9.4));
+	float med_n = n_med_a * 0.6 + n_med_b * 0.4;
 
-	// Sample terrain (dirt / soil / rock) texture at two scales to avoid tiling repetition
-	vec3 t_sample_a = texture(terrain_texture, terrain_uv).rgb;
-	vec3 t_sample_b = texture(terrain_texture, terrain_uv * 0.37 + vec2(0.41, 0.19)).rgb;
-	float t_luma = dot(mix(t_sample_a, t_sample_b, 0.45), vec3(0.299, 0.587, 0.114));
-	vec3 dirt_col = mix(terrain_dark_tint, terrain_tint, clamp(t_luma * 1.35, 0.0, 1.0)) * mix(vec3(0.85), t_sample_a * 1.25, 0.55);
+	float fw = length(fwidth(v_xz));
+	float micro_fade = 1.0 - smoothstep(0.025, 0.16, fw);
+	float fine_n = value_noise(v_xz * micro_scale);
+	float micro_grain = mix(0.5, fine_n, micro_fade);
 
-	// Sample grass surface texture at two scales
-	vec3 g_sample_a = texture(grass_texture, grass_uv).rgb;
-	vec3 g_sample_b = texture(grass_texture, grass_uv * 0.31 + vec2(0.73, 0.29)).rgb;
-	float g_luma = dot(mix(g_sample_a, g_sample_b, 0.5), vec3(0.299, 0.587, 0.114));
-	vec3 grass_col = mix(grass_dark_tint, grass_light_tint, clamp(g_luma * 1.3, 0.0, 1.0)) * mix(vec3(0.88), g_sample_a * 1.2, 0.5);
+	// 1. Meadow Grass Color
+	vec3 g_col = mix(grass_deep_color, grass_mid_color, smoothstep(0.22, 0.78, v_macro_n));
+	g_col = mix(g_col, grass_sun_color, smoothstep(0.35, 0.80, med_n) * 0.75);
+	g_col *= mix(0.85, 1.14, micro_grain);
 
-	// Blend factor based on surface slope + organic macro patches
-	float macro = texture(blend_noise, macro_uv).r;
-	float upness = clamp(v_world_normal.y, 0.0, 1.0);
-	float slope_mask = smoothstep(slope_threshold - slope_softness, slope_threshold + slope_softness, upness);
-	float patch_mask = smoothstep(0.28, 0.62, macro + (1.0 - patch_strength) * 0.35);
-	float grass_weight = clamp(slope_mask * patch_mask, 0.0, 1.0);
+	// 2. Soil Patch Color
+	vec3 d_col = mix(dirt_dark_color, dirt_light_color, smoothstep(0.20, 0.80, med_n));
+	d_col *= mix(0.84, 1.15, micro_grain);
 
-	ALBEDO = mix(dirt_col, grass_col, grass_weight);
-	ROUGHNESS = mix(terrain_roughness, grass_roughness, grass_weight);
+	// 3. Slope Rock Color
+	vec3 r_col = mix(rock_dark_color, rock_light_color, smoothstep(0.25, 0.75, n_med_b));
+	r_col *= mix(0.86, 1.12, micro_grain);
+
+	// 4. Blend Layers
+	float patch_field = v_macro_n * 0.60 + med_n * 0.40;
+	float grass_patch = smoothstep(dirt_patch_amount - 0.05, dirt_patch_amount + 0.07, patch_field);
+	vec3 ground_col = mix(d_col, g_col, grass_patch);
+	ground_col = mix(ground_col, r_col, v_rock_mask);
+
+	// 5. Zero-cost screen-space derivative relief shading (no extra noise samples needed)
+	float grad = (dFdx(fine_n) + dFdy(fine_n)) * micro_fade;
+	float relief = 1.0 + clamp(grad * relief_strength * 2.5, -0.14, 0.14);
+
+	ALBEDO = ground_col * v_height_shade * relief;
+	ROUGHNESS = surface_roughness;
 	METALLIC = 0.0;
-	SPECULAR = 0.25;
-
-	vec3 t_norm = texture(terrain_normal, terrain_uv).rgb;
-	vec3 g_norm = texture(grass_normal, grass_uv).rgb;
-	NORMAL_MAP = mix(t_norm, g_norm, grass_weight);
-	NORMAL_MAP_DEPTH = normal_strength;
 }

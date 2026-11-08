@@ -4,131 +4,42 @@
 [ext_resource type="Shader" path="res://terrain/terrain.gdshader" id="2_terrain_shader"]
 [ext_resource type="Shader" path="res://terrain/grass.gdshader" id="3_grass_shader"]
 
-[sub_resource type="Gradient" id="Gradient_terrain"]
-offsets = PackedFloat32Array(0, 0.45, 0.8, 1)
-colors = PackedColorArray(0.36, 0.25, 0.16, 1, 0.52, 0.38, 0.24, 1, 0.64, 0.49, 0.33, 1, 0.72, 0.58, 0.42, 1)
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_terrain"]
-noise_type = 3
-seed = 101
-frequency = 0.045
-fractal_type = 1
-fractal_octaves = 4
-fractal_lacunarity = 2.1
-fractal_gain = 0.55
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_terrain_albedo"]
-width = 256
-height = 256
-seamless = true
-color_ramp = SubResource("Gradient_terrain")
-noise = SubResource("FastNoiseLite_terrain")
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_terrain_normal"]
-width = 256
-height = 256
-seamless = true
-as_normal_map = true
-bump_strength = 6.0
-noise = SubResource("FastNoiseLite_terrain")
-
-[sub_resource type="Gradient" id="Gradient_grass"]
-offsets = PackedFloat32Array(0, 0.4, 0.75, 1)
-colors = PackedColorArray(0.18, 0.44, 0.15, 1, 0.28, 0.58, 0.21, 1, 0.39, 0.7, 0.27, 1, 0.5, 0.8, 0.33, 1)
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_grass"]
-noise_type = 2
-seed = 202
-frequency = 0.065
-fractal_type = 1
-fractal_octaves = 4
-fractal_lacunarity = 2.2
-fractal_gain = 0.5
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_grass_albedo"]
-width = 256
-height = 256
-seamless = true
-color_ramp = SubResource("Gradient_grass")
-noise = SubResource("FastNoiseLite_grass")
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_grass_normal"]
-width = 256
-height = 256
-seamless = true
-as_normal_map = true
-bump_strength = 4.5
-noise = SubResource("FastNoiseLite_grass")
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_blend"]
-noise_type = 3
-seed = 303
-frequency = 0.025
-fractal_type = 1
-fractal_octaves = 3
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_blend"]
-width = 256
-height = 256
-seamless = true
-noise = SubResource("FastNoiseLite_blend")
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_terrain"]
 render_priority = 0
 shader = ExtResource("2_terrain_shader")
-shader_parameter/terrain_texture = SubResource("NoiseTexture2D_terrain_albedo")
-shader_parameter/terrain_normal = SubResource("NoiseTexture2D_terrain_normal")
-shader_parameter/terrain_tint = Color(0.56, 0.42, 0.28, 1)
-shader_parameter/terrain_dark_tint = Color(0.38, 0.27, 0.18, 1)
-shader_parameter/terrain_uv_scale = 0.12
-shader_parameter/terrain_roughness = 0.88
-shader_parameter/grass_texture = SubResource("NoiseTexture2D_grass_albedo")
-shader_parameter/grass_normal = SubResource("NoiseTexture2D_grass_normal")
-shader_parameter/grass_light_tint = Color(0.42, 0.74, 0.28, 1)
-shader_parameter/grass_dark_tint = Color(0.22, 0.52, 0.18, 1)
-shader_parameter/grass_uv_scale = 0.18
-shader_parameter/grass_roughness = 0.72
-shader_parameter/blend_noise = SubResource("NoiseTexture2D_blend")
-shader_parameter/blend_uv_scale = 0.035
-shader_parameter/slope_threshold = 0.82
-shader_parameter/slope_softness = 0.12
-shader_parameter/patch_strength = 0.28
-shader_parameter/normal_strength = 0.65
+shader_parameter/grass_sun_color = Color(0.45, 0.75, 0.26, 1)
+shader_parameter/grass_mid_color = Color(0.29, 0.6, 0.2, 1)
+shader_parameter/grass_deep_color = Color(0.18, 0.44, 0.15, 1)
+shader_parameter/dirt_light_color = Color(0.58, 0.44, 0.3, 1)
+shader_parameter/dirt_dark_color = Color(0.39, 0.28, 0.18, 1)
+shader_parameter/rock_light_color = Color(0.52, 0.5, 0.47, 1)
+shader_parameter/rock_dark_color = Color(0.34, 0.32, 0.3, 1)
+shader_parameter/detail_scale = 2.4
+shader_parameter/micro_scale = 18.0
+shader_parameter/macro_scale = 0.07
+shader_parameter/slope_threshold = 0.85
+shader_parameter/slope_softness = 0.08
+shader_parameter/dirt_patch_amount = 0.26
+shader_parameter/relief_strength = 0.22
+shader_parameter/surface_roughness = 0.92
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_terrain_initial"]
 size = Vector2(160, 160)
-subdivide_width = 96
-subdivide_depth = 96
+subdivide_width = 48
+subdivide_depth = 48
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_terrain_initial"]
 size = Vector3(160, 1, 160)
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_wind"]
-noise_type = 3
-seed = 404
-frequency = 0.03
-fractal_type = 1
-fractal_octaves = 2
-
-[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_wind"]
-width = 128
-height = 128
-seamless = true
-noise = SubResource("FastNoiseLite_wind")
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_grass"]
 render_priority = 0
 shader = ExtResource("3_grass_shader")
-shader_parameter/grass_texture = SubResource("NoiseTexture2D_grass_albedo")
-shader_parameter/base_color = Color(0.18, 0.46, 0.15, 1)
-shader_parameter/tip_color = Color(0.54, 0.86, 0.34, 1)
-shader_parameter/world_uv_scale = 0.08
-shader_parameter/roughness = 0.62
-shader_parameter/wind_noise = SubResource("NoiseTexture2D_wind")
-shader_parameter/wind_speed = 1.25
-shader_parameter/wind_strength = 0.28
-shader_parameter/wind_direction = Vector2(1, 0.4)
-shader_parameter/wind_scale = 0.06
+shader_parameter/grass_sun_color = Color(0.45, 0.75, 0.26, 1)
+shader_parameter/grass_mid_color = Color(0.29, 0.6, 0.2, 1)
+shader_parameter/grass_deep_color = Color(0.18, 0.44, 0.15, 1)
+shader_parameter/tip_color = Color(0.56, 0.85, 0.32, 1)
+shader_parameter/macro_scale = 0.07
+shader_parameter/roughness = 0.92
 
 [sub_resource type="MultiMesh" id="MultiMesh_grass"]
 transform_format = 1
@@ -138,6 +49,7 @@ script = ExtResource("1_terrain_script")
 
 [node name="Terrain" type="MeshInstance3D" parent="."]
 material_override = SubResource("ShaderMaterial_terrain")
+cast_shadow = 0
 mesh = SubResource("PlaneMesh_terrain_initial")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="Terrain"]
@@ -148,4 +60,7 @@ shape = SubResource("BoxShape3D_terrain_initial")
 [node name="Grass" type="MultiMeshInstance3D" parent="."]
 material_override = SubResource("ShaderMaterial_grass")
 cast_shadow = 0
+visibility_range_end = 55.0
+visibility_range_end_margin = 8.0
+visibility_range_fade_mode = 1
 multimesh = SubResource("MultiMesh_grass")

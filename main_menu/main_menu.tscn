@@ -1,0 +1,962 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://main_menu/main_menu.gd" id="1_menu_script"]
+[ext_resource type="Shader" path="res://shaders/slime.gdshader" id="2_slime_shader"]
+[ext_resource type="Shader" path="res://shaders/floor.gdshader" id="3_floor_shader"]
+[ext_resource type="Shader" path="res://shaders/prop.gdshader" id="4_prop_shader"]
+
+[sub_resource type="Environment" id="Environment_menu"]
+background_mode = 1
+background_color = Color(0.337, 0.471, 0.565, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.859, 0.918, 0.996, 1)
+ambient_light_energy = 0.85
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.337, 0.471, 0.565, 1)
+fog_density = 1.0
+fog_depth_begin = 22.0
+fog_depth_end = 85.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_floor"]
+render_priority = 0
+shader = ExtResource("3_floor_shader")
+shader_parameter/uDevTexture = false
+shader_parameter/uCellSize = 1.0
+shader_parameter/uMajorEvery = 4.0
+shader_parameter/uLightCell = Color(0.46, 0.5, 0.54, 1)
+shader_parameter/uDarkCell = Color(0.37, 0.41, 0.45, 1)
+shader_parameter/uMinorLine = Color(0.3, 0.34, 0.38, 1)
+shader_parameter/uMajorLine = Color(0.85, 0.91, 0.97, 1)
+shader_parameter/uMinorWidth = 0.025
+shader_parameter/uMajorWidth = 0.02
+shader_parameter/uMinorAlpha = 0.6
+shader_parameter/uMajorAlpha = 0.85
+shader_parameter/uFadeStart = 0.35
+shader_parameter/uFadeEnd = 0.8
+shader_parameter/uTiles = 100.0
+shader_parameter/uPlaneSize = 400.0
+shader_parameter/uBaseColor = Color(0.435, 0.49, 0.549, 1)
+shader_parameter/uEdgeColor = Color(0.824, 0.91, 0.98, 1)
+shader_parameter/uEdgeAlpha = 0.55
+shader_parameter/uMidAlpha = 0.18
+shader_parameter/uEdgeHalfWidth = 0.00390625
+shader_parameter/uMidHalfWidth = 0.001953125
+shader_parameter/uAmbientColor = Color(0.859, 0.918, 0.996, 1)
+shader_parameter/uAmbientEnergy = 0.85
+shader_parameter/uLightColor = Color(1, 1, 1, 1)
+shader_parameter/uLightEnergy = 0.9
+shader_parameter/uLightDir = Vector3(4, 8, 5)
+shader_parameter/uFogColor = Color(0.337, 0.471, 0.565, 1)
+shader_parameter/uFogNear = 22.0
+shader_parameter/uFogFar = 85.0
+shader_parameter/uShadowColor = Color(0.039, 0.078, 0.137, 1)
+shader_parameter/uShadowInnerAlpha = 0.6
+shader_parameter/uShadowMidAlpha = 0.35
+shader_parameter/uShadowMidStop = 0.7
+shader_parameter/uShadowInnerStop = 0.0625
+shader_parameter/uShadowRadius = 2.0
+shader_parameter/uBlobCount = 3
+shader_parameter/uBlobPos = PackedVector3Array(1.55, 0.18, 0.35, 3.45, -0.46, -1.15, 0.15, -0.62, -1.85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+shader_parameter/uBlobScale = PackedFloat32Array(1.08, 0.56, 0.44, 0, 0, 0, 0, 0)
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
+size = Vector2(400, 400)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_slime"]
+render_priority = 0
+shader = ExtResource("2_slime_shader")
+shader_parameter/uJiggleStrength = 1.0
+shader_parameter/uDispersion = 0.85
+shader_parameter/uRefractionStrength = 0.32
+shader_parameter/uRippleNoiseScale = 1.65
+shader_parameter/uBubbleNoiseScale = 3.5
+shader_parameter/uRimStrength = 1.15
+shader_parameter/uOpacity = 0.48
+shader_parameter/uNightMode = 0.0
+shader_parameter/uTopGlow = Vector3(0.08, 0.18, 0.28)
+shader_parameter/uBubbleBoost = 1.4
+shader_parameter/uDayShallow = Color(0.52, 0.82, 0.98, 1)
+shader_parameter/uDayDeep = Color(0.28, 0.62, 0.9, 1)
+shader_parameter/uNightShallow = Color(0.22, 0.64, 0.94, 1)
+shader_parameter/uNightDeep = Color(0.08, 0.32, 0.64, 1)
+shader_parameter/uRimDay = Color(0.8, 0.96, 1, 1)
+shader_parameter/uRimNight = Color(0.62, 0.92, 1, 1)
+shader_parameter/uOutlineDay = Color(0.16, 0.34, 0.52, 1)
+shader_parameter/uOutlineNight = Color(0.04, 0.12, 0.24, 1)
+shader_parameter/uCausticA = Color(0.18, 0.92, 0.62, 1)
+shader_parameter/uCausticB = Color(0.42, 0.98, 0.35, 1)
+shader_parameter/uBubbleColor = Color(0.85, 1, 0.95, 1)
+shader_parameter/uEyeColor = Color(1, 1, 1, 1)
+shader_parameter/uEyeSeparation = 0.32
+shader_parameter/uEyeSize = Vector2(0.11, 0.17)
+shader_parameter/uEyeElevation = 0.12
+shader_parameter/uMelt = 0.28
+shader_parameter/uImpulseTime = 10.0
+shader_parameter/uImpulsePos = Vector3(0, 0.5, 1)
+shader_parameter/uImpulseVector = Vector3(0, 0, 0)
+shader_parameter/uImpulse2Time = 10.0
+shader_parameter/uImpulse2Pos = Vector3(0, 0.5, 1)
+shader_parameter/uImpulse2Vector = Vector3(0, 0, 0)
+shader_parameter/uMoveDir = Vector3(0, 0, 1)
+shader_parameter/uMoveAmt = 0.08
+shader_parameter/uCrawl = 0.0
+shader_parameter/uLean = Vector3(0, 0, 0)
+shader_parameter/uRippleIntensity = 0.14
+shader_parameter/uFacing = -0.22
+shader_parameter/uBlink = 1.0
+shader_parameter/uLiquidHeight = 1.0
+shader_parameter/uLiquidSpread = 1.0
+shader_parameter/uSplitAmt = 0.0
+shader_parameter/uSplitDir = Vector3(0, 0, -1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_slime"]
+radius = 1.6
+height = 3.2
+radial_segments = 40
+rings = 28
+
+[sub_resource type="SphereMesh" id="SphereMesh_core"]
+radius = 1.0
+height = 2.0
+radial_segments = 32
+rings = 16
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_core"]
+albedo_color = Color(0.1, 0.5, 0.9, 1)
+metallic = 0.12
+roughness = 0.2
+emission_enabled = true
+emission = Color(0.22, 0.85, 1, 1)
+emission_energy_multiplier = 0.7
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_prop_teal"]
+render_priority = 0
+shader = ExtResource("4_prop_shader")
+shader_parameter/uColor = Color(0.32, 0.78, 0.74, 1)
+shader_parameter/uRoughness = 0.55
+shader_parameter/uMetallic = 0.05
+shader_parameter/uFlatShading = true
+shader_parameter/uDissolve = 0.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_prop_coral"]
+render_priority = 0
+shader = ExtResource("4_prop_shader")
+shader_parameter/uColor = Color(0.92, 0.48, 0.42, 1)
+shader_parameter/uRoughness = 0.55
+shader_parameter/uMetallic = 0.05
+shader_parameter/uFlatShading = true
+shader_parameter/uDissolve = 0.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_prop_gold"]
+render_priority = 0
+shader = ExtResource("4_prop_shader")
+shader_parameter/uColor = Color(0.94, 0.74, 0.36, 1)
+shader_parameter/uRoughness = 0.55
+shader_parameter/uMetallic = 0.05
+shader_parameter/uFlatShading = true
+shader_parameter/uDissolve = 0.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_prop_lime"]
+render_priority = 0
+shader = ExtResource("4_prop_shader")
+shader_parameter/uColor = Color(0.56, 0.86, 0.38, 1)
+shader_parameter/uRoughness = 0.55
+shader_parameter/uMetallic = 0.05
+shader_parameter/uFlatShading = true
+shader_parameter/uDissolve = 0.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_prop_gate"]
+render_priority = 0
+shader = ExtResource("4_prop_shader")
+shader_parameter/uColor = Color(0.34, 0.68, 0.88, 1)
+shader_parameter/uRoughness = 0.55
+shader_parameter/uMetallic = 0.05
+shader_parameter/uFlatShading = true
+shader_parameter/uDissolve = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube_s"]
+size = Vector3(0.65, 0.65, 0.65)
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube_m"]
+size = Vector3(0.95, 0.95, 0.95)
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube_l"]
+size = Vector3(1.35, 1.35, 1.35)
+
+[sub_resource type="BoxMesh" id="BoxMesh_pillar"]
+size = Vector3(1.3, 2.8, 1.3)
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_pill"]
+content_margin_left = 14.0
+content_margin_top = 6.0
+content_margin_right = 14.0
+content_margin_bottom = 6.0
+bg_color = Color(0.0627451, 0.12549, 0.188235, 0.68)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.52, 0.82, 0.98, 0.28)
+corner_radius_top_left = 999
+corner_radius_top_right = 999
+corner_radius_bottom_right = 999
+corner_radius_bottom_left = 999
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_glass_card"]
+content_margin_left = 22.0
+content_margin_top = 20.0
+content_margin_right = 22.0
+content_margin_bottom = 20.0
+bg_color = Color(0.055, 0.115, 0.175, 0.76)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.56, 0.85, 0.98, 0.32)
+corner_radius_top_left = 20
+corner_radius_top_right = 20
+corner_radius_bottom_right = 20
+corner_radius_bottom_left = 20
+shadow_color = Color(0.02, 0.05, 0.09, 0.35)
+shadow_size = 18
+shadow_offset = Vector2(0, 8)
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_play_normal"]
+content_margin_left = 20.0
+content_margin_top = 13.0
+content_margin_right = 20.0
+content_margin_bottom = 13.0
+bg_color = Color(0.14, 0.62, 0.82, 0.92)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.68, 0.96, 1, 0.85)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+shadow_color = Color(0.08, 0.45, 0.68, 0.38)
+shadow_size = 12
+shadow_offset = Vector2(0, 4)
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_play_hover"]
+content_margin_left = 20.0
+content_margin_top = 13.0
+content_margin_right = 20.0
+content_margin_bottom = 13.0
+bg_color = Color(0.2, 0.72, 0.92, 0.98)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.85, 0.99, 1, 1)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+shadow_color = Color(0.18, 0.72, 0.95, 0.5)
+shadow_size = 16
+shadow_offset = Vector2(0, 5)
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_play_pressed"]
+content_margin_left = 20.0
+content_margin_top = 13.0
+content_margin_right = 20.0
+content_margin_bottom = 13.0
+bg_color = Color(0.1, 0.5, 0.7, 0.98)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.52, 0.88, 0.98, 0.9)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_btn_normal"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.063, 0.13, 0.196, 0.72)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.52, 0.82, 0.98, 0.3)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_btn_hover"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.11, 0.22, 0.32, 0.88)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.58, 0.9, 1, 0.7)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_btn_pressed"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.05, 0.1, 0.16, 0.92)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.42, 0.78, 0.96, 0.85)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_key_badge"]
+content_margin_left = 9.0
+content_margin_top = 3.0
+content_margin_right = 9.0
+content_margin_bottom = 3.0
+bg_color = Color(0.12, 0.25, 0.36, 0.85)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.52, 0.86, 1, 0.45)
+corner_radius_top_left = 7
+corner_radius_top_right = 7
+corner_radius_bottom_right = 7
+corner_radius_bottom_left = 7
+
+[node name="MainMenu" type="Node3D"]
+script = ExtResource("1_menu_script")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_menu")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.7809, -0.4877, 0.3904, 0, 0.625, 0.7807, -0.6247, -0.6096, 0.488, 4, 8, 5)
+light_energy = 0.9
+
+[node name="CameraRig" type="Node3D" parent="."]
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig"]
+transform = Transform3D(0.9998, 0.0029, 0.0196, 0, 0.9891, -0.1474, -0.0198, 0.1474, 0.9889, 0.55, 0.95, 6.35)
+current = true
+fov = 42.0
+near = 0.1
+far = 100.0
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.2, 0)
+material_override = SubResource("ShaderMaterial_floor")
+cast_shadow = 0
+mesh = SubResource("PlaneMesh_floor")
+
+[node name="StageProps" type="Node3D" parent="."]
+
+[node name="EdibleCubeSmall" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.9239, 0, 0.3827, 0, 1, 0, -0.3827, 0, 0.9239, 3.35, -0.875, 1.65)
+material_override = SubResource("ShaderMaterial_prop_lime")
+mesh = SubResource("BoxMesh_cube_s")
+
+[node name="EdibleCubeMed" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.8192, 0, -0.5736, 0, 1, 0, 0.5736, 0, 0.8192, -1.35, -0.725, -0.95)
+material_override = SubResource("ShaderMaterial_prop_gold")
+mesh = SubResource("BoxMesh_cube_m")
+
+[node name="EdibleCubeLarge" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.9063, 0, 0.4226, 0, 1, 0, -0.4226, 0, 0.9063, 4.55, -0.525, -2.55)
+material_override = SubResource("ShaderMaterial_prop_coral")
+mesh = SubResource("BoxMesh_cube_l")
+
+[node name="EdibleCubeBack" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.7071, 0, 0.7071, 0, 1, 0, -0.7071, 0, 0.7071, -3.2, -0.725, -3.6)
+material_override = SubResource("ShaderMaterial_prop_teal")
+mesh = SubResource("BoxMesh_cube_m")
+
+[node name="GatePillarL" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.9659, 0, -0.2588, 0, 1, 0, 0.2588, 0, 0.9659, 0.45, 0.2, -5.2)
+material_override = SubResource("ShaderMaterial_prop_gate")
+mesh = SubResource("BoxMesh_pillar")
+
+[node name="GatePillarR" type="MeshInstance3D" parent="StageProps"]
+transform = Transform3D(0.9659, 0, -0.2588, 0, 1, 0, 0.2588, 0, 0.9659, 3.15, 0.2, -4.45)
+material_override = SubResource("ShaderMaterial_prop_gate")
+mesh = SubResource("BoxMesh_pillar")
+
+[node name="SlimeStage" type="Node3D" parent="."]
+
+[node name="HeroSlime" type="MeshInstance3D" parent="SlimeStage"]
+transform = Transform3D(1.08, 0, 0, 0, 1.08, 0, 0, 0, 1.08, 1.55, 0.199, 0.35)
+material_override = SubResource("ShaderMaterial_slime")
+cast_shadow = 0
+extra_cull_margin = 4.0
+mesh = SubResource("SphereMesh_slime")
+
+[node name="CoreSphere" type="MeshInstance3D" parent="SlimeStage/HeroSlime"]
+transform = Transform3D(0.154, 0, 0, 0, 0.154, 0, 0, 0, 0.154, 0, -0.128, 0)
+material_override = SubResource("StandardMaterial3D_core")
+cast_shadow = 0
+mesh = SubResource("SphereMesh_core")
+
+[node name="FollowerSlime" type="MeshInstance3D" parent="SlimeStage"]
+transform = Transform3D(0.56, 0, 0, 0, 0.56, 0, 0, 0, 0.56, 3.45, -0.465, -1.15)
+material_override = SubResource("ShaderMaterial_slime")
+cast_shadow = 0
+extra_cull_margin = 4.0
+mesh = SubResource("SphereMesh_slime")
+
+[node name="CoreSphere" type="MeshInstance3D" parent="SlimeStage/FollowerSlime"]
+transform = Transform3D(0.154, 0, 0, 0, 0.154, 0, 0, 0, 0.154, 0, -0.128, 0)
+material_override = SubResource("StandardMaterial3D_core")
+cast_shadow = 0
+mesh = SubResource("SphereMesh_core")
+
+[node name="RoamerSlime" type="MeshInstance3D" parent="SlimeStage"]
+transform = Transform3D(0.44, 0, 0, 0, 0.44, 0, 0, 0, 0.44, 0.15, -0.618, -1.85)
+material_override = SubResource("ShaderMaterial_slime")
+cast_shadow = 0
+extra_cull_margin = 4.0
+mesh = SubResource("SphereMesh_slime")
+
+[node name="CoreSphere" type="MeshInstance3D" parent="SlimeStage/RoamerSlime"]
+transform = Transform3D(0.154, 0, 0, 0, 0.154, 0, 0, 0, 0.154, 0, -0.128, 0)
+material_override = SubResource("StandardMaterial3D_core")
+cast_shadow = 0
+mesh = SubResource("SphereMesh_core")
+
+[node name="MenuLayer" type="CanvasLayer" parent="."]
+
+[node name="MenuRoot" type="Control" parent="MenuLayer"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="TopBar" type="HBoxContainer" parent="MenuLayer/MenuRoot"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 24.0
+offset_top = 18.0
+offset_right = -24.0
+offset_bottom = 52.0
+grow_horizontal = 2
+mouse_filter = 2
+theme_override_constants/separation = 12
+
+[node name="BrandPill" type="PanelContainer" parent="MenuLayer/MenuRoot/TopBar"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_pill")
+
+[node name="BrandLabel" type="Label" parent="MenuLayer/MenuRoot/TopBar/BrandPill"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.918, 0.957, 0.984, 1)
+theme_override_font_sizes/font_size = 12
+text = "SLIME ECOSYSTEM  ·  CORE-SPHERE SOFT BODY SANDBOX"
+
+[node name="Spacer" type="Control" parent="MenuLayer/MenuRoot/TopBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="StatusPill" type="PanelContainer" parent="MenuLayer/MenuRoot/TopBar"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_pill")
+
+[node name="StatusLabel" type="Label" parent="MenuLayer/MenuRoot/TopBar/StatusPill"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "Interactive Stage  ·  Click any slime in 3D to poke!"
+
+[node name="MainLayout" type="HBoxContainer" parent="MenuLayer/MenuRoot"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 28.0
+offset_top = 66.0
+offset_right = -28.0
+offset_bottom = -58.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="LeftColumn" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout"]
+custom_minimum_size = Vector2(390, 0)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_override_constants/separation = 16
+
+[node name="TitleCard" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_glass_card")
+
+[node name="TitleMargin" type="MarginContainer" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard"]
+layout_mode = 2
+mouse_filter = 2
+
+[node name="TitleVBox" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 6
+
+[node name="TagLabel" type="Label" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin/TitleVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.45, 0.92, 0.76, 1)
+theme_override_font_sizes/font_size = 11
+text = "3D ANIME SLIME SIMULATION"
+
+[node name="TitleLine1" type="Label" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin/TitleVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.94, 0.97, 1, 1)
+theme_override_colors/font_shadow_color = Color(0.04, 0.1, 0.18, 0.7)
+theme_override_constants/shadow_offset_x = 0
+theme_override_constants/shadow_offset_y = 3
+theme_override_font_sizes/font_size = 34
+text = "HOW TO LIVE"
+
+[node name="TitleLine2" type="Label" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin/TitleVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.52, 0.86, 1, 1)
+theme_override_colors/font_shadow_color = Color(0.04, 0.12, 0.22, 0.75)
+theme_override_constants/shadow_offset_x = 0
+theme_override_constants/shadow_offset_y = 3
+theme_override_font_sizes/font_size = 36
+text = "AS A SLIME"
+
+[node name="SubtitleLabel" type="Label" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin/TitleVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.737, 0.827, 0.894, 1)
+theme_override_font_sizes/font_size = 13
+text = "Absorb  ·  Squeeze  ·  Split  ·  Merge"
+
+[node name="DescLabel" type="Label" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/TitleCard/TitleMargin/TitleVBox"]
+custom_minimum_size = Vector2(330, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.66, 0.78, 0.87, 0.92)
+theme_override_font_sizes/font_size = 12
+text = "Consume smaller geometric props to expand your volume, mold through narrow gates limited only by your Core Sphere, and split into Follower or Roamer clones."
+autowrap_mode = 3
+
+[node name="ButtonStack" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 9
+
+[node name="PlayButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.97, 0.99, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 16
+theme_override_styles/normal = SubResource("StyleBox_play_normal")
+theme_override_styles/pressed = SubResource("StyleBox_play_pressed")
+theme_override_styles/hover = SubResource("StyleBox_play_hover")
+theme_override_styles/focus = SubResource("StyleBox_play_hover")
+text = "▶   PLAY SANDBOX"
+
+[node name="HowToPlayButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.918, 0.957, 0.984, 1)
+theme_override_font_sizes/font_size = 13
+theme_override_styles/normal = SubResource("StyleBox_btn_normal")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+theme_override_styles/focus = SubResource("StyleBox_btn_hover")
+text = "HOW TO PLAY & CONTROLS"
+
+[node name="SettingsButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.918, 0.957, 0.984, 1)
+theme_override_font_sizes/font_size = 13
+theme_override_styles/normal = SubResource("StyleBox_btn_normal")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+theme_override_styles/focus = SubResource("StyleBox_btn_hover")
+text = "SETTINGS & DISPLAY"
+
+[node name="AtmosphereButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 13
+theme_override_styles/normal = SubResource("StyleBox_btn_normal")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+theme_override_styles/focus = SubResource("StyleBox_btn_hover")
+text = "MOOD: STUDIO DAY"
+
+[node name="PokeButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.52, 0.86, 1, 1)
+theme_override_font_sizes/font_size = 13
+theme_override_styles/normal = SubResource("StyleBox_btn_normal")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+theme_override_styles/focus = SubResource("StyleBox_btn_hover")
+text = "POKE THE SLIMES!"
+
+[node name="QuitButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/LeftColumn/ButtonStack"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.78, 0.85, 0.91, 0.88)
+theme_override_font_sizes/font_size = 13
+theme_override_styles/normal = SubResource("StyleBox_btn_normal")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+theme_override_styles/focus = SubResource("StyleBox_btn_hover")
+text = "QUIT"
+
+[node name="CenterSpacer" type="Control" parent="MenuLayer/MenuRoot/MainLayout"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="RightColumn" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout"]
+custom_minimum_size = Vector2(410, 0)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+
+[node name="ControlsCard" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn"]
+visible = false
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_glass_card")
+
+[node name="CardMargin" type="MarginContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard"]
+layout_mode = 2
+
+[node name="CardVBox" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="HeaderRow" type="HBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox"]
+layout_mode = 2
+
+[node name="CardTitle" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/HeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.92, 0.96, 0.99, 1)
+theme_override_font_sizes/font_size = 15
+text = "HOW TO PLAY & CONTROLS"
+
+[node name="CloseControlsButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/HeaderRow"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.75, 0.86, 0.95, 1)
+theme_override_font_sizes/font_size = 12
+theme_override_styles/normal = SubResource("StyleBox_key_badge")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+text = "✕"
+
+[node name="Divider" type="HSeparator" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox"]
+layout_mode = 2
+
+[node name="ControlGrid" type="GridContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_constants/h_separation = 12
+theme_override_constants/v_separation = 8
+columns = 2
+
+[node name="KeyMove" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyMove"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "WASD / Arrows"
+
+[node name="DescMove" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Move & push-eat smaller props"
+
+[node name="KeyRun" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyRun"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "Shift"
+
+[node name="DescRun" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Sprint / fast crawl across arena"
+
+[node name="KeyFollow" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyFollow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "E"
+
+[node name="DescFollow" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Split Follower clone (trails behind you)"
+
+[node name="KeyRoam" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyRoam"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "Q"
+
+[node name="DescRoam" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Split Roamer clone (explores & eats)"
+
+[node name="KeyMerge" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyMerge"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "M"
+
+[node name="DescMerge" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Merge nearby clones back into body"
+
+[node name="KeyCamera" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyCamera"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "Drag / Wheel"
+
+[node name="DescCamera" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Orbit camera, zoom & click to poke"
+
+[node name="KeyDebug" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_key_badge")
+
+[node name="Label" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid/KeyDebug"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "F3"
+
+[node name="DescDebug" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox/ControlGrid"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.86, 0.92, 0.97, 1)
+theme_override_font_sizes/font_size = 12
+text = "Toggle 3D hull & Core Sphere wireframe"
+
+[node name="MechanicsNote" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/ControlsCard/CardMargin/CardVBox"]
+custom_minimum_size = Vector2(350, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.64, 0.82, 0.94, 0.95)
+theme_override_font_sizes/font_size = 12
+text = "Core-Sphere Rule: Your outer jelly conforms around gates and low ceilings automatically as long as the glowing inner Core Sphere fits through the opening!"
+autowrap_mode = 3
+
+[node name="SettingsCard" type="PanelContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn"]
+visible = false
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBox_glass_card")
+
+[node name="CardMargin" type="MarginContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard"]
+layout_mode = 2
+
+[node name="CardVBox" type="VBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="HeaderRow" type="HBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+
+[node name="CardTitle" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/HeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.92, 0.96, 0.99, 1)
+theme_override_font_sizes/font_size = 15
+text = "SETTINGS & DISPLAY"
+
+[node name="CloseSettingsButton" type="Button" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/HeaderRow"]
+layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_override_colors/font_color = Color(0.75, 0.86, 0.95, 1)
+theme_override_font_sizes/font_size = 12
+theme_override_styles/normal = SubResource("StyleBox_key_badge")
+theme_override_styles/pressed = SubResource("StyleBox_btn_pressed")
+theme_override_styles/hover = SubResource("StyleBox_btn_hover")
+text = "✕"
+
+[node name="Divider" type="HSeparator" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+
+[node name="FullscreenCheck" type="CheckButton" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.88, 0.94, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+text = "Fullscreen Window"
+
+[node name="VsyncCheck" type="CheckButton" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.88, 0.94, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+button_pressed = true
+text = "Vertical Sync (VSync)"
+
+[node name="NightCheck" type="CheckButton" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.88, 0.94, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+text = "Bioluminescent Night Mode"
+
+[node name="MsaaRow" type="HBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="MsaaLabel" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/MsaaRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.88, 0.94, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+text = "3D Anti-Aliasing (MSAA)"
+
+[node name="MsaaOption" type="OptionButton" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/MsaaRow"]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+
+[node name="JiggleRow" type="HBoxContainer" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="JiggleLabel" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/JiggleRow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.88, 0.94, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+text = "Menu Jelly Bounce"
+
+[node name="JiggleSlider" type="HSlider" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/JiggleRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 4
+min_value = 0.2
+max_value = 2.2
+step = 0.1
+value = 1.0
+
+[node name="JiggleValue" type="Label" parent="MenuLayer/MenuRoot/MainLayout/RightColumn/SettingsCard/CardMargin/CardVBox/JiggleRow"]
+custom_minimum_size = Vector2(40, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.651, 0.941, 0.769, 1)
+theme_override_font_sizes/font_size = 12
+text = "1.0×"
+horizontal_alignment = 2
+
+[node name="BottomBar" type="HBoxContainer" parent="MenuLayer/MenuRoot"]
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = -46.0
+offset_right = -24.0
+offset_bottom = -14.0
+grow_horizontal = 2
+grow_vertical = 0
+mouse_filter = 2
+theme_override_constants/separation = 12
+
+[node name="VersionPill" type="PanelContainer" parent="MenuLayer/MenuRoot/BottomBar"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_pill")
+
+[node name="VersionLabel" type="Label" parent="MenuLayer/MenuRoot/BottomBar/VersionPill"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.737, 0.827, 0.894, 1)
+theme_override_font_sizes/font_size = 12
+text = "Godot 4.6  ·  Jolt Physics 3D  ·  Refractive Slime Shader"
+
+[node name="BottomSpacer" type="Control" parent="MenuLayer/MenuRoot/BottomBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="ShortcutPill" type="PanelContainer" parent="MenuLayer/MenuRoot/BottomBar"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_pill")
+
+[node name="ShortcutLabel" type="Label" parent="MenuLayer/MenuRoot/BottomBar/ShortcutPill"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.737, 0.827, 0.894, 1)
+theme_override_font_sizes/font_size = 12
+text = "H: Controls  ·  N: Day/Night  ·  Space / Click: Poke Slime"
+
+[node name="FadeOverlay" type="ColorRect" parent="MenuLayer/MenuRoot"]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.06, 0.11, 0.17, 1)

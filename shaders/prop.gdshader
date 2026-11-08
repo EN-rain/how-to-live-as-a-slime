@@ -1,7 +1,7 @@
 shader_type spatial;
-// Prop material: flat-shaded lit surface (the HTML used MeshStandardMaterial with flatShading) plus the noise dissolve
-// with a glowing edge that plays while a prop is being digested.
-render_mode cull_disabled;
+// Prop material: flat-shaded lit surface plus noise dissolve with a glowing edge
+// that only evaluates when the prop is actively being digested (uDissolve > 0.001).
+render_mode cull_back, specular_disabled;
 
 group_uniforms Surface;
 uniform vec3 uColor : source_color = vec3(0.8, 0.8, 0.8);
@@ -25,7 +25,9 @@ uniform float uDissolve = 0.0;
 varying vec3 vObjPos;
 
 float dh(vec3 p) {
-	return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+	p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+	p += dot(p, p.yxz + 33.33);
+	return fract((p.x + p.y) * p.z);
 }
 
 float dvn(vec3 p) {
@@ -43,17 +45,20 @@ void vertex() {
 }
 
 void fragment() {
-	float dn = dvn(vObjPos * uNoiseScale);
-	float dth = uDissolve * uThresholdScale - uThresholdBias;
-	if (dn < dth) {
-		discard;
-	}
 	ALBEDO = uColor;
 	ROUGHNESS = uRoughness;
 	METALLIC = uMetallic;
 	if (uFlatShading) {
 		NORMAL = normalize(cross(dFdx(VERTEX), dFdy(VERTEX)));
 	}
-	float dedge = 1.0 - smoothstep(0.0, uEdgeWidth, dn - dth);
-	EMISSION = uGlow * dedge * uGlowStrength * step(0.001, uDissolve);
+	// Skip 3D trilinear noise on intact props (99% of props at rest)
+	if (uDissolve > 0.001) {
+		float dn = dvn(vObjPos * uNoiseScale);
+		float dth = uDissolve * uThresholdScale - uThresholdBias;
+		if (dn < dth) {
+			discard;
+		}
+		float dedge = 1.0 - smoothstep(0.0, uEdgeWidth, dn - dth);
+		EMISSION = uGlow * dedge * uGlowStrength;
+	}
 }

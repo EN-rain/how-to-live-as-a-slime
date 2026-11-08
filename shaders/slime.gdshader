@@ -397,23 +397,28 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	float gentleSway = sin(p.y * 2.2 - t * 2.4) * 0.012 * uJiggleStrength;
 	p.xz += norm.xz * gentleSway * smoothstep(0.05, 0.5, height01);
 
-	float distToPoke = distance(pos, uImpulsePos);
-	float pokeInfluence = exp(-distToPoke * 1.15);
-	float springOsc = sin(uImpulseTime * 14.0) * exp(-uImpulseTime * 3.0);
-	vec3 impulseOffset = uImpulseVector * pokeInfluence * springOsc * uJiggleStrength;
+	vec3 impulseOffset = vec3(0.0);
+	if (uImpulseTime < 3.5) {
+		float distToPoke = distance(pos, uImpulsePos);
+		float pokeInfluence = exp(-distToPoke * 1.15);
+		float springOsc = sin(uImpulseTime * 14.0) * exp(-uImpulseTime * 3.0);
+		impulseOffset = uImpulseVector * pokeInfluence * springOsc * uJiggleStrength;
 
-	float distToPoke2 = distance(pos, uImpulse2Pos);
-	float pokeInfluence2 = exp(-distToPoke2 * 1.15);
-	float springOsc2 = sin(uImpulse2Time * 14.0) * exp(-uImpulse2Time * 3.0);
-	vec3 impulseOffset2 = uImpulse2Vector * pokeInfluence2 * springOsc2 * uJiggleStrength;
+		float globalBounce = sin(uImpulseTime * 11.0) * exp(-uImpulseTime * 2.6) * length(uImpulseVector) * 0.32 * uJiggleStrength;
+		globalBounce = clamp(globalBounce, -uSkinLocal, uSkinLocal) * (1.0 - uLiquid);
+		p.y += globalBounce * (height01 - 0.15);
+		float bounceRadial = globalBounce * 0.38 * (1.0 - height01 * 0.5);
+		float radialCap = uSkinLocal / max(length(p.xz), 0.1);
+		p.xz *= 1.0 - clamp(bounceRadial, -radialCap, radialCap);
+	}
 
-	float globalBounce = sin(uImpulseTime * 11.0) * exp(-uImpulseTime * 2.6) * length(uImpulseVector) * 0.32 * uJiggleStrength;
-	// Solid-only and inside the skin budget, like the lean below.
-	globalBounce = clamp(globalBounce, -uSkinLocal, uSkinLocal) * (1.0 - uLiquid);
-	p.y += globalBounce * (height01 - 0.15);
-	float bounceRadial = globalBounce * 0.38 * (1.0 - height01 * 0.5);
-	float radialCap = uSkinLocal / max(length(p.xz), 0.1);
-	p.xz *= 1.0 - clamp(bounceRadial, -radialCap, radialCap);
+	vec3 impulseOffset2 = vec3(0.0);
+	if (uImpulse2Time < 3.5) {
+		float distToPoke2 = distance(pos, uImpulse2Pos);
+		float pokeInfluence2 = exp(-distToPoke2 * 1.15);
+		float springOsc2 = sin(uImpulse2Time * 14.0) * exp(-uImpulse2Time * 3.0);
+		impulseOffset2 = uImpulse2Vector * pokeInfluence2 * springOsc2 * uJiggleStrength;
+	}
 
 	p += (impulseOffset + impulseOffset2) * smoothstep(0.02, 0.25, height01);
 
@@ -590,7 +595,7 @@ void fragment() {
 
 	vec3 noiseCoord = vWorldPosition * uRippleNoiseScale + vec3(0.0, -t * 0.45, t * 0.25);
 	float n1 = snoise(noiseCoord);
-	float n2 = snoise(noiseCoord * 1.8 - vec3(t * 0.35));
+	float n2 = (uShaderLOD > 0.5) ? n1 : snoise(noiseCoord * 1.8 - vec3(t * 0.35));
 
 	float ndotv = max(0.0, dot(normal, viewDir));
 	float edgeFactor = pow(1.0 - ndotv, 1.5);
@@ -606,26 +611,13 @@ void fragment() {
 
 	vec2 uvR = clamp(screenUV - totalDistortion * (1.0 - 0.18 * uDispersion) + dir * disp * 0.4, vec2(0.002), vec2(0.998));
 	vec2 uvG = clamp(screenUV - totalDistortion * 1.0, vec2(0.002), vec2(0.998));
-	vec2 uvGY = clamp(screenUV - totalDistortion * (1.0 + 0.10 * uDispersion) - dir * disp * 0.25, vec2(0.002), vec2(0.998));
 	vec2 uvB = clamp(screenUV - totalDistortion * (1.0 + 0.22 * uDispersion) - dir * disp * 0.55, vec2(0.002), vec2(0.998));
 
-	vec3 sR;
-	vec3 sG;
-	vec3 sGY;
-	vec3 sB;
-	if (uShaderLOD > 0.5) {
-		sG = sampleScreen(uvG);
-		sR = sG;
-		sGY = sG;
-		sB = sG;
-	} else {
-		sR = sampleScreen(uvR);
-		sG = sampleScreen(uvG);
-		sGY = sampleScreen(uvGY);
-		sB = sampleScreen(uvB);
-	}
+	vec3 sG = sampleScreen(uvG);
+	vec3 sR = (uShaderLOD > 0.5) ? sG : sampleScreen(uvR);
+	vec3 sB = (uShaderLOD > 0.5) ? sG : sampleScreen(uvB);
 
-	vec3 refractedColor = vec3(sR.r, mix(sG.g, sGY.g, 0.5), sB.b);
+	vec3 refractedColor = vec3(sR.r, sG.g, sB.b);
 
 	float edgeDelta = clamp(length(sG - sB) * 1.5, 0.0, 0.45);
 	vec3 greenCyanCaustic = mix(lin2srgb(uCausticA), lin2srgb(uCausticB), n1 * 0.5 + 0.5);
