@@ -824,7 +824,10 @@ func _begin_eating(p: PropData, s: Slime) -> void:
 	_set_prop_solid(p, false)
 	active_eating_props.append(p)
 	_grid_remove(p)
-	rebuild_passage_pairs()
+	for idx in range(_candidate_passage_pairs.size() - 1, -1, -1):
+		var pair: Dictionary = _candidate_passage_pairs[idx]
+		if pair["a"] == p or pair["b"] == p:
+			_candidate_passage_pairs.remove_at(idx)
 	eaten += 1
 	eaten_changed.emit(eaten)
 
@@ -1297,34 +1300,9 @@ func _update_inside_props(s: Slime, dt: float) -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _update_eat_uniforms(s: Slime, dt: float) -> void:
-	var S := maxf(s.model.scale, 1e-4)
-	var sp := s.body.global_position if s.body != null else s.global_position
-	for i in 6:
-		_eat_pos_buf[i] = Vector3.ZERO
-		_eat_param_buf[i] = Vector3.ZERO
-		_box_half_buf[i] = Vector3(0.01, 0.01, 0.01)
-
 	s.press_amt = lerpf(s.press_amt, 0.0, 1.0 - exp(-15.0 * dt))
 	s.set_shader_param("uPressAmt", s.press_amt)
 	s.calm = lerpf(s.calm, 0.0, 1.0 - exp(-12.0 * dt))
-
-	var slot := 3
-	for p in active_eating_props:
-		if p.eater != s or slot > 5:
-			continue
-		if p.mesh == null or not is_instance_valid(p.mesh):
-			continue
-		var m := p.mesh.global_position
-		_eat_pos_buf[slot] = s.model.mesh_local(m - sp)
-		var eat_fade := clampf(p.t / 0.4, 0.0, 1.0)
-		_eat_param_buf[slot] = Vector3(float(p.shape) + p.sides * 0.01, eat_fade, p.mesh.rotation.y + p.phase)
-		_box_half_buf[slot] = _box_half(p, S)
-		slot += 1
-
-	if s._mat != null:
-		s._mat.set_shader_parameter("uEatPos", _eat_pos_buf)
-		s._mat.set_shader_parameter("uEatParam", _eat_param_buf)
-		s._mat.set_shader_parameter("uBoxHalf", _box_half_buf)
 
 
 func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:

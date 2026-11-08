@@ -801,28 +801,8 @@ func _can_sleep(desired: Vector3) -> bool:
 ## Belt-and-braces after translation: if `move_horizontal` advanced on the inner core
 ## sphere, shrink `squeeze_k` to match the legal clearance at the new position.
 func _verify_posture_after_move() -> void:
-	if _verified_key == model.posture_key() and motor.last_sweep_fraction >= 0.9999:
-		return
-	if motor.hull_clear(tuning.skin * 2.0):
-		_verified_key = model.posture_key()
-		_safe_posture = [slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir]
-		return
-	var min_sq := model.min_squeeze()
-	if motor.posture_target_is_legal(slime_scale, liquid_amt, height_ratio, min_sq, sq_dir):
-		squeeze_k = min_sq
-		_resolve_model()
-		_verified_key = model.posture_key()
-		_safe_posture = [slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir]
-		return
-	if _safe_posture.is_empty():
-		return
-	slime_scale = _safe_posture[0]
-	liquid_amt = _safe_posture[1]
-	height_ratio = _safe_posture[2]
-	squeeze_k = _safe_posture[3]
-	sq_dir = _safe_posture[4]
-	_resolve_model()
-	_apply_transform()
+	_verified_key = model.posture_key()
+	_safe_posture = [slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -836,7 +816,9 @@ func _update_scale(dt: float) -> void:
 	if absf(new_scale - target_scale) < 0.001:
 		new_scale = target_scale
 	if new_scale > slime_scale + 1e-6:
-		if not motor.posture_is_legal(new_scale, liquid_amt, height_ratio, squeeze_k, sq_dir):
+		var new_core_r := model.rest_max_radius * new_scale * model.min_squeeze()
+		if not motor.core_sphere_clear(motor.core_sweep_origin(), new_core_r) \
+				or not motor.core_sphere_clear(model.core_sphere_center(), new_core_r):
 			expansion_blocked = "growth blocked by geometry"
 			return
 	_set_scale_anchored(new_scale)
@@ -983,66 +965,12 @@ func _required_squeeze(gap_w: float) -> float:
 	return (gap_w - 2.0 * tuning.skin) / maxf(full_w, 1e-4)
 
 
-func _resolve_posture(dt: float) -> void:
+func _resolve_posture(_dt: float) -> void:
 	_passage = {}
 	cur_gap_w = INF
-	var axis := sq_dir
 	sq_target = 1.0
-
-	_passage_cooldown = maxf(0.0, _passage_cooldown - dt)
-	if props != null:
-		_update_passage()
-	if not _passage.is_empty():
-		var gap_dir: Vector3 = _passage.get("axis", Vector3.ZERO)
-		if gap_dir.length_squared() > 1e-6:
-			axis = Vector3(gap_dir.x, 0.0, gap_dir.z).normalized()
-		var gap_w: float = _passage.get("width", INF)
-		var min_sq := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
-		sq_target = clampf(_required_squeeze(gap_w), min_sq, 1.0)
-		var gc: Vector3 = _passage.get("center", Vector3.ZERO)
-		cur_gap_center = Vector2(gc.x, gc.z)
-		cur_gap_w = gap_w
-		cur_gap_dir = Vector2(axis.x, axis.z)
-	elif motor.velocity.length_squared() > 0.04:
-		var move_v := Vector3(motor.velocity.x, 0.0, motor.velocity.z)
-		var fwd := move_v.normalized()
-		var full_hull := model.cached_shape(slime_scale, liquid_amt, height_ratio, 1.0, axis, 0)
-		var step_fr := motor._cast(model.foot, fwd * 0.35, true, full_hull, SlimeMotor.LAYER_OBSTACLES)
-		var full_blocked := float(step_fr[1]) < 0.999 or not motor.posture_target_is_legal(slime_scale, liquid_amt, height_ratio, 1.0, axis)
-		if full_blocked and motor.core_can_pass_ahead(fwd):
-			var min_sq := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
-			sq_target = min_sq
-
-	# --- Lateral squeeze spring (tighten into a passage, release when clear) ---
-	var sdt := minf(dt, 1.0 / 30.0)
-	var stiffness := tuning.squeeze_in_rate if sq_target < squeeze_k else tuning.squeeze_out_rate
-	squeeze_v += (stiffness * (sq_target - squeeze_k) - 2.0 * sqrt(stiffness) * squeeze_v) * sdt
-	var sq_cand := squeeze_k + squeeze_v * sdt
-	var min_sq_now := tuning.min_normal_squeeze
-	if sq_cand < min_sq_now:
-		sq_cand = min_sq_now
-		squeeze_v = 0.0
-	elif sq_cand > 1.0:
-		sq_cand = 1.0
-		squeeze_v = 0.0
-
-	if absf(sq_cand - squeeze_k) < 1e-4 and squeeze_k >= 0.999 and sq_target >= 0.999:
-		squeeze_k = 1.0
-		squeeze_v = 0.0
-		sq_dir = axis
-	elif sq_cand <= squeeze_k:
-		# Shrinking a concentric circular hull toward the Core Sphere is always valid
-		squeeze_k = sq_cand
-		sq_dir = axis
-	else:
-		var r := _height_ratio_for(0.0, sq_cand)
-		if motor.posture_target_is_legal(slime_scale, 0.0, r, sq_cand, axis):
-			squeeze_k = sq_cand
-			sq_dir = axis
-		else:
-			squeeze_v = 0.0
-	squeeze_k = clampf(squeeze_k, min_sq_now, 1.0)
-
+	squeeze_k = 1.0
+	squeeze_v = 0.0
 	liquid_request = false
 	liquid_amt = 0.0
 	height_ratio = 1.0
