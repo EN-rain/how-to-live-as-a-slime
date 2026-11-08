@@ -256,8 +256,13 @@ func move_horizontal(motion: Vector3) -> void:
 		for _i in tuning.slide_iterations:
 			if slid.length_squared() < 1e-10:
 				break
-			var c_pos := core_sweep_origin()
-			var fr := _cast(c_pos, slid, true, sphere)
+			var center_pos := model.core_sphere_center()
+			var base_pos := core_sweep_origin()
+			var fr_center := _cast(center_pos, slid, true, sphere)
+			var fr_base := _cast(base_pos, slid, true, sphere)
+			var use_center := float(fr_center[1]) <= float(fr_base[1])
+			var hit_origin := center_pos if use_center else base_pos
+			var fr := fr_center if use_center else fr_base
 			var safe: float = fr[0]
 			var unsafe: float = fr[1]
 			if unsafe >= 0.999999:
@@ -275,7 +280,8 @@ func move_horizontal(motion: Vector3) -> void:
 					break
 			else:
 				stalled = 0
-			var rest := _contact_rest(core_sweep_origin() + slid * unsafe, sphere)
+			var hit_now := model.core_sphere_center() if use_center else core_sweep_origin()
+			var rest := _contact_rest(hit_now + slid * unsafe, sphere)
 			if rest.is_empty():
 				break
 			var n: Vector3 = rest.normal
