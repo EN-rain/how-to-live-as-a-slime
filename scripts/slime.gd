@@ -436,10 +436,8 @@ func _sync_core_visual() -> void:
 		return
 	var s := maxf(slime_scale, 1e-4)
 	var rxz := model.core_sphere_radius() / s
-	var ry := rxz
-	var center_local_y := (-model.rest_half_height * s + model.core_sphere_radius()) / s
-	_core_mesh.position = Vector3(0.0, center_local_y, 0.0)
-	_core_mesh.scale = Vector3(rxz, ry, rxz)
+	_core_mesh.position = Vector3.ZERO
+	_core_mesh.scale = Vector3(rxz, rxz, rxz)
 
 
 func _setup_proxy() -> void:

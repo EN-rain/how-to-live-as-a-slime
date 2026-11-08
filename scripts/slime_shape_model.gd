@@ -350,7 +350,7 @@ func core_sphere_radius() -> float:
 
 
 func core_sphere_center() -> Vector3:
-	return foot + Vector3(0.0, core_sphere_radius(), 0.0)
+	return center()
 
 
 ## Cached circular inner core hull at the posture's minimum legal radius.

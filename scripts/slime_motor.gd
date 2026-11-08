@@ -240,10 +240,7 @@ func move_horizontal(motion: Vector3) -> void:
 	impact_speed = 0.0
 	last_sweep_fraction = 1.0
 	_sync_foot()
-	var space := _space()
-	var core_probe := model.core_shape(1)
-	var started_clear := _probe_shape_at(space, core_probe)
-	var start_pos := owner_node.global_position
+	var sphere := core_sphere_shape()
 	var max_step := maxf(model.rest_max_radius * model.scale * tuning.max_step_fraction, 0.12)
 	var steps := clampi(int(ceil(motion.length() / maxf(max_step, 1e-3))), 1, MAX_MOVE_SUBSTEPS)
 	var chunk := motion / float(steps)
@@ -255,17 +252,10 @@ func move_horizontal(motion: Vector3) -> void:
 		for _i in tuning.slide_iterations:
 			if slid.length_squared() < 1e-10:
 				break
-			var active_shape: Shape3D = model.shape
-			var fr := _cast(model.foot, slid, true, active_shape)
+			var c_pos := model.core_sphere_center()
+			var fr := _cast(c_pos, slid, true, sphere)
 			var safe: float = fr[0]
 			var unsafe: float = fr[1]
-			if unsafe < 0.999999 and model.squeeze > model.min_squeeze() + 1e-3:
-				var dir_n := slid.normalized()
-				if core_can_pass_ahead(dir_n):
-					active_shape = model.core_shape(0)
-					fr = _cast(model.foot, slid, true, active_shape)
-					safe = fr[0]
-					unsafe = fr[1]
 			if unsafe >= 0.999999:
 				owner_node.global_position += slid
 				_sync_foot()
@@ -281,7 +271,7 @@ func move_horizontal(motion: Vector3) -> void:
 					break
 			else:
 				stalled = 0
-			var rest := _contact_rest(model.foot + slid * unsafe, active_shape)
+			var rest := _contact_rest(model.core_sphere_center() + slid * unsafe, sphere)
 			if rest.is_empty():
 				break
 			var n: Vector3 = rest.normal
@@ -293,7 +283,6 @@ func move_horizontal(motion: Vector3) -> void:
 				contact_normals.append(n)
 			if rest.get("collider") != null:
 				contact_bodies.append(rest.get("collider"))
-			# Tiny skin separation along normal so the next slide cast never starts in overlap
 			owner_node.global_position += n * 0.0015
 			_sync_foot()
 			var into := velocity.dot(n)
@@ -301,12 +290,6 @@ func move_horizontal(motion: Vector3) -> void:
 				impact_speed = maxf(impact_speed, -into)
 				velocity = velocity.slide(n)
 			slid = slid.slide(n) * (1.0 - safe)
-	if started_clear and not _probe_shape_at(space, core_probe):
-		owner_node.global_position = start_pos
-		_sync_foot()
-		contact_normals.clear()
-		contact_bodies.clear()
-		last_sweep_fraction = 0.0
 
 
 ## Apply a caller-computed slime-vs-slime correction. The push only has to clear
