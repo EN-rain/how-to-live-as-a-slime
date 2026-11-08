@@ -251,24 +251,24 @@ vec3 solidPushLocal(vec3 q, float shape, vec3 h) {
 	return vec3(f.y * mag, 0.0, f.z * mag);
 }
 
-// Conforms the slime surface around an obstacle so the body visibly molds/compresses
-// against narrow passage walls, corners, tops of low cubes, and bottoms of low roofs with zero intersection.
+// Conforms the slime surface around an obstacle with:
+// 1. One-sided rounded-box SDF (zero intersection on faces & corners, no wing-flaps)
+// 2. Tangential surface-tension cushion around cube corners
+// 3. Proportional upper-dome rounding (eliminates the 90-degree top cliff / dark crease line)
 vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
 	float cy = cos(yaw);
 	float sy = sin(yaw);
 	vec3 dv = p - c;
 	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
 	vec3 H = h + vec3(SOLID_OFFSET);
-	if (q.y > H.y + 0.20 || q.y < -H.y - 0.20) return vec3(0.0);
+	if (q.y > H.y + 0.25 || q.y < -H.y - 0.25) return vec3(0.0);
 
-	// Slime center in obstacle local coordinates
 	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
 	float groundFloorLocal = -uRefRadius * (0.86 - uMelt * 0.22);
 
-	// Overhead roof / tunnel ceiling check: if the obstacle bottom is suspended above the floor
+	// Overhead roof / tunnel ceiling check
 	if (c.y - h.y > groundFloorLocal + 0.35) {
 		if (abs(q.x) < H.x && abs(q.z) < H.z && q.y > -H.y) {
-			// If slime center is under the roof, push straight down to -H.y; if outside, push to nearest face
 			bool centerUnder = abs(qCenter.x) < H.x && abs(qCenter.y) < H.z;
 			if (centerUnder) {
 				return vec3(0.0, (-H.y) - q.y, 0.0);
@@ -276,65 +276,98 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 		}
 	}
 
-	float winY = 1.0 - smoothstep(H.y, H.y + 0.16, q.y);
+	float winY = 1.0 - smoothstep(H.y, H.y + 0.18, q.y);
 	if (winY <= 0.001) return vec3(0.0);
 
 	float kind = floor(shape + 0.005);
-	vec2 origXZ = q.xz;
-	vec2 curXZ = q.xz;
+	float rr = 0.38;
+	vec2 hs = max(h.xz - vec2(rr), vec2(0.01));
+	float ox = abs(qCenter.x) - h.x;
+	float oz = abs(qCenter.y) - h.z;
+	float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
+	float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
+	float faceW = smoothstep(-0.18, 0.18, ox - oz);
 
+	// Evaluate at vertex q.xz
+	float sd = 0.0;
+	vec2 nn = vec2(1.0, 0.0);
 	if (kind < 0.5) {
-		vec2 Hxz = H.xz;
-		vec2 d = curXZ - qCenter;
-		vec2 safeD = sign(d + vec2(1e-7)) * max(abs(d), vec2(1e-5));
-		vec2 t0 = (-Hxz - qCenter) / safeD;
-		vec2 t1 = ( Hxz - qCenter) / safeD;
-		vec2 tMin2 = min(t0, t1);
-		vec2 tMax2 = max(t0, t1);
-		float tEnter = max(tMin2.x, tMin2.y);
-		float tExit = min(tMax2.x, tMax2.y);
+		float sxQ = q.x >= 0.0 ? 1.0 : -1.0;
+		float szQ = q.z >= 0.0 ? 1.0 : -1.0;
 
-		if (tExit > max(tEnter, 0.0) && tEnter < 1.0) {
-			if (tEnter >= 0.0) {
-				curXZ = qCenter + d * tEnter;
-			} else {
-				float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
-				float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
-				float dxFace = Hxz.x - sx * curXZ.x;
-				float dzFace = Hxz.y - sz * curXZ.y;
-				if (dxFace < dzFace) {
-					curXZ.x = sx * Hxz.x;
-				} else {
-					curXZ.y = sz * Hxz.y;
-				}
-			}
-		}
+		float dxX = sx * q.x - hs.x;
+		float dzX = abs(q.z) - hs.y;
+		vec2 dOutX = vec2(max(dxX, 0.0), max(dzX, 0.0));
+		float odX = length(dOutX);
+		float sdX = (odX > 0.0 ? odX : dxX) - rr;
+		vec2 nnX = odX > 1e-5 ? vec2(sx * dOutX.x / odX, szQ * dOutX.y / odX) : vec2(sx, 0.0);
+
+		float dxZ = abs(q.x) - hs.x;
+		float dzZ = sz * q.z - hs.y;
+		vec2 dOutZ = vec2(max(dxZ, 0.0), max(dzZ, 0.0));
+		float odZ = length(dOutZ);
+		float sdZ = (odZ > 0.0 ? odZ : dzZ) - rr;
+		vec2 nnZ = odZ > 1e-5 ? vec2(sxQ * dOutZ.x / odZ, sz * dOutZ.y / odZ) : vec2(0.0, sz);
+
+		sd = mix(sdZ, sdX, faceW);
+		nn = normalize(mix(nnZ, nnX, faceW) + vec2(1e-6, 0.0));
 	} else {
-		float R = h.x + SOLID_OFFSET;
+		float R = h.x;
 		if (kind > 1.5) R *= clamp(1.0 - (q.y + h.y) / max(2.0 * h.y, 1e-4), 0.06, 1.0);
-		vec2 d = curXZ - qCenter;
-		float a = dot(d, d);
-		float b = dot(qCenter, d);
-		float ceq = dot(qCenter, qCenter) - R * R;
-		float disc = b * b - a * ceq;
-		if (disc > 0.0 && a > 1e-8) {
-			float sqD = sqrt(disc);
-			float tEnter = (-b - sqD) / a;
-			float tExit = (-b + sqD) / a;
-			if (tExit > max(tEnter, 0.0) && tEnter < 1.0) {
-				if (tEnter >= 0.0) {
-					curXZ = qCenter + d * tEnter;
-				} else {
-					float rLen = max(length(curXZ), 1e-4);
-					curXZ = (curXZ / rLen) * R;
-				}
-			}
+		vec2 nDir = normalize(qCenter + vec2(1e-5, 0.0));
+		vec2 uDir = vec2(-nDir.y, nDir.x);
+		float along = dot(q.xz, nDir);
+		float lat = dot(q.xz, uDir);
+		float dAlong = along - R;
+		float dLat = abs(lat) - R;
+		if (dAlong <= 0.0 && abs(lat) <= R) {
+			sd = along - sqrt(max(0.0, R * R - lat * lat));
+			nn = nDir;
+		} else {
+			float rhoC = length(q.xz);
+			sd = rhoC - R;
+			nn = rhoC > 1e-5 ? (q.xz / rhoC) : nDir;
 		}
 	}
 
-	vec2 pushXZ = (curXZ - origXZ) * winY;
+	// 1. Exact non-penetration push + smooth tangential surface-tension curve around corners
+	float hardPen = max(SOLID_OFFSET - sd, 0.0);
+	float tensionSpan = 0.55;
+	float tSoft = clamp(1.0 - max(sd - SOLID_OFFSET, 0.0) / tensionSpan, 0.0, 1.0);
+	float tensionPull = (sd > SOLID_OFFSET) ? (tSoft * tSoft * (3.0 - 2.0 * tSoft) * 0.14) : 0.0;
+
+	// 2. Proportional upper-dome rounding: sample the equator rim along this vertex's meridian
+	// so the upper dome curves smoothly inward instead of forming a 90-degree vertical cliff.
+	float rVert = length(p.xz);
+	float maxBellyR = uRefRadius * 1.24;
+	float rho = clamp(rVert / maxBellyR, 0.0, 1.0);
+	float domePull = 0.0;
+	if (rVert > 1e-4 && rho < 0.98) {
+		vec2 pRim = (p.xz / rVert) * maxBellyR - c.xz;
+		vec2 qRim = vec2(pRim.x * cy - pRim.y * sy, pRim.x * sy + pRim.y * cy);
+		float dxRX = sx * qRim.x - hs.x;
+		float dzRX = abs(qRim.y) - hs.y;
+		float odRX = length(vec2(max(dxRX, 0.0), max(dzRX, 0.0)));
+		float sdRX = (odRX > 0.0 ? odRX : dxRX) - rr;
+
+		float dxRZ = abs(qRim.x) - hs.x;
+		float dzRZ = sz * qRim.y - hs.y;
+		float odRZ = length(vec2(max(dxRZ, 0.0), max(dzRZ, 0.0)));
+		float sdRZ = (odRZ > 0.0 ? odRZ : dzRZ) - rr;
+
+		float sdRim = mix(sdRZ, sdRX, faceW);
+		float rimPen = max(SOLID_OFFSET - sdRim, 0.0);
+		float domeProfile = sin(rho * 3.14159265) * (1.0 - rho * 0.35);
+		domePull = max(0.0, rimPen - hardPen) * domeProfile * 0.68;
+	}
+
+	float totalPush = (hardPen + tensionPull + domePull) * winY;
+	vec2 pushXZ = nn * totalPush;
+
+	// Gentle volume-conserving upward dome lift when sides are squeezed
+	float domeLift = min(totalPush, 0.9) * 0.16 * (1.0 - rho * 0.65) * smoothstep(-0.8, 0.4, p.y);
 	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
-	return vec3(worldPushXZ.x, 0.0, worldPushXZ.y);
+	return vec3(worldPushXZ.x, domeLift, worldPushXZ.y);
 }
 
 float smin_neck(float a, float b, float k) {
@@ -484,14 +517,12 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		}
 	}
 
-	// Final authoritative obstacle conforming across up to 8 nearby objects (2 passes resolve multi-cube corners).
-	for (int pass = 0; pass < 2; pass++) {
-		for (int i = 0; i < 8; i++) {
-			float solidAmt = uSolidParam[i].y;
-			if (solidAmt > 0.001) {
-				vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
-				p += dent * solidAmt;
-			}
+	// Final authoritative obstacle conforming across up to 8 nearby objects.
+	for (int i = 0; i < 8; i++) {
+		float solidAmt = uSolidParam[i].y;
+		if (solidAmt > 0.001) {
+			vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
+			p += dent * solidAmt;
 		}
 	}
 	p.y = max(p.y, groundFloor);
