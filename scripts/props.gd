@@ -151,10 +151,10 @@ func _ready() -> void:
 	_eat_pos_buf.resize(6)
 	_eat_param_buf.resize(6)
 	_box_half_buf.resize(6)
-	_solid_pos_buf.resize(4)
-	_solid_param_buf.resize(4)
-	_solid_half_buf.resize(4)
-	_solid_dir_buf.resize(4)
+	_solid_pos_buf.resize(8)
+	_solid_param_buf.resize(8)
+	_solid_half_buf.resize(8)
+	_solid_dir_buf.resize(8)
 	_blob_pos_buf.resize(8)
 	_blob_scale_buf.resize(8)
 	rebuild_grid()
@@ -1360,9 +1360,10 @@ func _update_eat_uniforms(s: Slime, dt: float) -> void:
 		_box_half_buf[slot] = _box_half(p, S)
 		slot += 1
 
-	s.set_shader_param("uEatPos", _eat_pos_buf)
-	s.set_shader_param("uEatParam", _eat_param_buf)
-	s.set_shader_param("uBoxHalf", _box_half_buf)
+	if s._mat != null:
+		s._mat.set_shader_parameter("uEatPos", _eat_pos_buf)
+		s._mat.set_shader_parameter("uEatParam", _eat_param_buf)
+		s._mat.set_shader_parameter("uBoxHalf", _box_half_buf)
 
 
 func _update_solid_uniforms(s: Slime) -> void:
@@ -1370,7 +1371,7 @@ func _update_solid_uniforms(s: Slime) -> void:
 	var sp := s.global_position
 	var foot_y := s.model.foot.y
 	var top_y := foot_y + s.model.full_height
-	for i in 4:
+	for i in 8:
 		_solid_pos_buf[i] = Vector3.ZERO
 		_solid_param_buf[i] = Vector3.ZERO
 		_solid_half_buf[i] = Vector3(0.01, 0.01, 0.01)
@@ -1378,40 +1379,40 @@ func _update_solid_uniforms(s: Slime) -> void:
 
 	var vis_r := s.model.rest_max_radius * S * s.model.spread
 	var candidates: Array = []
-	for p in query_nearby_props(Vector2(sp.x, sp.z), vis_r + 4.5):
+	for p in query_nearby_props(Vector2(sp.x, sp.z), vis_r + 5.0):
 		if p.state != STATE_IDLE or p.mesh == null or not is_instance_valid(p.mesh):
-			continue
-		if is_edible_by_push(s, p):
 			continue
 		var he := _half_of(p)
 		var m := p.mesh.global_position
-		if m.y - he.y > top_y + 0.2 or m.y + he.y < foot_y - 0.1:
+		if m.y - he.y > top_y + 0.3 or m.y + he.y < foot_y - 0.1:
 			continue
 		var cn := _closest_and_normal(p, Vector3(sp.x, m.y, sp.z))
 		var pt: Vector3 = cn["point"]
 		var surf_dist := Vector2(pt.x - sp.x, pt.z - sp.z).length()
-		if surf_dist <= vis_r + 0.35:
+		if surf_dist <= vis_r + 0.80:
 			candidates.append({"prop": p, "dist": surf_dist, "cn": cn})
 
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["dist"]) < float(b["dist"]))
-	var count := mini(candidates.size(), 4)
+	var count := mini(candidates.size(), 8)
 	for i in count:
 		var entry: Dictionary = candidates[i]
 		var p: PropData = entry["prop"]
-		var surf_dist: float = entry["dist"]
 		var cn: Dictionary = entry["cn"]
 		var n_out: Vector3 = cn["normal"]
 		var m := p.mesh.global_position
 		_solid_pos_buf[i] = (m - sp) / S
 		_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
-		var weight := clampf((vis_r + 0.30 - surf_dist) / 0.35, 0.0, 1.0)
+		var weight := 1.0
+		if is_edible_by_push(s, p) and p.last_presser == s:
+			weight = clampf(1.0 - p.engulf_front * 0.90, 0.0, 1.0)
 		_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
 		_solid_half_buf[i] = _box_half(p, S)
 
-	s.set_shader_param("uSolidPos", _solid_pos_buf)
-	s.set_shader_param("uSolidParam", _solid_param_buf)
-	s.set_shader_param("uSolidHalf", _solid_half_buf)
-	s.set_shader_param("uSolidDir", _solid_dir_buf)
+	if s._mat != null:
+		s._mat.set_shader_parameter("uSolidPos", _solid_pos_buf)
+		s._mat.set_shader_parameter("uSolidParam", _solid_param_buf)
+		s._mat.set_shader_parameter("uSolidHalf", _solid_half_buf)
+		s._mat.set_shader_parameter("uSolidDir", _solid_dir_buf)
 
 
 func _update_floor_shadows() -> void:
