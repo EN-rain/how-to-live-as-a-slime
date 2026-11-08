@@ -284,15 +284,15 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 		float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
 		float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
 
-		float penX = max(0.0, (h.x + SOLID_OFFSET) - sx * q.x) * 0.90;
-		float wz = 1.0 - smoothstep(h.z - 0.12, h.z + 0.45, abs(q.z));
+		float penX = max(0.0, (h.x + SOLID_OFFSET) - sx * q.x) * 0.98;
+		float wz = 1.0 - smoothstep(h.z - 0.08, h.z + 0.38, abs(q.z));
 		vec2 pushX = vec2(sx * penX * wz, 0.0);
 
-		float penZ = max(0.0, (h.z + SOLID_OFFSET) - sz * q.z) * 0.90;
-		float wx = 1.0 - smoothstep(h.x - 0.12, h.x + 0.45, abs(q.x));
+		float penZ = max(0.0, (h.z + SOLID_OFFSET) - sz * q.z) * 0.98;
+		float wx = 1.0 - smoothstep(h.x - 0.08, h.x + 0.38, abs(q.x));
 		vec2 pushZ = vec2(0.0, sz * penZ * wx);
 
-		float faceBlend = smoothstep(-0.25, 0.25, ox - oz);
+		float faceBlend = smoothstep(-0.20, 0.20, ox - oz);
 		pushXZ = mix(pushZ, pushX, faceBlend) * winY;
 		compressAmt = mix(penZ * wx, penX * wz, faceBlend) * winY;
 	} else {
@@ -303,10 +303,10 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 		vec2 uDir = vec2(-nDir.y, nDir.x);
 		float along = dot(q.xz, nDir);
 		float lat = dot(q.xz, uDir);
-		float wu = 1.0 - smoothstep(R - 0.12, R + 0.45, abs(lat));
+		float wu = 1.0 - smoothstep(R - 0.08, R + 0.38, abs(lat));
 		float rNorm = clamp(abs(lat) / max(R + SOLID_OFFSET, 1e-4), 0.0, 1.0);
 		float arch = sqrt(max(0.0, 1.0 - rNorm * rNorm)) * (R + SOLID_OFFSET);
-		float penC = max(0.0, arch - along) * 0.90;
+		float penC = max(0.0, arch - along) * 0.98;
 		pushXZ = nDir * (penC * wu * winY);
 		compressAmt = penC * wu * winY;
 	}

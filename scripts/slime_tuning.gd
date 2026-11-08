@@ -48,8 +48,8 @@ extends Resource
 ## applied identically to collision, shader, picking, shadows and coverage.
 @export var liquid_spread_ratio := 2.13
 ## Minimum legal lateral squeeze for normal posture, as a fraction of rest width.
-## Matches the visible Core Sphere diameter (~0.88 m at scale 1.0).
-@export_range(0.05, 1.0, 0.01) var min_normal_squeeze := 0.22
+## Matches the visible Core Sphere radius (0.18 * 2.0m = 0.36m radius, 0.72m diameter at scale 1.0).
+@export_range(0.05, 1.0, 0.01) var min_normal_squeeze := 0.18
 ## Minimum legal lateral squeeze for liquid posture, as a fraction of rest width.
 @export_range(0.05, 1.0, 0.01) var min_liquid_squeeze := 0.12
 ## Inner clearance sphere radius ratio relative to the legal minimum squeeze.

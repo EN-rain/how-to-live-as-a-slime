@@ -435,9 +435,9 @@ func _sync_core_visual() -> void:
 	if _core_mesh == null or model == null:
 		return
 	var s := maxf(slime_scale, 1e-4)
-	var rxz := clampf((model.core_sphere_radius() / s) * 0.35, 0.08, 0.38)
-	var ry := minf(rxz, (model.full_height * 0.20) / s)
-	var center_local_y := (-model.rest_half_height * s + model.full_height * 0.45) / s
+	var rxz := model.core_sphere_radius() / s
+	var ry := rxz
+	var center_local_y := (-model.rest_half_height * s + model.core_sphere_radius()) / s
 	_core_mesh.position = Vector3(0.0, center_local_y, 0.0)
 	_core_mesh.scale = Vector3(rxz, ry, rxz)
 

@@ -134,18 +134,18 @@ func min_squeeze() -> float:
 
 
 ## Resolve posture dimensions. Returns true when the baked envelope must be rebuilt.
-func resolve(p_scale: float, _p_liquid: float, _p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> bool:
+func resolve(p_scale: float, _p_liquid: float, _p_height_ratio: float, _p_squeeze: float, p_axis: Vector3) -> bool:
 	scale = p_scale
 	liquid = 0.0
 	height_ratio = 1.0
-	squeeze = clampf(p_squeeze, min_squeeze(), 1.0)
+	squeeze = min_squeeze()
 	if p_axis.length_squared() > 1e-6:
 		axis = Vector3(p_axis.x, 0.0, p_axis.z).normalized()
 	spread = 1.0
-	flow_stretch = squeeze
+	flow_stretch = 1.0
 	height_boost = 1.0
 	full_height = rest_full_height * scale
-	semi_a = rest_max_radius * scale * squeeze
+	semi_a = rest_max_radius * scale
 	semi_b = semi_a
 	var key := posture_key_for(scale, liquid, height_ratio, squeeze, axis)
 	var e := _cache_entry(scale, liquid, height_ratio, squeeze, axis)
@@ -350,7 +350,7 @@ func core_sphere_radius() -> float:
 
 
 func core_sphere_center() -> Vector3:
-	return center()
+	return foot + Vector3(0.0, core_sphere_radius(), 0.0)
 
 
 ## Cached circular inner core hull at the posture's minimum legal radius.
