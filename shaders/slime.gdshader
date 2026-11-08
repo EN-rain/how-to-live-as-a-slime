@@ -251,9 +251,8 @@ vec3 solidPushLocal(vec3 q, float shape, vec3 h) {
 	return vec3(f.y * mag, 0.0, f.z * mag);
 }
 
-// Conforms the slime surface around an obstacle (both in normal posture and Z puddle posture)
-// so the body visibly molds/compresses against narrow passage walls without clipping through
-// the obstacle or poking out its far side.
+// Conforms the slime surface around an obstacle so the body visibly molds/compresses
+// against narrow passage walls and low roofs without clipping or jagged normal creases.
 vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
 	float cy = cos(yaw);
 	float sy = sin(yaw);
@@ -261,9 +260,19 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
 	if (q.y > h.y + 0.25 + blur || q.y < -h.y - blur) return vec3(0.0);
 
+	// Overhead roof / tunnel ceiling check: if the obstacle bottom is suspended above the floor,
+	// press the top of the slime smoothly down underneath the roof without flattening into a puddle.
+	if (c.y - h.y > -uRefRadius * 0.50) {
+		float wxRoof = 1.0 - smoothstep(h.x - 0.10, h.x + 0.40, abs(q.x));
+		float wzRoof = 1.0 - smoothstep(h.z - 0.10, h.z + 0.40, abs(q.z));
+		float penY = max(0.0, q.y - (-h.y - SOLID_OFFSET));
+		float pushDown = -penY * 0.90 * wxRoof * wzRoof;
+		return vec3(0.0, pushDown, 0.0);
+	}
+
 	// Slime center (0, p.y, 0) in obstacle local coordinates
 	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
-	float winY = 1.0 - smoothstep(-0.02, 0.22, q.y - h.y);
+	float winY = 1.0 - smoothstep(-0.04, 0.25, q.y - h.y);
 	float kind = floor(shape + 0.005);
 
 	vec2 pushXZ = vec2(0.0);
@@ -275,15 +284,15 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 		float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
 		float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
 
-		float penX = max(0.0, (h.x + SOLID_OFFSET) - sx * q.x);
-		float wz = 1.0 - smoothstep(h.z - 0.04, h.z + 0.34, abs(q.z));
+		float penX = max(0.0, (h.x + SOLID_OFFSET) - sx * q.x) * 0.90;
+		float wz = 1.0 - smoothstep(h.z - 0.12, h.z + 0.45, abs(q.z));
 		vec2 pushX = vec2(sx * penX * wz, 0.0);
 
-		float penZ = max(0.0, (h.z + SOLID_OFFSET) - sz * q.z);
-		float wx = 1.0 - smoothstep(h.x - 0.04, h.x + 0.34, abs(q.x));
+		float penZ = max(0.0, (h.z + SOLID_OFFSET) - sz * q.z) * 0.90;
+		float wx = 1.0 - smoothstep(h.x - 0.12, h.x + 0.45, abs(q.x));
 		vec2 pushZ = vec2(0.0, sz * penZ * wx);
 
-		float faceBlend = smoothstep(-0.20, 0.20, ox - oz);
+		float faceBlend = smoothstep(-0.25, 0.25, ox - oz);
 		pushXZ = mix(pushZ, pushX, faceBlend) * winY;
 		compressAmt = mix(penZ * wx, penX * wz, faceBlend) * winY;
 	} else {
@@ -294,15 +303,15 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 		vec2 uDir = vec2(-nDir.y, nDir.x);
 		float along = dot(q.xz, nDir);
 		float lat = dot(q.xz, uDir);
-		float wu = 1.0 - smoothstep(R - 0.04, R + 0.34, abs(lat));
+		float wu = 1.0 - smoothstep(R - 0.12, R + 0.45, abs(lat));
 		float rNorm = clamp(abs(lat) / max(R + SOLID_OFFSET, 1e-4), 0.0, 1.0);
 		float arch = sqrt(max(0.0, 1.0 - rNorm * rNorm)) * (R + SOLID_OFFSET);
-		float penC = max(0.0, arch - along);
+		float penC = max(0.0, arch - along) * 0.90;
 		pushXZ = nDir * (penC * wu * winY);
 		compressAmt = penC * wu * winY;
 	}
 
-	float rimLift = min(compressAmt, 0.9) * 0.24 * smoothstep(-0.35, 0.15, -abs(compressAmt - 0.35));
+	float rimLift = min(compressAmt, 0.8) * 0.18 * smoothstep(-0.40, 0.20, -abs(compressAmt - 0.35));
 	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
 	return vec3(worldPushXZ.x, rimLift, worldPushXZ.y);
 }
@@ -330,37 +339,6 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		float tB = clamp(baseH / 0.9, 0.0, 1.0);
 		p.y = groundFloor + 0.9 * (2.0 * tB * tB - tB * tB * tB);
 	}
-
-	if (abs(uLiquidHeight - 1.0) > 0.001 || uLiquid > 0.001) {
-		float liqH = max(uLiquidHeight, 0.01);
-		float liqR = max(uLiquidSpread, 0.01);
-		p.xz *= liqR;
-		p.y = groundFloor + (p.y - groundFloor) * liqH;
-	}
-	if (uLiquid > 0.001) {
-
-		// Directional flow surge: the leading edge surges forward in movement direction.
-		// Capped to the collision skin so it can never push the surface past the hull.
-		vec2 mdir = normalize(uMoveDir.xz + vec2(0.0001));
-		float flowAlong = dot(p.xz, mdir);
-		float surgeAmp = min(uMoveAmt * 0.30 * uLiquid, uSkinLocal);
-		p.xz += mdir * (surgeAmp * smoothstep(-1.2, 1.8, flowAlong));
-
-		// Viscous amoebic perimeter ripples (surface tension lobes), also inside the skin budget
-		float ang = atan(p.z, p.x);
-		float wobble = (sin(ang * 4.0 + t * 4.0) * 0.06 + sin(ang * 6.0 - t * 3.0) * 0.03) * uLiquid;
-		float distCenter = length(p.xz);
-		float wobbleCap = uSkinLocal / max(distCenter, 0.1);
-		wobble = clamp(wobble, -wobbleCap, wobbleCap);
-		p.xz *= 1.0 + wobble * smoothstep(0.4, 2.0, distCenter);
-
-		// Capillary surface ripples propagating across the liquid sheet
-		float capRipple = sin(distCenter * 4.0 - t * 7.0 + flowAlong * 2.0) * 0.030 * uLiquid;
-		p.y += capRipple * smoothstep(0.0, 0.35, p.y - groundFloor);
-	}
-
-	// Body stays circular in XZ (never stretched or squashed into an oval).
-	p.y = groundFloor + (p.y - groundFloor) * uSqueezeHeight;
 
 	// ---- Sticky Droplet Budding (E and Q split) ----
 	// Organic fluid separation: teardrop bridge stretches toward the partner,
@@ -510,7 +488,7 @@ void vertex() {
 	vec3 p1 = deformSlime(position + tangent * eps, normalize(position + tangent * eps), TIME);
 	vec3 p2 = deformSlime(position + bitangent * eps, normalize(position + bitangent * eps), TIME);
 
-	vec3 deformedNormal = normalize(cross(p1 - p0, p2 - p0));
+	vec3 deformedNormal = normalize(cross(p1 - p0, p2 - p0) + nrm * 1e-4);
 
 	vec4 worldPos = MODEL_MATRIX * vec4(p0, 1.0);
 	vWorldPosition = worldPos.xyz;

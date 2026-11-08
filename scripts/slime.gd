@@ -1040,40 +1040,13 @@ func _resolve_posture(dt: float) -> void:
 			squeeze_v = 0.0
 	squeeze_k = clampf(squeeze_k, min_sq_now, 1.0)
 
-	# --- Automatic height ducking under low ceilings (no Z key state) ---
 	liquid_request = false
 	liquid_amt = 0.0
-	var target_hr := _height_ratio_for(0.0, squeeze_k)
-	if target_hr < height_ratio:
-		height_ratio = target_hr
-	elif target_hr > height_ratio + 1e-4:
-		var hr_cand := minf(target_hr, height_ratio + 2.8 * dt)
-		if motor.posture_target_is_legal(slime_scale, 0.0, hr_cand, squeeze_k, axis):
-			height_ratio = hr_cand
-		else:
-			expansion_blocked = "overhead/ceiling blocks standing"
+	height_ratio = 1.0
 
 
-## Height ratio automatically ducks under low overhead ceilings when clearance is bigger than the core.
-func _height_ratio_for(_liq: float, sq: float) -> float:
-	if not tuning.allow_normal_vertical_compression:
-		return 1.0
-	var rest_h := model.rest_full_height * slime_scale
-	var min_ratio := tuning.min_liquid_height_ratio
-	var low_probe := model.cached_shape(slime_scale, 0.0, min_ratio, model.min_squeeze(), sq_dir, 1)
-	var low_h := rest_h * min_ratio
-	var rise := motor.ceiling_clearance_from(model.foot, rest_h * 1.15, low_probe)
-	if motor.velocity.length_squared() > 0.01:
-		var fwd := Vector3(motor.velocity.x, 0.0, motor.velocity.z).normalized()
-		var rise_ahead := motor.ceiling_clearance_from(model.foot + fwd * 0.65, rest_h * 1.15, low_probe)
-		rise = minf(rise, rise_ahead)
-	if rise == INF:
-		return 1.0
-	var avail := low_h + rise - tuning.skin * 2.0
-	if avail >= rest_h - 1e-3:
-		return 1.0
-	var allowed := clampf(avail / maxf(rest_h, 1e-4), 0.0, 1.0)
-	return clampf(allowed, min_ratio, 1.0)
+func _height_ratio_for(_liq: float, _sq: float) -> float:
+	return 1.0
 
 
 func _set_liquid_request(_value: bool) -> void:

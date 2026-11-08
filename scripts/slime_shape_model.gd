@@ -134,18 +134,18 @@ func min_squeeze() -> float:
 
 
 ## Resolve posture dimensions. Returns true when the baked envelope must be rebuilt.
-func resolve(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> bool:
+func resolve(p_scale: float, _p_liquid: float, _p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> bool:
 	scale = p_scale
-	liquid = p_liquid
-	height_ratio = p_height_ratio
+	liquid = 0.0
+	height_ratio = 1.0
 	squeeze = clampf(p_squeeze, min_squeeze(), 1.0)
 	if p_axis.length_squared() > 1e-6:
 		axis = Vector3(p_axis.x, 0.0, p_axis.z).normalized()
-	spread = pow(maxf(height_ratio, 1e-3), -0.5)
+	spread = 1.0
 	flow_stretch = squeeze
 	height_boost = 1.0
-	full_height = rest_full_height * scale * height_ratio
-	semi_a = rest_max_radius * scale * spread * squeeze
+	full_height = rest_full_height * scale
+	semi_a = rest_max_radius * scale * squeeze
 	semi_b = semi_a
 	var key := posture_key_for(scale, liquid, height_ratio, squeeze, axis)
 	var e := _cache_entry(scale, liquid, height_ratio, squeeze, axis)
@@ -220,12 +220,11 @@ func _cache_entry(p_scale: float, p_liquid: float, p_height_ratio: float, p_sque
 	return e
 
 
-## Support extents of a posture: circular horizontal radius (x == y) and full height (z).
-func _envelope_dims(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float) -> Vector3:
+## Support extents of a posture: circular horizontal radius (x == y) and proportional core height (z).
+func _envelope_dims(p_scale: float, p_liquid: float, _p_height_ratio: float, p_squeeze: float) -> Vector3:
 	var sq := clampf(p_squeeze, lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, p_liquid), 1.0)
-	var spr := pow(maxf(p_height_ratio, 1e-3), -0.5)
-	var r := p_scale * spr * sq
-	return Vector3(r, r, p_scale * p_height_ratio)
+	var r := p_scale * sq
+	return Vector3(r, r, p_scale * sq)
 
 
 func _canonical_axis(p_axis: Vector3) -> Vector3:
@@ -298,12 +297,11 @@ static func erode_points(pts: PackedVector3Array, margin: float) -> PackedVector
 
 ## Bake envelope points (foot at origin, world orientation) for arbitrary dimensions
 ## without mutating the resolved state. Used for transition/expansion probes.
-func baked_points(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, _p_axis: Vector3) -> PackedVector3Array:
+func baked_points(p_scale: float, p_liquid: float, _p_height_ratio: float, p_squeeze: float, _p_axis: Vector3) -> PackedVector3Array:
 	debug_baked_points_count += 1
 	var sq := clampf(p_squeeze, lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, p_liquid), 1.0)
-	var spr := pow(maxf(p_height_ratio, 1e-3), -0.5)
-	var sa := p_scale * spr * sq
-	var sv := p_scale * p_height_ratio
+	var sa := p_scale * sq
+	var sv := p_scale * sq
 	var n := _unit_points.size()
 	var pts := PackedVector3Array()
 	pts.resize(n)
