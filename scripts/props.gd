@@ -800,10 +800,21 @@ func _hue(p: float, q: float, t: float) -> float:
 # Edibility & push-eating
 # ------------------------------------------------------------------------------------------------
 
+## Effective size ratio of a prop relative to a slime (combines linear dimension ratio and volume ratio).
+func _prop_size_ratio(s: Slime, p: PropData) -> float:
+	var S := maxf(s.model.scale, 1e-4)
+	var he := _half_of(p)
+	var prop_max_dim := 2.0 * maxf(he.x, maxf(he.y, he.z))
+	var slime_h := s.model.rest_full_height * S
+	var dim_ratio := prop_max_dim / maxf(slime_h, 1e-4)
+	var vol_ratio := p.real_volume / maxf(1e-4, s.get_volume())
+	return maxf(vol_ratio, pow(dim_ratio, 1.45))
+
+
 func is_edible_by_push(s: Slime, p: PropData) -> bool:
 	if p.state != STATE_IDLE or p.is_static or p.mesh == null:
 		return false
-	return s.get_volume() >= p.real_volume * tuning.edible_volume_ratio
+	return _prop_size_ratio(s, p) <= 0.78
 
 
 func devour(p: PropData, s: Slime) -> void:
@@ -836,7 +847,6 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 	var S := s.model.scale
 	var sp := s.global_position
 	var foot := s.model.foot
-	var s_vol := s.get_volume()
 	var sdt := minf(dt, 1.0 / 30.0)
 	var vis_r := s.model.rest_max_radius * S * s.model.spread
 	var nearby := query_nearby_props(Vector2(sp.x, sp.z), vis_r + 2.5)
@@ -844,7 +854,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 	for p in nearby:
 		if not is_edible_by_push(s, p):
 			if p.last_presser == s:
-				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
+				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
 			continue
 		var m := p.mesh
 		var he := _half_of(p)
@@ -864,11 +874,18 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		var v_check := s.pre_move_velocity if s.pre_move_velocity.length_squared() > s.motor.velocity.length_squared() else s.motor.velocity
 		var inward_speed := v_check.x * dir.x + v_check.z * dir.z
 
-		var in_contact := gap <= 0.22
-		var pressing := in_contact and (inward_speed > 0.02 or target > 0.02)
-		if not pressing:
+		var size_ratio := clampf(_prop_size_ratio(s, p) / 0.78, 0.0, 1.0)
+		var size_resistance := clampf((size_ratio - 0.16) / 0.84, 0.0, 1.0)
+
+		var in_contact := gap <= 0.15
+		var actively_pushing := in_contact and inward_speed > 0.08
+		if not actively_pushing:
 			if p.last_presser == s:
-				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.0)
+				var pushback_rate := lerpf(1.6, 3.8, size_resistance)
+				if p.engulf_front > 0.01 and size_resistance > 0.12 and in_contact:
+					var recoil := (1.2 + 3.2 * size_resistance) * p.engulf_front
+					s.motor.velocity -= dir * (recoil * dt)
+				p.engulf_front = maxf(0.0, p.engulf_front - dt * pushback_rate)
 				var acc_r := 140.0 * (0.0 - p.pd) - 8.0 * p.pv
 				p.pv += acc_r * sdt
 				p.pd += p.pv * sdt
@@ -887,8 +904,7 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 				continue
 
 		p.last_presser = s
-		var vol_ratio := clampf(p.real_volume / maxf(1e-4, s_vol), 0.0, 1.0)
-		var thr := ro * (0.85 + 0.45 * vol_ratio) + 0.1 * S
+		var thr := ro * (0.85 + 0.45 * size_ratio) + 0.1 * S
 		var press_depth := maxf(target, 0.12 - gap)
 		var acc := 140.0 * (press_depth - p.pd) - 8.0 * p.pv
 		p.pv += acc * sdt
@@ -900,8 +916,20 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		p.p_ro = ro
 		p.p_thr = thr
 
-		var size_factor := maxf(0.30, 1.0 - vol_ratio * 0.60)
-		var advance_rate := 3.2 * size_factor
+		# Heavy resistance: near-slime-size objects resist inward push speed and require sustained effort
+		var resist_curve := pow(size_resistance, 1.35)
+		if size_resistance > 0.05:
+			var allowed_inward := lerpf(s.cur_max, s.cur_max * 0.10, resist_curve)
+			var cur_in := s.motor.velocity.dot(dir)
+			if cur_in > allowed_inward:
+				s.motor.velocity -= dir * (cur_in - allowed_inward)
+			# Physical wall resistance before the engulf front opens
+			var resist_standoff := vis_r * lerpf(0.25, 0.85, resist_curve) * (1.0 - p.engulf_front * 0.80) + ro
+			if d < resist_standoff:
+				var push_out := minf(resist_standoff - d, 0.06)
+				s.motor.apply_slime_separation(-dir * push_out, -dir)
+
+		var advance_rate := lerpf(3.2, 0.25, pow(size_resistance, 1.15))
 		p.engulf_front = minf(1.0, p.engulf_front + advance_rate * dt)
 
 		if p.engulf_front >= 0.95:
@@ -1346,6 +1374,8 @@ func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 		_solid_pos_buf[i] = (m - sp) / S
 		_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
 		var weight := 1.0
+		if is_edible_by_push(s, p) and p.last_presser == s and p.engulf_front > 0.01:
+			weight = clampf(1.0 - pow(p.engulf_front, 1.5) * 0.85, 0.15, 1.0)
 		_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
 		_solid_half_buf[i] = _box_half(p, S)
 
