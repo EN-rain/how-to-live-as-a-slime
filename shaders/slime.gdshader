@@ -252,55 +252,62 @@ vec3 solidPushLocal(vec3 q, float shape, vec3 h) {
 }
 
 // Conforms the slime surface around an obstacle so the body visibly molds/compresses
-// against narrow passage walls, corners, and low roofs with zero intersection.
+// against narrow passage walls, corners, tops of low cubes, and bottoms of low roofs with zero intersection.
 vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
 	float cy = cos(yaw);
 	float sy = sin(yaw);
 	vec3 dv = p - c;
 	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
-	if (q.y > h.y + 0.25 + blur || q.y < -h.y - blur) return vec3(0.0);
+	vec3 H = h + vec3(SOLID_OFFSET);
+	if (q.y > H.y + 0.20 || q.y < -H.y - 0.20) return vec3(0.0);
 
-	// Overhead roof / tunnel ceiling check: if the obstacle bottom is suspended above the floor,
-	// press the top of the slime smoothly down underneath the roof.
-	if (c.y - h.y > -uRefRadius * 0.45) {
-		float wxRoof = 1.0 - smoothstep(h.x, h.x + 0.35, abs(q.x));
-		float wzRoof = 1.0 - smoothstep(h.z, h.z + 0.35, abs(q.z));
-		float penY = max(0.0, q.y - (-h.y - SOLID_OFFSET));
-		float pushDown = -penY * 0.98 * wxRoof * wzRoof;
-		return vec3(0.0, pushDown, 0.0);
+	// Slime center in obstacle local coordinates
+	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
+	float groundFloorLocal = -uRefRadius * (0.86 - uMelt * 0.22);
+
+	// Overhead roof / tunnel ceiling check: if the obstacle bottom is suspended above the floor
+	if (c.y - h.y > groundFloorLocal + 0.35) {
+		if (abs(q.x) < H.x && abs(q.z) < H.z && q.y > -H.y) {
+			// If slime center is under the roof, push straight down to -H.y; if outside, push to nearest face
+			bool centerUnder = abs(qCenter.x) < H.x && abs(qCenter.y) < H.z;
+			if (centerUnder) {
+				return vec3(0.0, (-H.y) - q.y, 0.0);
+			}
+		}
 	}
 
-	// Slime center (0, p.y, 0) in obstacle local coordinates
-	vec2 qCenter = vec2(-c.x * cy + c.z * sy, -c.x * sy - c.z * cy);
-	float winY = 1.0 - smoothstep(-0.02, 0.22, q.y - h.y);
-	float kind = floor(shape + 0.005);
+	float winY = 1.0 - smoothstep(H.y, H.y + 0.16, q.y);
+	if (winY <= 0.001) return vec3(0.0);
 
+	float kind = floor(shape + 0.005);
 	vec2 origXZ = q.xz;
 	vec2 curXZ = q.xz;
 
 	if (kind < 0.5) {
-		// Step 1: Exact Ray-Box intersection from slime center (qCenter) to vertex (q.xz)
-		vec2 H = h.xz + vec2(SOLID_OFFSET);
+		vec2 Hxz = H.xz;
 		vec2 d = curXZ - qCenter;
 		vec2 safeD = sign(d + vec2(1e-7)) * max(abs(d), vec2(1e-5));
-		vec2 t0 = (-H - qCenter) / safeD;
-		vec2 t1 = ( H - qCenter) / safeD;
+		vec2 t0 = (-Hxz - qCenter) / safeD;
+		vec2 t1 = ( Hxz - qCenter) / safeD;
 		vec2 tMin2 = min(t0, t1);
 		vec2 tMax2 = max(t0, t1);
 		float tEnter = max(tMin2.x, tMin2.y);
 		float tExit = min(tMax2.x, tMax2.y);
 
 		if (tExit > max(tEnter, 0.0) && tEnter < 1.0) {
-			float tClamped = max(tEnter, 0.0);
-			vec2 hitPt = qCenter + d * tClamped;
-			float grazeW = tExit >= 1.0 ? 1.0 : clamp((tExit - tClamped) / 0.08, 0.0, 1.0);
-			curXZ = mix(curXZ, mix(hitPt, curXZ, 0.012), grazeW);
-		}
-
-		// Step 2: Smooth corner rounding on the near surface
-		vec3 f = footSd(vec3(curXZ.x, q.y, curXZ.y), shape, h, SOLID_ROUND);
-		if (f.x < SOLID_OFFSET) {
-			curXZ += f.yz * ((SOLID_OFFSET - f.x) * 0.985);
+			if (tEnter >= 0.0) {
+				curXZ = qCenter + d * tEnter;
+			} else {
+				float sx = qCenter.x >= 0.0 ? 1.0 : -1.0;
+				float sz = qCenter.y >= 0.0 ? 1.0 : -1.0;
+				float dxFace = Hxz.x - sx * curXZ.x;
+				float dzFace = Hxz.y - sz * curXZ.y;
+				if (dxFace < dzFace) {
+					curXZ.x = sx * Hxz.x;
+				} else {
+					curXZ.y = sz * Hxz.y;
+				}
+			}
 		}
 	} else {
 		float R = h.x + SOLID_OFFSET;
@@ -315,19 +322,19 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 			float tEnter = (-b - sqD) / a;
 			float tExit = (-b + sqD) / a;
 			if (tExit > max(tEnter, 0.0) && tEnter < 1.0) {
-				float tClamped = max(tEnter, 0.0);
-				vec2 hitPt = qCenter + d * tClamped;
-				float grazeW = tExit >= 1.0 ? 1.0 : clamp((tExit - tClamped) / 0.08, 0.0, 1.0);
-				curXZ = mix(curXZ, mix(hitPt, curXZ, 0.012), grazeW);
+				if (tEnter >= 0.0) {
+					curXZ = qCenter + d * tEnter;
+				} else {
+					float rLen = max(length(curXZ), 1e-4);
+					curXZ = (curXZ / rLen) * R;
+				}
 			}
 		}
 	}
 
 	vec2 pushXZ = (curXZ - origXZ) * winY;
-	float compressAmt = length(pushXZ);
-	float rimLift = min(compressAmt, 0.8) * 0.16 * smoothstep(-0.40, 0.20, -abs(compressAmt - 0.35));
 	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
-	return vec3(worldPushXZ.x, rimLift, worldPushXZ.y);
+	return vec3(worldPushXZ.x, 0.0, worldPushXZ.y);
 }
 
 float smin_neck(float a, float b, float k) {
@@ -477,14 +484,17 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		}
 	}
 
-	// Final authoritative obstacle conforming across up to 8 nearby objects.
-	for (int i = 0; i < 8; i++) {
-		float solidAmt = uSolidParam[i].y;
-		if (solidAmt > 0.001) {
-			vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
-			p += dent * solidAmt;
+	// Final authoritative obstacle conforming across up to 8 nearby objects (2 passes resolve multi-cube corners).
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < 8; i++) {
+			float solidAmt = uSolidParam[i].y;
+			if (solidAmt > 0.001) {
+				vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
+				p += dent * solidAmt;
+			}
 		}
 	}
+	p.y = max(p.y, groundFloor);
 
 	return p;
 }

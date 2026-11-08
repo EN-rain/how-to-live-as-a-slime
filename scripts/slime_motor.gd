@@ -136,6 +136,12 @@ func _sync_foot() -> void:
 	model.set_foot(owner_node.global_position + Vector3(0, -model.rest_half_height * model.scale, 0))
 
 
+## Horizontal sweep origin for the Core Sphere: aligned with the slime's X/Z center and
+## positioned just above the foot so it collides with low cubes (0.5m+) while passing under low tunnels (0.75m+).
+func core_sweep_origin() -> Vector3:
+	return model.foot + Vector3(0.0, model.core_sphere_radius() + 0.02, 0.0)
+
+
 ## Reuses one parameters object: every query path configures the fields it reads
 ## and consumes the result synchronously, so a shared instance is safe and avoids
 ## an allocation per probe.
@@ -157,8 +163,9 @@ func _query(at_foot: Vector3, probe: Shape3D = null, use_exclude := true, mask :
 func recover_overlap() -> void:
 	_sync_foot()
 	var space := _space()
+	var sphere := core_sphere_shape()
 	for _i in tuning.recovery_iterations:
-		var q := _query(model.foot)
+		var q := _query(core_sweep_origin(), sphere)
 		q.exclude = _exclude.duplicate()
 		var sum := Vector3.ZERO
 		var first := Vector3.ZERO
@@ -183,17 +190,14 @@ func recover_overlap() -> void:
 			return
 		var avg := sum.normalized() if sum.length_squared() > 1e-6 else first
 		var want := tuning.skin * 2.0 + 0.01
-		var fr := _cast(model.foot, avg * want)
+		var fr := _cast(core_sweep_origin(), avg * want, true, sphere)
 		var safe: float = fr[0]
 		var unsafe: float = fr[1]
 		var step := want
 		if not (safe <= 0.0 and unsafe <= 0.0):
-			# Clear sweep (or partial): never force past whatever lies in the way.
 			step = want * clampf(safe, 0.0, 1.0)
 			if step <= 1e-4:
 				return
-		# A start-in-collision cast reports 0/0; the averaged contact normal is the
-		# only escape direction, so allow the single bounded skin push.
 		owner_node.global_position += avg * step
 		var into := velocity.dot(avg)
 		if into < 0.0:
@@ -252,7 +256,7 @@ func move_horizontal(motion: Vector3) -> void:
 		for _i in tuning.slide_iterations:
 			if slid.length_squared() < 1e-10:
 				break
-			var c_pos := model.core_sphere_center()
+			var c_pos := core_sweep_origin()
 			var fr := _cast(c_pos, slid, true, sphere)
 			var safe: float = fr[0]
 			var unsafe: float = fr[1]
@@ -271,7 +275,7 @@ func move_horizontal(motion: Vector3) -> void:
 					break
 			else:
 				stalled = 0
-			var rest := _contact_rest(model.core_sphere_center() + slid * unsafe, sphere)
+			var rest := _contact_rest(core_sweep_origin() + slid * unsafe, sphere)
 			if rest.is_empty():
 				break
 			var n: Vector3 = rest.normal
@@ -305,7 +309,7 @@ func apply_slime_separation(push: Vector3, normal: Vector3) -> float:
 		if velocity.dot(n) < 0.0:
 			velocity = velocity.slide(n)
 	_sync_foot()
-	var fr := _cast(model.foot, push, true, null, LAYER_OBSTACLES)
+	var fr := _cast(core_sweep_origin(), push, true, core_sphere_shape(), LAYER_OBSTACLES)
 	var safe: float = fr[0]
 	var unsafe: float = fr[1]
 	# A clear path reports 1/1. A cast that begins inside geometry reports 0/0, which

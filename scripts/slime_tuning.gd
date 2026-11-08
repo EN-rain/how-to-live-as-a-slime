@@ -18,8 +18,8 @@ extends Resource
 @export var max_step_fraction := 0.3
 @export var gravity := 22.0
 ## How far above the foot the motor may step/climb onto support, per unit scale.
-@export var climb_reach := 0.55
-@export var liquid_climb_reach := 0.75
+@export var climb_reach := 0.08
+@export var liquid_climb_reach := 0.08
 @export var slide_iterations := 4
 @export var recovery_iterations := 6
 ## Resolve slime-vs-slime overlap analytically from the shape model instead of

@@ -238,16 +238,18 @@ func step(dt: float) -> void:
 		if not is_instance_valid(s):
 			continue
 		if not s.is_merging:
-			# Read the motor's contacts before push-eating issues its own
-			# move_horizontal calls, which would clear that feedback.
 			_register_motor_contacts(s, dt)
 			_process_edible_props(s, dt)
 		_update_inside_props(s, dt)
 		_update_slime_splat(s, dt)
-		_update_eat_uniforms(s, dt)
-		_update_solid_uniforms(s)
 
 	_separate_slimes()
+
+	for s in registered_slimes:
+		if not is_instance_valid(s):
+			continue
+		_update_eat_uniforms(s, dt)
+		_update_solid_uniforms(s)
 
 	# Press state that no body refreshed this tick (walked away, merged, freed)
 	# relaxes here, so a narrow per-slime query can never leave a prop permanently
@@ -623,7 +625,7 @@ func rids_edible_by(s: Slime) -> Array[RID]:
 		if p.eater == s and p.body != null:
 			rids.append(p.body.get_rid())
 	for p in s.pressing_props:
-		if p.body != null and p.state == STATE_IDLE and p.last_presser == s and p.engulf_front > 0.005:
+		if p.body != null and p.state == STATE_IDLE and p.last_presser == s and p.engulf_front >= 0.85:
 			rids.append(p.body.get_rid())
 	return rids
 
@@ -1295,57 +1297,16 @@ func _update_inside_props(s: Slime, dt: float) -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _update_eat_uniforms(s: Slime, dt: float) -> void:
-	var S := s.model.scale
-	var sp := s.global_position
+	var S := maxf(s.model.scale, 1e-4)
+	var sp := s.body.global_position if s.body != null else s.global_position
 	for i in 6:
 		_eat_pos_buf[i] = Vector3.ZERO
 		_eat_param_buf[i] = Vector3.ZERO
 		_box_half_buf[i] = Vector3(0.01, 0.01, 0.01)
 
-	var nearby := query_nearby_props(Vector2(sp.x, sp.z), s.model.rest_max_radius * S * 1.1 + 6.0 * S + 4.0)
-	var pressing: Array[PropData] = []
-	for p in nearby:
-		if p.pd > 0.004 and p.p_ro > 0.0 and p.last_presser == s:
-			var dist := Vector2(p.mesh.global_position.x - sp.x, p.mesh.global_position.z - sp.z).length()
-			if dist <= s.model.rest_max_radius * S * 1.1 + p.p_ro:
-				pressing.append(p)
-	pressing.sort_custom(func(a: PropData, b: PropData) -> bool: return a.pd > b.pd)
-	if pressing.size() > 3:
-		pressing.resize(3)
-
-	var pa := 0.0
-	var press_dir := Vector3(0, 0, 1)
-	for i in pressing.size():
-		var p := pressing[i]
-		var m := p.mesh.global_position
-		var dx := m.x - sp.x
-		var dz := m.z - sp.z
-		var d := maxf(Vector2(dx, dz).length(), 1e-4)
-		var dir := Vector3(dx / d, 0.0, dz / d)
-		var dv := (s.model.world_radius_at(m.y, dir) + p.p_ro - p.pd) / maxf(S, 1e-4)
-		_eat_pos_buf[i] = Vector3(dir.x * dv, (m.y - sp.y) / maxf(S, 1e-4), dir.z * dv)
-		_eat_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, 1.0, p.mesh.rotation.y + p.phase)
-		_box_half_buf[i] = _box_half(p, S)
-		var a := minf(1.0, p.pd / p.p_thr)
-		var vr := clampf(p.real_volume / maxf(1e-4, s.get_volume()), 0.0, 1.0)
-		var strain_boost := 1.0 + 0.45 * clampf((vr - 0.25) / 0.75, 0.0, 1.0)
-		a = minf(1.0, a * strain_boost)
-		if a > pa:
-			pa = a
-			press_dir = dir
-
-	s.press_amt = lerpf(s.press_amt, pa, 1.0 - exp(-15.0 * dt))
+	s.press_amt = lerpf(s.press_amt, 0.0, 1.0 - exp(-15.0 * dt))
 	s.set_shader_param("uPressAmt", s.press_amt)
-	s.set_shader_param("uPressDir", press_dir)
-
-	var near := 0.0
-	for p in nearby:
-		if p.p_ro <= 0.0 or p.last_presser != s:
-			continue
-		var to_prop := Vector3(p.mesh.global_position.x - sp.x, 0.0, p.mesh.global_position.z - sp.z)
-		var gap := to_prop.length() - (s.model.horizontal_support(to_prop) + p.p_ro)
-		near = maxf(near, minf(1.0, maxf(0.0, 1.0 - gap / (1.5 * S + p.p_ro))))
-	s.calm = lerpf(s.calm, maxf(near, s.press_amt), 1.0 - exp(-12.0 * dt))
+	s.calm = lerpf(s.calm, 0.0, 1.0 - exp(-12.0 * dt))
 
 	var slot := 3
 	for p in active_eating_props:
@@ -1366,11 +1327,15 @@ func _update_eat_uniforms(s: Slime, dt: float) -> void:
 		s._mat.set_shader_parameter("uBoxHalf", _box_half_buf)
 
 
-func _update_solid_uniforms(s: Slime) -> void:
+func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
+	if s.model == null:
+		return
 	var S := maxf(s.model.scale, 1e-4)
-	var sp := s.global_position
-	var foot_y := s.model.foot.y
-	var top_y := foot_y + s.model.full_height
+	if use_visual_body and s.body != null:
+		S = maxf(s.slime_scale * s.body.scale.x, 1e-4)
+	var sp := s.body.global_position if (use_visual_body and s.body != null) else s.global_position
+	var foot_y := sp.y - s.model.rest_half_height * S
+	var top_y := foot_y + s.model.rest_full_height * S
 	for i in 8:
 		_solid_pos_buf[i] = Vector3.ZERO
 		_solid_param_buf[i] = Vector3.ZERO
@@ -1403,8 +1368,6 @@ func _update_solid_uniforms(s: Slime) -> void:
 		_solid_pos_buf[i] = (m - sp) / S
 		_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
 		var weight := 1.0
-		if is_edible_by_push(s, p) and p.last_presser == s:
-			weight = clampf(1.0 - p.engulf_front * 0.90, 0.0, 1.0)
 		_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
 		_solid_half_buf[i] = _box_half(p, S)
 

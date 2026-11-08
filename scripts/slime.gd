@@ -436,7 +436,15 @@ func _sync_core_visual() -> void:
 		return
 	var s := maxf(slime_scale, 1e-4)
 	var rxz := model.core_sphere_radius() / s
-	_core_mesh.position = Vector3.ZERO
+	var cy := 0.0
+	if motor != null and is_inside_tree():
+		var rise := motor.ceiling_clearance_from(motor.core_sweep_origin(), model.rest_full_height * s, motor.core_sphere_shape())
+		if rise < INF:
+			var roof_world_y := motor.core_sweep_origin().y + model.core_sphere_radius() + rise
+			var max_center_world_y := roof_world_y - model.core_sphere_radius() - 0.08 * s
+			var max_local_y := (max_center_world_y - global_position.y) / s
+			cy = minf(0.0, max_local_y)
+	_core_mesh.position = Vector3(0.0, cy, 0.0)
 	_core_mesh.scale = Vector3(rxz, rxz, rxz)
 
 
@@ -695,6 +703,8 @@ func _process(_delta: float) -> void:
 	# The node already applies slime_scale; undo it on the child so the total visual
 	# scale is exactly the interpolated one and never compounds between ticks.
 	body.scale = Vector3.ONE * (s / maxf(slime_scale, 1e-4))
+	if props != null and not _is_sleeping:
+		props._update_solid_uniforms(self, true)
 
 
 func _physics_process(delta: float) -> void:

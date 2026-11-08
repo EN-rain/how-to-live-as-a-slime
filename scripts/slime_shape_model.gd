@@ -329,7 +329,7 @@ func world_radius_at(world_y: float, _dir: Vector3) -> float:
 	if world_y >= foot.y + full_height:
 		return semi_a
 	var rest_h := (world_y - foot.y) / maxf(1e-6, scale * height_ratio)
-	return rest_radius_at(rest_h) * scale * spread * squeeze
+	return rest_radius_at(rest_h) * scale * spread
 
 
 ## Convert a world offset from the actor root into mesh-local shader units.
