@@ -53,6 +53,8 @@ var height_ratio := 1.0
 var squeeze_k := 1.0
 var squeeze_v := 0.0
 var sq_dir := Vector3(1.0, 0.0, 0.0)
+## Squeeze the passage session is asking for this tick (diagnostics / tests).
+var sq_target := 1.0
 var expansion_blocked := ""
 
 # Motion/contact feedback used by the presentation layer only.
@@ -73,6 +75,11 @@ var cur_gap_center := Vector2.ZERO
 var cur_gap_w := INF
 var cur_gap_dir := Vector2.ZERO
 var _passage: Dictionary = {}
+## Latched passage session: pair identity + a stable axis. The hint acquires; the
+## session owns the lifetime, so the neck uniform cannot blink mid-gate and the
+## axis cannot flip between two nearby candidate pairs.
+var _passage_session: Dictionary = {}
+var _passage_cooldown := 0.0
 
 # Engulf drape state.
 var engulf_target = null
@@ -92,7 +99,14 @@ var bud_timer := 0.0
 var bud_parent: Slime = null
 var bud_target_scale := 1.0
 var bud_fwd := Vector3.FORWARD
+## Pre-split scale: both bodies derive their scale from one shared volume budget.
+var bud_start_scale := 1.0
+## Centre distance chosen by the spawn preflight; the clone starts separated.
+var bud_sep := 0.0
+var bud_growth_blocked := false
 var _bud_snapped := false
+## Once snapped, collision stays off until the pair is provably apart.
+var _bud_clear := false
 
 # Merge animation state
 var is_merging := false
@@ -127,6 +141,13 @@ var _facing_yaw := 0.0
 var _lean := Vector3.ZERO
 var _lean_vel := Vector3.ZERO
 var _velocity_cache := Vector3.ZERO
+## Last committed posture that cleared the world, restored if a post-move check fails.
+var _safe_posture: Array = []
+
+## Baked-hull proxy on SlimeMotor.LAYER_SLIMES. It shares the model's shape resource,
+## so every posture change is published to other slimes automatically.
+var _proxy: StaticBody3D
+var fission_clone: Slime = null
 
 var time: float:
 	get:
@@ -172,7 +193,6 @@ func _ready() -> void:
 		_mat = body.material_override.duplicate() as ShaderMaterial
 		body.material_override = _mat
 		_mat.set_shader_parameter("uMelt", tuning.melt)
-		_mat.set_shader_parameter("uSqueezeElong", tuning.squeeze_elongation)
 		_reset_array_uniforms()
 
 	if not is_budding:
@@ -194,6 +214,7 @@ func _ready() -> void:
 	global_position.y = tuning.floor_y + tuning.skin + model.rest_half_height * slime_scale
 	model.set_foot(global_position + Vector3(0.0, -model.rest_half_height * slime_scale, 0.0))
 	_apply_transform()
+	_setup_proxy()
 
 	if props:
 		props.register_slime(self)
@@ -202,6 +223,58 @@ func _ready() -> void:
 func _exit_tree() -> void:
 	if props and is_instance_valid(props):
 		props.unregister_slime(self)
+
+
+func _setup_proxy() -> void:
+	_proxy = StaticBody3D.new()
+	_proxy.name = "SlimeProxy"
+	_proxy.top_level = true
+	_proxy.collision_layer = SlimeMotor.LAYER_SLIMES
+	_proxy.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	cs.shape = model.shape
+	_proxy.add_child(cs)
+	add_child(_proxy)
+	_sync_proxy()
+
+
+## Publish the resolved footprint at the moment the motor last committed it.
+func _sync_proxy() -> void:
+	if _proxy == null or model == null:
+		return
+	var foot := global_position + Vector3(0.0, -model.rest_half_height * model.scale, 0.0)
+	model.set_foot(foot)
+	_proxy.global_transform = Transform3D(Basis.IDENTITY, foot)
+
+
+func get_proxy_rid() -> RID:
+	return _proxy.get_rid() if _proxy != null else RID()
+
+
+## Own proxy + exempt partners + props this slime may pass through. Rebuilt before
+## every posture probe and movement so it can never validate against a stale set.
+func _refresh_exclusions() -> void:
+	var rids: Array[RID] = []
+	if _proxy != null:
+		rids.append(_proxy.get_rid())
+	rids.append_array(_exempt_rids())
+	if props:
+		rids.append_array(props.rids_edible_by(self))
+	motor.set_exclude(rids)
+
+
+## Partners this body intentionally overlaps while splitting, budding or merging.
+func _exempt_rids() -> Array[RID]:
+	var rids: Array[RID] = []
+	if is_budding and bud_parent != null and is_instance_valid(bud_parent) \
+			and not (_bud_snapped and _bud_clear):
+		rids.append(bud_parent.get_proxy_rid())
+	if is_fissioning and fission_clone != null and is_instance_valid(fission_clone) \
+			and not (fission_clone._bud_snapped and fission_clone._bud_clear):
+		rids.append(fission_clone.get_proxy_rid())
+	if is_merging and merge_target != null and is_instance_valid(merge_target):
+		rids.append(merge_target.get_proxy_rid())
+	return rids
 
 
 func _reset_array_uniforms() -> void:
@@ -224,6 +297,7 @@ func _reset_array_uniforms() -> void:
 	_mat.set_shader_parameter("uDrapeAmt", 0.0)
 	_mat.set_shader_parameter("uSplitAmt", 0.0)
 	_mat.set_shader_parameter("uSqueeze", 0.0)
+	_mat.set_shader_parameter("uGapLocal", Vector3.ZERO)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -316,6 +390,8 @@ func _physics_process(delta: float) -> void:
 	_time += dt
 	_impulse_time += dt
 	_impulse2_time += dt
+	# Cleared once per tick so posture/growth reasons survive until presentation.
+	expansion_blocked = ""
 
 	if is_merging:
 		_tick_merge(dt)
@@ -327,24 +403,27 @@ func _physics_process(delta: float) -> void:
 		return
 
 	if is_fissioning:
+		# The split tick owns scale, posture, support and presentation for this slime;
+		# running the normal pipeline afterwards would give it two writers per tick.
 		_tick_fission(dt)
+		_tick_props(dt)
+		return
 
 	var desired := Vector3.ZERO
 	match role:
 		Role.PLAYER:
 			desired = _process_player_input()
-			if is_fissioning:
-				desired *= 0.35
 		Role.FOLLOWER:
 			desired = _process_follower_ai(dt)
 		Role.ROAMER:
 			desired = _process_roamer_ai(dt)
 
+	# Refresh before any posture/growth probe so this tick validates against the
+	# current yielding set instead of last tick's.
+	_refresh_exclusions()
 	_update_scale(dt)
 	_resolve_posture(dt)
 	model.resolve(slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir)
-	if props:
-		motor.set_exclude(props.rids_edible_by(self))
 
 	var v_resp := tuning.velocity_response * (0.6 if liquid_amt > 0.5 else 1.0)
 	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
@@ -353,6 +432,8 @@ func _physics_process(delta: float) -> void:
 	motor.move_vertical(dt, target_scale)
 	_clamp_arena()
 	_apply_transform()
+	_verify_posture_after_move()
+	_sync_proxy()
 
 	_update_presentation(dt)
 	_update_engulf(dt)
@@ -362,6 +443,24 @@ func _physics_process(delta: float) -> void:
 func _tick_props(dt: float) -> void:
 	if props:
 		props.slime_ticked(self, dt)
+
+
+## Belt-and-braces after translation: the committed posture must still clear the
+## world. If it does not, fall back to the last posture that did rather than leaving
+## the hull inside geometry until the next tick's probes notice.
+func _verify_posture_after_move() -> void:
+	if motor.hull_clear(tuning.skin * 2.0):
+		_safe_posture = [slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir]
+		return
+	if _safe_posture.is_empty():
+		return
+	slime_scale = _safe_posture[0]
+	liquid_amt = _safe_posture[1]
+	height_ratio = _safe_posture[2]
+	squeeze_k = _safe_posture[3]
+	sq_dir = _safe_posture[4]
+	model.resolve(slime_scale, liquid_amt, height_ratio, squeeze_k, sq_dir)
+	_apply_transform()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -378,64 +477,170 @@ func _update_scale(dt: float) -> void:
 		if not motor.posture_is_legal(new_scale, liquid_amt, height_ratio, squeeze_k, sq_dir):
 			expansion_blocked = "growth blocked by geometry"
 			return
+	_set_scale_anchored(new_scale)
+
+
+## Change body scale while keeping the foot where it is: the node origin must move
+## by the rest-height delta, otherwise growth raises (or shrinking sinks) the body
+## through the floor until move_vertical catches up.
+func _set_scale_anchored(new_scale: float) -> void:
+	var foot_y := model.foot.y
 	slime_scale = new_scale
+	global_position.y = foot_y + model.rest_half_height * new_scale
+	model.set_foot(Vector3(model.foot.x, foot_y, model.foot.z))
+
+
+## Maintain (or acquire) the passage session. While latched the same two bodies are
+## re-measured every tick; new hints are ignored. Release requires the trailing
+## extent to be past the corridor along flow AND the unsqueezed posture to validate,
+## so the squeeze outlives the pillars instead of snapping open mid-transit.
+func _update_passage() -> void:
+	if not _passage_session.is_empty():
+		var a = _passage_session["a"]
+		var b = _passage_session["b"]
+		var m: Dictionary = props.measure_passage_pair(self, a, b)
+		if m.is_empty():
+			_release_passage(0.0)
+			return
+		# One stable orientation for the whole session (opposite anchors flip signs).
+		var session_axis: Vector3 = _passage_session["axis"]
+		var session_flow: Vector3 = _passage_session["flow"]
+		# One stable orientation for the whole session (opposite anchors flip signs).
+		if Vector3(m["flow"]).dot(session_flow) < 0.0:
+			m["axis"] = -Vector3(m["axis"])
+			m["flow"] = -Vector3(m["flow"])
+		# Keep the squeeze direction aligned with the session as well; flipping flow
+		# flips the perpendicular axis together with it.
+		var m_axis: Vector3 = Vector3(m["axis"]).normalized()
+		if m_axis.dot(session_axis) < 0.0:
+			m_axis = -m_axis
+			m["axis"] = m_axis
+		session_axis = m_axis
+		_passage_session["axis"] = session_axis
+		var flow: Vector3 = m["flow"]
+		var center: Vector3 = m["center"]
+		var rel := (global_position - Vector3(center.x, 0.0, center.z)).dot(flow)
+		var half: float = m["half_length"]
+		# Released only once the TRAILING extent has passed the exit plane. Waiting for
+		# "either end outside" would release on the approach, before the squeeze starts.
+		var cleared := rel - model.semi_b > half
+		if cleared:
+			var rt := _height_ratio_for(liquid_amt, 1.0)
+			if motor.posture_is_legal(slime_scale, liquid_amt, rt, 1.0, session_axis):
+				_release_passage(0.35)
+				return
+		_passage = m
+		return
+
+	if _passage_cooldown > 0.0:
+		return
+	var hint: Dictionary = props.find_passage(self)
+	if hint.is_empty():
+		return
+	var required := _required_squeeze(hint["width"])
+	# The floor follows INTENT, not the current blend: with Z held the slime is
+	# heading for the liquid posture, whose minimum applies. Using the current
+	# (still-normal) floor would refuse to latch until it was already too late.
+	var floor_sq := tuning.min_liquid_squeeze if liquid_request else tuning.min_normal_squeeze
+	# Fail case: a corridor narrower than the legal floor is never latched. The sweep
+	# stops the body at the pillars and describe_block explains the refusal.
+	if required >= 1.0 or required < floor_sq - 1e-3:
+		return
+	var ax: Vector3 = hint["axis"]
+	# Canonicalise once: the ellipse axis has no meaningful sign, but the neck and
+	# the session must agree on one, and a later pair must not rotate it 90 degrees.
+	if ax.x < -1e-5 or (absf(ax.x) <= 1e-5 and ax.z < 0.0):
+		ax = -ax
+	ax = ax.normalized()
+	# Orient flow along the direction the body must travel to enter the corridor (from
+	# its current side). Without this, "past the exit" is indistinguishable from
+	# "still on the approach".
+	var flow: Vector3 = Vector3(hint["flow"]).normalized()
+	var to_gap := Vector3(hint["center"].x, 0.0, hint["center"].z) - Vector3(global_position.x, 0.0, global_position.z)
+	if to_gap.dot(flow) < 0.0:
+		flow = -flow
+	hint["flow"] = flow
+	_passage_session = {"a": hint["a"], "b": hint["b"], "axis": ax, "flow": flow}
+	_passage = hint
+
+
+func _release_passage(cooldown: float) -> void:
+	_passage_session = {}
+	_passage = {}
+	cur_gap_w = INF
+	_passage_cooldown = maxf(_passage_cooldown, cooldown)
+
+
+## Squeeze ratio needed to fit a gap with the current liquid footprint.
+func _required_squeeze(gap_w: float) -> float:
+	var spread_now := pow(maxf(lerpf(1.0, tuning.liquid_height_ratio, liquid_amt), 1e-3), -0.5)
+	var full_w := 2.0 * model.rest_max_radius * slime_scale * spread_now
+	return (gap_w - 2.0 * tuning.skin) / maxf(full_w, 1e-4)
 
 
 func _resolve_posture(dt: float) -> void:
-	expansion_blocked = ""
 	_passage = {}
 	cur_gap_w = INF
 	var axis := sq_dir
-	var sq_target := 1.0
+	sq_target = 1.0
 
+	_passage_cooldown = maxf(0.0, _passage_cooldown - dt)
 	if props != null:
-		_passage = props.find_passage(self)
+		_update_passage()
 	if not _passage.is_empty():
 		var gap_dir: Vector3 = _passage.get("axis", Vector3.ZERO)
 		if gap_dir.length_squared() > 1e-6:
 			axis = Vector3(gap_dir.x, 0.0, gap_dir.z).normalized()
 		var gap_w: float = _passage.get("width", INF)
-		var spread_now := lerpf(1.0, tuning.liquid_spread_ratio, liquid_amt)
-		var full_w := 2.0 * model.rest_max_radius * slime_scale * spread_now
 		var min_sq := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
-		var required := (gap_w - 2.0 * tuning.skin) / maxf(full_w, 1e-4)
-		sq_target = clampf(required, min_sq, 1.0)
+		sq_target = clampf(_required_squeeze(gap_w), min_sq, 1.0)
 		var gc: Vector3 = _passage.get("center", Vector3.ZERO)
 		cur_gap_center = Vector2(gc.x, gc.z)
 		cur_gap_w = gap_w
 		cur_gap_dir = Vector2(axis.x, axis.z)
-	sq_dir = axis
 
 	# --- Lateral squeeze spring (tighten into a passage, release when clear) ---
 	var stiffness := tuning.squeeze_in_rate if sq_target < squeeze_k else tuning.squeeze_out_rate
 	squeeze_v += (stiffness * (sq_target - squeeze_k) - 2.0 * sqrt(stiffness) * squeeze_v) * dt
 	var sq_cand := squeeze_k + squeeze_v * dt
 	var min_sq_now := lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, liquid_amt)
-	if sq_cand < squeeze_k:
-		sq_cand = maxf(sq_cand, min_sq_now)
+	if sq_cand < min_sq_now:
+		sq_cand = min_sq_now
+		squeeze_v = 0.0
+	elif sq_cand > 1.0:
+		sq_cand = 1.0
+		squeeze_v = 0.0
 
 	# Resting in the open: the posture cannot change enough to matter, so skip
 	# rebuilding convex hulls every physics tick.
 	if absf(sq_cand - squeeze_k) < 1e-4 and squeeze_k >= 0.999 and sq_target >= 0.999:
 		squeeze_k = 1.0
 		squeeze_v = 0.0
+		sq_dir = axis
 	else:
 		var r := _height_ratio_for(liquid_amt, sq_cand)
 		if motor.posture_is_legal(slime_scale, liquid_amt, r, sq_cand, axis):
 			squeeze_k = sq_cand
+			# Commit the (canonicalised) axis only once the posture passes, so a
+			# rejected hint never rotates the envelope or feeds a stale direction.
+			sq_dir = axis
 		else:
+			# Hold the last legal posture instead of re-probing the same value.
 			squeeze_v = 0.0
-			if expansion_blocked == "":
+			# A gradual squeeze can be blocked by a corner that the *final* posture
+			# clears (the wide shoulder clips the passage lip before the body is
+			# narrow enough). Intermediate hulls of a narrowing transition are larger
+			# than both endpoints along flow, so test the committed target alone.
+			var snapped := false
+			if sq_target < squeeze_k - 1e-4:
+				var rt := _height_ratio_for(liquid_amt, sq_target)
+				if motor.posture_target_is_legal(slime_scale, liquid_amt, rt, sq_target, axis):
+					squeeze_k = sq_target
+					sq_dir = axis
+					snapped = true
+			if not snapped and expansion_blocked == "":
 				expansion_blocked = motor.describe_block(r, sq_cand)
-			var test_sq := minf(sq_cand, 1.0)
-			if motor.posture_is_legal(slime_scale, liquid_amt, _height_ratio_for(liquid_amt, test_sq), test_sq, axis):
-				squeeze_k = minf(sq_cand, 1.0)
-			else:
-				squeeze_v = 0.0
-				if expansion_blocked == "":
-					expansion_blocked = motor.describe_block(_height_ratio_for(liquid_amt, 1.0), 1.0)
-	if squeeze_k < min_sq_now:
-		squeeze_k = min_sq_now
+	squeeze_k = clampf(squeeze_k, min_sq_now, 1.0)
 
 	# --- Liquid posture blend ---
 	var target_liq := 1.0 if liquid_request else 0.0
@@ -443,7 +648,11 @@ func _resolve_posture(dt: float) -> void:
 	var cand := clampf(liquid_amt + clampf(target_liq - liquid_amt, -blend_rate * dt, blend_rate * dt), 0.0, 1.0)
 	if absf(cand - liquid_amt) > 1e-6:
 		var ratio := _height_ratio_for(cand, squeeze_k)
-		if motor.posture_is_legal(slime_scale, cand, ratio, squeeze_k, axis):
+		# The per-tick liquid step is tiny (blend_rate*dt) and the body commits a single
+		# posture, so test the candidate hull alone rather than sweeping up to a dozen
+		# intermediate hulls that never physically exist. This keeps blocked frames
+		# (the bisection below) from bursting into dozens of convex-hull rebuilds.
+		if motor.posture_target_is_legal(slime_scale, cand, ratio, squeeze_k, axis):
 			liquid_amt = cand
 			height_ratio = ratio
 		else:
@@ -452,7 +661,7 @@ func _resolve_posture(dt: float) -> void:
 			for _i in 4:
 				var mid := (good + bad) * 0.5
 				var mr := _height_ratio_for(mid, squeeze_k)
-				if motor.posture_is_legal(slime_scale, mid, mr, squeeze_k, axis):
+				if motor.posture_target_is_legal(slime_scale, mid, mr, squeeze_k, axis):
 					good = mid
 				else:
 					bad = mid
@@ -474,7 +683,10 @@ func _height_ratio_for(liq: float, sq: float) -> float:
 		return base
 	var boost := 1.0 + (1.0 - sq) * tuning.squeeze_height_gain * (1.0 - liq)
 	var rest_h := model.rest_full_height * slime_scale
-	var rise := motor.ceiling_clearance_up(rest_h * 1.2 + 0.05)
+	# Measure headroom with the footprint the candidate liquid posture will have,
+	# not the current (narrower) hull: a puddle may widen under a ceiling edge.
+	var probe := motor.adhoc_probe(model.baked_points(slime_scale, liq, base, sq, sq_dir))
+	var rise := motor.ceiling_clearance_up(rest_h * 1.2 + 0.05, probe)
 	if rise == INF:
 		return base
 	var avail := model.full_height + rise
@@ -486,7 +698,8 @@ func _height_ratio_for(liq: float, sq: float) -> float:
 	return clampf(minf(base, allowed), min_ratio, 1.0)
 
 
-## Stand-up requests from AI must fit the whole body at full height right now.
+## Validated intent setter shared by player input and AI. A blocked stand-up keeps
+## the request pending instead of dropping it.
 func _set_liquid_request(value: bool) -> void:
 	if value:
 		liquid_request = true
@@ -509,7 +722,8 @@ func _process_player_input() -> Vector3:
 	var wants_liquid := Input.is_action_pressed("slime_liquid")
 	if is_fissioning or is_merging:
 		wants_liquid = false
-	liquid_request = wants_liquid
+	# Same validated path as the AI: a blocked stand-up keeps the Z intent pending.
+	_set_liquid_request(wants_liquid)
 	engulf_request = wants_liquid
 
 	var in_z := Input.get_axis("move_back", "move_forward")
@@ -721,12 +935,21 @@ func _update_presentation(dt: float) -> void:
 		_mat.set_shader_parameter("uLiquid", liquid_amt)
 		_mat.set_shader_parameter("uLiquidHeight", height_ratio)
 		_mat.set_shader_parameter("uLiquidSpread", model.spread)
-		_mat.set_shader_parameter("uSqueeze", clampf(1.0 - squeeze_k, -0.3, 0.94))
+		_mat.set_shader_parameter("uSqueeze", clampf(1.0 - model.squeeze, 0.0, 0.94))
 		_mat.set_shader_parameter("uSqueezeDir", sq_dir)
-		if cur_gap_w < INF:
+		# Publish the posture factors the hull baked, so the mesh scales identically.
+		_mat.set_shader_parameter("uSqueezeLat", model.squeeze)
+		_mat.set_shader_parameter("uSqueezeLong", model.flow_stretch)
+		_mat.set_shader_parameter("uSqueezeHeight", model.height_boost)
+		_mat.set_shader_parameter("uSkinLocal", tuning.skin / maxf(slime_scale, 1e-3))
+		# Keep the neck pinned to the corridor while any squeeze remains, including the
+		# release spring after unlatch: zeroing it early teleports the waist to origin.
+		if cur_gap_w < INF or squeeze_k < 0.999:
 			var off := Vector3(cur_gap_center.x, 0.0, cur_gap_center.y) - global_position
 			var ml := model.mesh_local(off)
 			_mat.set_shader_parameter("uGapLocal", Vector3(ml.x, 0.0, ml.z))
+		else:
+			_mat.set_shader_parameter("uGapLocal", Vector3.ZERO)
 
 	if role == Role.PLAYER:
 		_breadcrumb_timer += dt
@@ -818,15 +1041,29 @@ func _update_engulf(dt: float) -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _tick_fission(dt: float) -> void:
-	fission_timer += dt
-	var k := clampf(fission_timer / maxf(tuning.fission_duration, 0.01), 0.0, 1.0)
+	_refresh_exclusions()
 	const SNAP_POINT := 0.70
+	var duration := maxf(tuning.fission_duration, 0.01)
+	var prev_k := clampf(fission_timer / duration, 0.0, 1.0)
+	var k_next := clampf((fission_timer + dt) / duration, 0.0, 1.0)
+	var k := prev_k
+	# This tick is the single writer of BOTH scales, always from the same k, so the
+	# pair's volume is conserved exactly. When the droplet's next growth is blocked,
+	# hold the shared progress instead of handing over volume it cannot hold.
+	var clone := fission_clone if fission_clone != null and is_instance_valid(fission_clone) else null
+	if clone == null or clone.set_bud_scale(k_next):
+		fission_timer += dt
+		k = k_next
+	elif prev_k != k_next:
+		# Let the droplet catch up to the last shared progress if its block cleared.
+		clone.set_bud_scale(prev_k)
 
+	# Volume budget: the parent keeps (1 - 0.5k) of the pre-split volume.
+	_set_scale_anchored(fission_start_scale * pow(maxf(1.0 - 0.5 * k, 0.0), 1.0 / 3.0))
 	if k < SNAP_POINT:
 		# Phase 1: tension stretch and neck formation against the separating half.
 		var stretch_k := k / SNAP_POINT
 		var e := sin(stretch_k * PI * 0.5)
-		slime_scale = lerpf(fission_start_scale, fission_start_scale * 0.8 + fission_target_scale * 0.2, e)
 		set_shader_param("uSplitAmt", e * 0.95)
 	else:
 		# Phase 2: the bridge snaps, and the body recoils with an elastic jiggle.
@@ -836,8 +1073,6 @@ func _tick_fission(dt: float) -> void:
 			trigger_poke2(Vector3(-fission_fwd.x, -0.1, -fission_fwd.z).normalized() * 1.5, fission_fwd * 0.8)
 
 		var snap_k := (k - SNAP_POINT) / (1.0 - SNAP_POINT)
-		var snap_e := sin(snap_k * PI * 0.5)
-		slime_scale = lerpf(fission_start_scale * 0.8 + fission_target_scale * 0.2, fission_target_scale, snap_e)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
 		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
 
@@ -849,29 +1084,60 @@ func _tick_fission(dt: float) -> void:
 
 	if k >= 1.0:
 		is_fissioning = false
-		slime_scale = fission_target_scale
+		fission_clone = null
+		_set_scale_anchored(fission_target_scale)
+		_apply_transform()
 		set_shader_param("uSplitAmt", 0.0)
+	_sync_proxy()
+
+
+## The clone's share of the pre-split volume at shared progress `k`, as a scale.
+func _bud_scale_for(k: float) -> float:
+	return bud_start_scale * pow(maxf(0.5 * clampf(k, 0.0, 1.0), 0.0), 1.0 / 3.0)
+
+
+## Apply the clone's volume-budget scale for shared progress `k`. Returns false when
+## the requested growth is blocked by level geometry; the scale is held so the parent
+## can hold its own progress instead of handing over volume this hull cannot hold.
+func set_bud_scale(k: float) -> bool:
+	var s := _bud_scale_for(k)
+	var ok := true
+	bud_growth_blocked = false
+	if s > slime_scale + 1e-5 and not motor.posture_is_legal(s, 0.0, 1.0, 1.0, sq_dir):
+		ok = false
+		bud_growth_blocked = true
+		s = slime_scale
+	if absf(s - slime_scale) > 1e-6:
+		_set_scale_anchored(s)
+		model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
+	return ok
 
 
 func _tick_budding(dt: float) -> void:
-	bud_timer += dt
-	var k := clampf(bud_timer / maxf(tuning.bud_duration, 0.01), 0.0, 1.0)
+	_refresh_exclusions()
 	const SNAP_POINT := 0.70
+	var k := 0.0
+	var parent_driven := bud_parent != null and is_instance_valid(bud_parent) and bud_parent.is_fissioning
+	if parent_driven:
+		# The parent is this pair's single scale writer; it advanced both already.
+		# Read its own fission clock: the two durations are independent tunables.
+		k = clampf(bud_parent.fission_timer / maxf(bud_parent.tuning.fission_duration, 0.01), 0.0, 1.0)
+		bud_timer = k * tuning.bud_duration
+	else:
+		bud_timer += dt
+		k = clampf(bud_timer / maxf(tuning.bud_duration, 0.01), 0.0, 1.0)
+		# Growth is a posture change and must pass the same geometry probe as any other;
+		# when blocked, hold the scale so the neck keeps stretching in place.
+		set_bud_scale(k)
 
 	if k < SNAP_POINT:
 		# Phase 1: the droplet clings to the parent and is drawn out under tension.
 		var stretch_k := k / SNAP_POINT
 		var e := sin(stretch_k * PI * 0.5)
-		slime_scale = lerpf(bud_target_scale * 0.40, bud_target_scale * 0.85, e)
 		set_shader_param("uSplitAmt", e * 0.95)
-
 		if bud_parent and is_instance_valid(bud_parent):
 			var pull := pow(stretch_k, 1.6)
-			var sep := (bud_parent.model.rest_max_radius * bud_parent.slime_scale + model.rest_max_radius * slime_scale) * (0.35 + 0.60 * pull)
-			var target_pos := bud_parent.global_position + bud_fwd * sep
-			var motion := target_pos - global_position
-			motion.y = 0.0
-			motor.move_horizontal(motion)
+			_bud_separation_step(dt, bud_sep + bud_separation_extra(slime_scale) * 0.25 * pull)
 	else:
 		# Phase 2: the neck snaps and the free droplet overshoots then settles.
 		if not _bud_snapped:
@@ -881,16 +1147,14 @@ func _tick_budding(dt: float) -> void:
 
 		var snap_k := (k - SNAP_POINT) / (1.0 - SNAP_POINT)
 		var snap_e := sin(snap_k * PI * 0.5)
-		slime_scale = lerpf(bud_target_scale * 0.85, bud_target_scale, snap_e)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
 		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
-
 		if bud_parent and is_instance_valid(bud_parent):
-			var sep := (bud_parent.model.rest_max_radius * bud_parent.slime_scale + model.rest_max_radius * slime_scale) * (0.95 + 0.18 * snap_e)
-			var target_pos := bud_parent.global_position + bud_fwd * sep
-			var motion := target_pos - global_position
-			motion.y = 0.0
-			motor.move_horizontal(motion)
+			_bud_separation_step(dt, bud_sep + bud_separation_extra(slime_scale) * (0.25 + 0.18 * snap_e))
+		# Collision stays off until the swept separation has actually cleared both
+		# hulls; the pairwise pass finishes any residual overlap first.
+		if not _bud_clear and _is_clear_of_parent():
+			_bud_clear = true
 
 	model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
 	motor.update_support()
@@ -901,11 +1165,45 @@ func _tick_budding(dt: float) -> void:
 	if k >= 1.0:
 		is_budding = false
 		bud_parent = null
-		slime_scale = bud_target_scale
+		_set_scale_anchored(bud_target_scale)
+		_apply_transform()
 		set_shader_param("uSplitAmt", 0.0)
+	_sync_proxy()
+
+
+## Growth room this pair's separation still needs, in metres scaled to both bodies.
+func bud_separation_extra(clone_scale: float) -> float:
+	var r := model.rest_max_radius
+	if bud_parent == null or not is_instance_valid(bud_parent):
+		return r * 2.0 * clone_scale
+	return r * (bud_parent.slime_scale + clone_scale)
+
+
+## Drive the separation like any other locomotion: a capped velocity swept by the
+## motor, so the distance covered never depends on the frame rate.
+func _bud_separation_step(dt: float, sep: float) -> void:
+	var target_pos := bud_parent.global_position + bud_fwd * sep
+	var delta := target_pos - global_position
+	delta.y = 0.0
+	var v := delta / maxf(dt, 1e-4)
+	if v.length() > tuning.walk_speed:
+		v = v.normalized() * tuning.walk_speed
+	motor.move_horizontal(v * dt)
+
+
+func _is_clear_of_parent() -> bool:
+	if bud_parent == null or not is_instance_valid(bud_parent):
+		return true
+	var d := Vector2(global_position.x - bud_parent.global_position.x, global_position.z - bud_parent.global_position.z)
+	if d.length_squared() < 1e-8:
+		return false
+	var dir := Vector3(d.x, 0.0, d.y) / d.length()
+	var radius := model.horizontal_support(dir) + bud_parent.model.horizontal_support(-dir)
+	return d.length() >= radius + tuning.skin
 
 
 func _tick_merge(dt: float) -> void:
+	_refresh_exclusions()
 	merge_timer += dt
 	if merge_target == null or not is_instance_valid(merge_target) or merge_target.is_merging:
 		_cancel_merge()
@@ -917,29 +1215,37 @@ func _tick_merge(dt: float) -> void:
 	var dist := delta.length()
 	if dist > 1e-4:
 		motor.move_horizontal(delta)
-	slime_scale = maxf(0.02, lerpf(slime_scale, 0.02, 1.0 - exp(-12.0 * dt)))
+	_set_scale_anchored(maxf(0.02, lerpf(slime_scale, 0.02, 1.0 - exp(-12.0 * dt))))
 	model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
 	motor.update_support()
 	motor.move_vertical(dt, 0.02)
 	_apply_transform()
+	_sync_proxy()
 
 	var close := dist < 0.6 * maxf(merge_target.model.rest_max_radius * merge_target.slime_scale, 0.2)
-	if merge_timer >= tuning.merge_duration or close:
-		if not _has_merged:
-			_has_merged = true
-			merge_target.add_volume(get_volume())
-			merge_target.trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.65, 0.0))
-			merge_target.trigger_poke2(Vector3(0.0, -0.3, 0.0), Vector3(0.0, 0.5, 0.0))
-			if props:
-				for p in props.props:
-					if p.state == SlimeProps.STATE_EATING and p.eater == self:
-						p.eater = merge_target
-						if not merge_target.inside_props.has(p):
-							merge_target.inside_props.append(p)
-				props.unregister_slime(self)
-			inside_props.clear()
-			queue_free()
-			return
+	if close and not _has_merged:
+		_has_merged = true
+		merge_target.add_volume(get_volume())
+		merge_target.trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.65, 0.0))
+		merge_target.trigger_poke2(Vector3(0.0, -0.3, 0.0), Vector3(0.0, 0.5, 0.0))
+		if props:
+			for p in props.props:
+				if p.state == SlimeProps.STATE_EATING and p.eater == self:
+					p.eater = merge_target
+					if not merge_target.inside_props.has(p):
+						merge_target.inside_props.append(p)
+			props.unregister_slime(self)
+		inside_props.clear()
+		queue_free()
+		return
+	if merge_timer >= tuning.merge_duration:
+		# Volume only moves on contact. A merge that never arrived is cancelled and
+		# the body regrows through the ordinary scale pipeline, not by teleport.
+		_cancel_merge()
+		_update_scale(dt)
+		model.resolve(slime_scale, 0.0, 1.0, 1.0, sq_dir)
+		_apply_transform()
+		_sync_proxy()
 	_tick_props(dt)
 
 
@@ -972,9 +1278,26 @@ func split_clone(clone_role: Role) -> void:
 	var half_volume := get_volume() * 0.5
 	var new_target_scale := pow(half_volume / tuning.volume_per_scale_cubed(), 1.0 / 3.0)
 
-	var clone := _spawn_fission_clone(clone_role, split_fwd, new_target_scale)
+	# Preflight: the clone's final hull must fit at the tangent offset, so try the
+	# forward direction first and turn until one is free. No free direction means the
+	# split is refused instead of spawning inside geometry.
+	_refresh_exclusions()
+	var clone_radius := model.rest_max_radius * new_target_scale
+	var spawn_offset := Vector3.ZERO
+	for deg in [0.0, 45.0, -45.0, 90.0, -90.0, 180.0]:
+		var d := split_fwd.rotated(Vector3.UP, deg_to_rad(deg))
+		var offset := model.horizontal_support(d) + clone_radius + tuning.skin
+		if motor.spawn_is_clear(model.foot + d * offset, new_target_scale):
+			split_fwd = d
+			spawn_offset = d * offset
+			break
+	if spawn_offset == Vector3.ZERO:
+		return
+
+	var clone := _spawn_fission_clone(clone_role, split_fwd, new_target_scale, spawn_offset)
 	if clone == null:
 		return
+	fission_clone = clone
 
 	fission_fwd = split_fwd
 	fission_start_scale = slime_scale
@@ -983,9 +1306,13 @@ func split_clone(clone_role: Role) -> void:
 	is_fissioning = true
 	fission_timer = 0.0
 	_fission_snapped = false
+	# Apply the parent's matching share on the spawn frame itself, so the pair's
+	# volume is conserved from the instant the clone exists.
+	var k0 := clampf(get_physics_process_delta_time() / maxf(tuning.fission_duration, 0.01), 0.0, 1.0)
+	_set_scale_anchored(fission_start_scale * pow(1.0 - 0.5 * k0, 1.0 / 3.0))
 
 
-func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale: float) -> Slime:
+func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale: float, spawn_offset: Vector3) -> Slime:
 	var prefab := load("res://scenes/slime.tscn") as PackedScene
 	if prefab == null:
 		return null
@@ -993,17 +1320,24 @@ func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale
 	if clone == null:
 		return null
 
+	# First frame of the clone's volume-budget curve: the spawn scale the curve
+	# itself would produce, so growth starts without a step.
+	var k_first := get_physics_process_delta_time() / maxf(tuning.fission_duration, 0.01)
+	var clone_start_scale := clampf(slime_scale * pow(maxf(0.5 * k_first, 0.0), 1.0 / 3.0), 0.02, clone_target_scale)
+
 	clone.role = clone_role
 	clone.tuning = tuning
 	clone.props = props
 	clone.floor_mesh = floor_mesh
 	clone.camera = null
-	clone.start_scale = clone_target_scale * 0.25
+	clone.start_scale = clone_start_scale
 	clone.target_scale = clone_target_scale
-	clone.slime_scale = clone.start_scale
+	clone.slime_scale = clone_start_scale
 	clone._velocity_cache = Vector3.ZERO
-	clone.position = global_position + fwd_dir * (0.2 * model.rest_max_radius * clone_target_scale)
-	clone.position.y = global_position.y
+	clone.position = global_position + spawn_offset
+	# Same floor as the parent, not the same centre height: the halves have
+	# different scales, so copying the centre would bury the smaller one.
+	clone.position.y = model.foot.y + model.rest_half_height * clone_start_scale
 	clone._facing_yaw = _facing_yaw
 	if clone_role == Role.FOLLOWER:
 		clone.target_leader = self
@@ -1011,6 +1345,8 @@ func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale
 	clone.is_budding = true
 	clone.bud_parent = self
 	clone.bud_timer = 0.0
+	clone.bud_start_scale = slime_scale
+	clone.bud_sep = spawn_offset.length()
 	clone.bud_target_scale = clone_target_scale
 	clone.bud_fwd = fwd_dir
 
@@ -1018,14 +1354,17 @@ func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale
 	if parent_node == null:
 		return null
 	parent_node.add_child(clone)
+	# The clone's proxy exists now; exclude it (and the parent) before any probe.
+	clone._refresh_exclusions()
 	clone.motor.recover_overlap()
+	clone._sync_proxy()
 	return clone
 
 
 func merge_nearby_clones() -> void:
 	if props == null or is_merging or is_fissioning or is_budding:
 		return
-	if liquid_amt > 0.1:
+	if liquid_amt > 0.1 or liquid_request:
 		return
 
 	var merge_rad := model.rest_max_radius * slime_scale * tuning.merge_range_factor + 1.0
@@ -1034,7 +1373,7 @@ func merge_nearby_clones() -> void:
 	for s in props.registered_slimes:
 		if s == self or not is_instance_valid(s) or s.is_merging or s.is_fissioning or s.is_budding:
 			continue
-		if s.liquid_amt > 0.1:
+		if s.liquid_amt > 0.1 or s.liquid_request:
 			continue
 		var dist := global_position.distance_to(s.global_position)
 		if dist > merge_rad + s.model.rest_max_radius * s.slime_scale:
@@ -1060,24 +1399,21 @@ func merge_nearby_clones() -> void:
 
 
 func _merge_path_clear(other: Slime) -> bool:
-	var space := get_world_3d().direct_space_state
-	var from := global_position + Vector3(0.0, 0.25, 0.0)
-	var to := other.global_position + Vector3(0.0, 0.25, 0.0)
-	var q := PhysicsRayQueryParameters3D.create(from, to, SlimeMotor.LAYER_OBSTACLES)
-	return space.intersect_ray(q).is_empty()
+	# The whole hull has to make the trip, not just its endpoints: a merge across a
+	# wall or a pillar would otherwise teleport the source through it. Swept by the
+	# traveller's own motor so its exclusion set and foot are the ones that move.
+	var from := other.model.foot
+	var to := Vector3(model.foot.x, from.y, model.foot.z)
+	return other.motor.sweep_is_clear(from, to, other.slime_scale)
 
 
 # ------------------------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------------------------
 
+## The motor owns the transform; clamping is just another swept move.
 func _clamp_arena() -> void:
-	var flat := Vector2(global_position.x, global_position.z)
-	if flat.length() > tuning.arena_radius:
-		flat = flat.normalized() * tuning.arena_radius
-		global_position.x = flat.x
-		global_position.z = flat.y
-		motor.recover_overlap()
+	motor.clamp_to_arena(Vector3.ZERO, tuning.arena_radius)
 
 
 func _apply_transform() -> void:

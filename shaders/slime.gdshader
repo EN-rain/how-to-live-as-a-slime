@@ -74,17 +74,26 @@ uniform vec3 uSolidDir[2];
 uniform float uRippleIntensity = 0.12;
 uniform float uFacing = 0.45;
 uniform float uBlink = 1.0;
-// Squeezing through a gap between solids: 0 = off, 1 = fully compressed across uSqueezeDir (a horizontal axis).
+// Squeezing through a gap between solids. uSqueeze is a 0..1 emphasis for the neck;
+// the actual body factors come from the resolved posture below.
 uniform float uSqueeze = 0.0;
 uniform vec3 uSqueezeDir = vec3(1.0, 0.0, 0.0);
 // Mesh-local gap centre (relative to the mesh origin) for the gap-centred neck deform
 uniform vec3 uGapLocal = vec3(0.0);
+// Resolved posture factors, authored by SlimeShapeModel. The hull bakes exactly these
+// two horizontal factors (and the height factor), so applying them here keeps every
+// vertex inside the collision envelope.
+uniform float uSqueezeLat = 1.0;
+uniform float uSqueezeLong = 1.0;
+uniform float uSqueezeHeight = 1.0;
+// World-space visual budget (tuning.skin) converted to mesh-local units; outward
+// stylization is clamped to it.
+uniform float uSkinLocal = 0.02;
 
 // Resolved posture, authored by SlimeShapeModel every tick (absolute multipliers).
 uniform float uLiquid = 0.0;
 uniform float uLiquidHeight = 1.0;
 uniform float uLiquidSpread = 1.0;
-uniform float uSqueezeElong = 0.85;
 
 // Engulf drape mode (holding Z on top of a larger object)
 uniform vec3 uDrapePos = vec3(0.0);
@@ -280,49 +289,40 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		p.xz *= liqR;
 		p.y = groundFloor + (p.y - groundFloor) * liqH;
 
-		// Directional flow surge: the leading edge surges forward in movement direction
+		// Directional flow surge: the leading edge surges forward in movement direction.
+		// Capped to the collision skin so it can never push the surface past the hull.
 		vec2 mdir = normalize(uMoveDir.xz + vec2(0.0001));
 		float flowAlong = dot(p.xz, mdir);
-		p.xz += mdir * (uMoveAmt * 0.30 * uLiquid * smoothstep(-1.2, 1.8, flowAlong));
+		float surgeAmp = min(uMoveAmt * 0.30 * uLiquid, uSkinLocal);
+		p.xz += mdir * (surgeAmp * smoothstep(-1.2, 1.8, flowAlong));
 
-		// Viscous amoebic perimeter ripples (surface tension lobes)
+		// Viscous amoebic perimeter ripples (surface tension lobes), also inside the skin budget
 		float ang = atan(p.z, p.x);
-		float edgeWobble = (sin(ang * 4.0 + t * 4.0) * 0.06 + sin(ang * 6.0 - t * 3.0) * 0.03) * uLiquid;
+		float wobble = (sin(ang * 4.0 + t * 4.0) * 0.06 + sin(ang * 6.0 - t * 3.0) * 0.03) * uLiquid;
 		float distCenter = length(p.xz);
-		p.xz *= 1.0 + edgeWobble * smoothstep(0.4, 2.0, distCenter);
+		float wobbleCap = uSkinLocal / max(distCenter, 0.1);
+		wobble = clamp(wobble, -wobbleCap, wobbleCap);
+		p.xz *= 1.0 + wobble * smoothstep(0.4, 2.0, distCenter);
 
 		// Capillary surface ripples propagating across the liquid sheet
 		float capRipple = sin(distCenter * 4.0 - t * 7.0 + flowAlong * 2.0) * 0.030 * uLiquid;
 		p.y += capRipple * smoothstep(0.0, 0.35, p.y - groundFloor);
 	}
 
-	if (uSqueeze > 0.001) {
-		// Fix 6: Squeeze neck is centered at the actual gap position (uGapLocal), not mesh origin.
-		// Negative uSqueeze means exit overshoot (gooey rebound widening).
-		float sq = clamp(uSqueeze, -0.3, 0.94);
-		bool rebounding = sq < 0.0;
-		float sqAbs = abs(sq);
+	// Squeeze: the hull bakes the model's lateral, longitudinal and height factors,
+	// so the shader applies exactly the same scaling about the body origin. The
+	// gap-centred neck is an ADDITIONAL inward modulation only — it can never widen
+	// a vertex past the uniform factor, which keeps the surface inside the hull.
+	{
 		vec2 sqd = normalize(uSqueezeDir.xz + vec2(0.0001));
 		vec2 fwdFlow = vec2(-sqd.y, sqd.x);
-		// Shift vertex into gap-local space for neck profile
-		vec2 gapOffset = uGapLocal.xz;
-		vec2 pLocal = p.xz - gapOffset;
+		vec2 pLocal = p.xz - uGapLocal.xz;
 		float sqa = dot(pLocal, sqd);
 		float flowDist = dot(pLocal, fwdFlow);
-		// Neck profile: maximum at gap center (flowDist ~ 0), relaxing away
-		float neckProfile = exp(-flowDist * flowDist * 1.6);
-		float localSq = sqAbs * mix(0.4, 1.0, neckProfile);
-		float widthScale = rebounding
-			? max(0.08, 1.0 + localSq * 0.3)   // rebound: slightly wider than normal
-			: max(0.08, 1.0 - localSq);           // squeeze: narrower
-		// Front and rear bulge out to conserve fluid volume (area in cross-section)
-		float bulge = sqAbs * (1.0 - neckProfile) * 0.45;
-		float lengthScale = 1.0 + sqAbs * uSqueezeElong + bulge;
-		float heightScale = rebounding ? 1.0 : (1.0 + localSq * 0.35 * (1.0 - uLiquid));
-		// Apply in gap-local space, then shift back
-		pLocal = sqd * (sqa * widthScale) + fwdFlow * (flowDist * lengthScale);
-		p.xz = pLocal + gapOffset;
-		p.y = groundFloor + (p.y - groundFloor) * heightScale;
+		float neckMat = uSqueeze * exp(-flowDist * flowDist * 1.6) * 0.35;
+		float latScale = max(0.05, uSqueezeLat * (1.0 - neckMat));
+		p.xz = sqd * (sqa * latScale) + fwdFlow * (flowDist * uSqueezeLong) + uGapLocal.xz;
+		p.y = groundFloor + (p.y - groundFloor) * uSqueezeHeight;
 	}
 
 	// ---- Sticky Droplet Budding (E and Q split) ----
@@ -372,8 +372,12 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	vec3 impulseOffset2 = uImpulse2Vector * pokeInfluence2 * springOsc2 * uJiggleStrength;
 
 	float globalBounce = sin(uImpulseTime * 11.0) * exp(-uImpulseTime * 2.6) * length(uImpulseVector) * 0.32 * uJiggleStrength;
+	// Solid-only and inside the skin budget, like the lean below.
+	globalBounce = clamp(globalBounce, -uSkinLocal, uSkinLocal) * (1.0 - uLiquid);
 	p.y += globalBounce * (height01 - 0.15);
-	p.xz -= globalBounce * 0.38 * p.xz * (1.0 - height01 * 0.5);
+	float bounceRadial = globalBounce * 0.38 * (1.0 - height01 * 0.5);
+	float radialCap = uSkinLocal / max(length(p.xz), 0.1);
+	p.xz *= 1.0 - clamp(bounceRadial, -radialCap, radialCap);
 
 	p += (impulseOffset + impulseOffset2) * smoothstep(0.02, 0.25, height01);
 
@@ -417,7 +421,12 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	p.xz *= 1.0 / sqrt(sy);
 	p.y = groundFloor + (p.y - groundFloor) * sy;
 	vec2 d = normalize(uMoveDir.xz + vec2(0.0001));
-	p.xz -= uLean.xz * (height01 - 0.2) * 0.38;
+	// Lean is a shear that moves the apex sideways, which leaves the hull immediately;
+	// fade it out in liquid and bound it to the skin.
+	vec2 leanOff = uLean.xz * (height01 - 0.2) * 0.38 * (1.0 - uLiquid);
+	float leanLen = length(leanOff);
+	if (leanLen > uSkinLocal) leanOff *= uSkinLocal / leanLen;
+	p.xz -= leanOff;
 	float tw = sin(uCrawl - dot(pos.xz, d) * 2.8);
 	float twMask = smoothstep(0.1, 0.6, height01);
 	p.y += uMoveAmt * 0.07 * tw * twMask;

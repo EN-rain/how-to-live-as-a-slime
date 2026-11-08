@@ -8,14 +8,16 @@ extends RefCounted
 ## nothing re-derives liquid height or spread independently.
 ##
 ## The envelope is a convex hull of the resolved profile, so it conservatively
-## contains the stylized (non-convex) rendered body. The lateral squeeze is in the
-## envelope; the longitudinal squash-and-stretch is visual only (a physically
-## elongated neck would collide with the passage it is entering). Points are baked
+## contains the stylized (non-convex) rendered body. Both squeeze factors live in
+## the envelope and are published to the shader, which therefore cannot leave the
+## hull. Points are baked
 ## in world orientation with the foot at the origin because Godot shape queries
 ## ignore non-uniform scale in the query transform.
 
 const PROFILE_RINGS := 13
-const PROFILE_SEGMENTS := 12
+## 24 sides keep the chord error under 1 percent, below the collision skin, so the
+## smooth rendered surface cannot bulge past the hull by more than `skin`.
+const PROFILE_SEGMENTS := 24
 const RADIUS_SAMPLES := 48
 
 var tuning: SlimeTuning
@@ -29,6 +31,9 @@ var liquid := 0.0
 var height_ratio := 1.0
 var spread := 1.0
 var squeeze := 1.0
+## Along-flow stretch that conserves the rendered mass while squeezing. The shader
+## applies the identical factor, so neither side can leave the other's envelope.
+var flow_stretch := 1.0
 var height_boost := 1.0
 var axis := Vector3(1, 0, 0)
 
@@ -42,6 +47,7 @@ var shape: ConvexPolygonShape3D
 var _unit_points := PackedVector3Array()
 var _rest_radius_table := PackedFloat32Array()
 var _last_key := ""
+var _resolved_points := PackedVector3Array()
 
 
 func configure(t: SlimeTuning) -> void:
@@ -122,11 +128,12 @@ func resolve(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: 
 	squeeze = clampf(p_squeeze, min_squeeze(), 1.0)
 	if p_axis.length_squared() > 1e-6:
 		axis = Vector3(p_axis.x, 0.0, p_axis.z).normalized()
-	spread = lerpf(1.0, tuning.liquid_spread_ratio, liquid)
+	spread = pow(maxf(height_ratio, 1e-3), -0.5)
+	flow_stretch = 1.0 + (1.0 - squeeze) * tuning.squeeze_elongation
 	height_boost = 1.0 + (1.0 - squeeze) * tuning.squeeze_height_gain * (1.0 - liquid)
 	full_height = rest_full_height * scale * height_ratio * height_boost
 	semi_a = rest_max_radius * scale * spread * squeeze
-	semi_b = rest_max_radius * scale * spread
+	semi_b = rest_max_radius * scale * spread * flow_stretch
 	var key := "%.4f|%.4f|%.4f|%.4f|%.4f|%.4f" % [scale, liquid, height_ratio, squeeze, axis.x, axis.z]
 	if key == _last_key:
 		return false
@@ -136,7 +143,14 @@ func resolve(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: 
 
 
 func _rebuild() -> void:
-	shape.set_points(baked_points(scale, liquid, height_ratio, squeeze, axis))
+	_resolved_points = baked_points(scale, liquid, height_ratio, squeeze, axis)
+	shape.set_points(_resolved_points)
+
+
+## The baked envelope for the currently resolved posture, shared by every probe that
+## tests the committed hull. Callers must duplicate before eroding it in place.
+func resolved_points() -> PackedVector3Array:
+	return _resolved_points
 
 
 ## Bake envelope points (foot at origin, world orientation) for arbitrary dimensions
@@ -148,19 +162,27 @@ func baked_points(p_scale: float, p_liquid: float, p_height_ratio: float, p_sque
 	ax = ax.normalized()
 	var perp := Vector3(-ax.z, 0.0, ax.x)
 	var sq := clampf(p_squeeze, lerpf(tuning.min_normal_squeeze, tuning.min_liquid_squeeze, p_liquid), 1.0)
-	var spr := lerpf(1.0, tuning.liquid_spread_ratio, p_liquid)
+	var spr := pow(maxf(p_height_ratio, 1e-3), -0.5)
+	var stretch := 1.0 + (1.0 - sq) * tuning.squeeze_elongation
 	var boost := 1.0 + (1.0 - sq) * tuning.squeeze_height_gain * (1.0 - p_liquid)
 	var sa := p_scale * spr * sq
-	var sb := p_scale * spr
+	var sb := p_scale * spr * stretch
 	var sv := p_scale * p_height_ratio * boost
+	var axx := ax.x
+	var axz := ax.z
+	var px := perp.x
+	var pz := perp.z
+	var n := _unit_points.size()
 	var pts := PackedVector3Array()
-	for p in _unit_points:
-		var along := p.x * ax.x + p.z * ax.z
-		var across := p.x * perp.x + p.z * perp.z
-		pts.append(Vector3(
-			ax.x * along * sa + perp.x * across * sb,
+	pts.resize(n)
+	for i in n:
+		var p := _unit_points[i]
+		var along := p.x * axx + p.z * axz
+		var across := p.x * px + p.z * pz
+		pts[i] = Vector3(
+			axx * along * sa + px * across * sb,
 			p.y * sv,
-			ax.z * along * sa + perp.z * across * sb))
+			axz * along * sa + pz * across * sb)
 	return pts
 
 
@@ -186,6 +208,10 @@ func horizontal_support(dir: Vector3) -> float:
 
 ## Current body radius at a world height, along a horizontal direction.
 func world_radius_at(world_y: float, dir: Vector3) -> float:
+	# Above the body there is no cross-section; use the widest horizontal extent so
+	# the engulf backstop still works for a puddle (its apex ring has zero radius).
+	if world_y >= foot.y + full_height:
+		return horizontal_support(dir)
 	var rest_h := (world_y - foot.y) / maxf(1e-6, scale * height_ratio * height_boost)
 	var r := rest_radius_at(rest_h) * scale * spread
 	var d := Vector3(dir.x, 0.0, dir.z)
@@ -196,14 +222,18 @@ func world_radius_at(world_y: float, dir: Vector3) -> float:
 	var ca := d.dot(axis)
 	var cb := d.dot(perp)
 	var fa := ca * squeeze
-	var fb := cb
+	var fb := cb * flow_stretch
 	var m := sqrt(fa * fa + fb * fb)
 	return r * maxf(m, 1e-4)
 
 
 ## Convert a world offset from the actor root into mesh-local shader units.
+## The shader subtracts `uGapLocal` AFTER the liquid spread multiply, so the
+## horizontal components must be divided by scale * spread as well.
 func mesh_local(world_offset: Vector3) -> Vector3:
-	return world_offset / maxf(1e-6, scale)
+	var s := maxf(1e-6, scale)
+	var r := maxf(1e-6, spread)
+	return Vector3(world_offset.x / (s * r), world_offset.y / s, world_offset.z / (s * r))
 
 
 func center() -> Vector3:

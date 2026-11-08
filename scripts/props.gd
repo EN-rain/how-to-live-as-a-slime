@@ -168,12 +168,16 @@ func step(dt: float) -> void:
 		if not is_instance_valid(s):
 			continue
 		if not s.is_merging:
-			_process_edible_props(s, dt)
+			# Read the motor's contacts before push-eating issues its own
+			# move_horizontal calls, which would clear that feedback.
 			_register_motor_contacts(s, dt)
+			_process_edible_props(s, dt)
 		_update_inside_props(s, dt)
 		_update_slime_splat(s, dt)
 		_update_eat_uniforms(s)
 		_update_solid_uniforms(s)
+
+	_separate_slimes()
 
 	for p in props:
 		if p.state == STATE_IDLE and p.pd > 0.0:
@@ -187,6 +191,76 @@ func step(dt: float) -> void:
 
 	_update_digesting_props(dt)
 	_update_floor_shadows()
+
+
+## Symmetric residual separation for overlapping slimes. Every delta is computed from
+## a pre-pass snapshot and applied through each motor's swept move, so the result is
+## order independent. The proxies already stop movement intent; this resolves the
+## overlap a legal posture change or a spawn may leave behind.
+func _separate_slimes() -> void:
+	var bodies: Array = []
+	for s in registered_slimes:
+		if not is_instance_valid(s) or s.is_merging or s.model == null:
+			continue
+		var foot := s.global_position + Vector3(0.0, -s.model.rest_half_height * s.model.scale, 0.0)
+		bodies.append({
+			"slime": s,
+			"xz": Vector2(s.global_position.x, s.global_position.z),
+			"bottom": foot.y,
+			"top": foot.y + s.model.full_height,
+			"mass": s.get_volume() * (2.0 if s.role == Slime.Role.PLAYER else 1.0),
+		})
+	if bodies.size() < 2:
+		return
+	var pushes: Array[Vector2] = []
+	pushes.resize(bodies.size())
+	pushes.fill(Vector2.ZERO)
+	for i in bodies.size():
+		var a: Dictionary = bodies[i]
+		for j in range(i + 1, bodies.size()):
+			var b: Dictionary = bodies[j]
+			if _pair_exempt(a["slime"], b["slime"]):
+				continue
+			if a["top"] <= b["bottom"] + tuning.skin or b["top"] <= a["bottom"] + tuning.skin:
+				continue
+			var d: Vector2 = b["xz"] - a["xz"]
+			var dist := d.length()
+			var dir := d / dist if dist > 1e-5 else Vector2.RIGHT
+			var ra: float = a["slime"].model.horizontal_support(Vector3(dir.x, 0.0, dir.y))
+			var rb: float = b["slime"].model.horizontal_support(Vector3(-dir.x, 0.0, -dir.y))
+			var pen := ra + rb - tuning.skin - dist
+			if pen <= 0.0:
+				continue
+			var ma: float = a["mass"]
+			var mb: float = b["mass"]
+			var total := ma + mb
+			if total <= 1e-6:
+				continue
+			pushes[i] -= dir * (pen * mb / total)
+			pushes[j] += dir * (pen * ma / total)
+	for i in bodies.size():
+		var s: Slime = bodies[i]["slime"]
+		var push: Vector2 = pushes[i]
+		if not is_instance_valid(s) or push.length_squared() < 1e-8:
+			continue
+		# One tick may only spend part of the motor's step budget: intent motion
+		# already used some, and a deep overlap must resolve over several ticks
+		# instead of teleporting either body.
+		var cap := s.model.rest_max_radius * s.model.scale * tuning.max_step_fraction * 0.5
+		if push.length() > cap:
+			push *= cap / push.length()
+		s.motor.move_horizontal(Vector3(push.x, 0.0, push.y))
+		s._sync_proxy()
+
+
+func _pair_exempt(a: Slime, b: Slime) -> bool:
+	if a.is_merging or b.is_merging:
+		return true
+	if a.is_budding and a.bud_parent == b and not a._bud_snapped:
+		return true
+	if b.is_budding and b.bud_parent == a and not b._bud_snapped:
+		return true
+	return false
 
 
 # ------------------------------------------------------------------------------------------------
@@ -260,12 +334,18 @@ func _set_prop_solid(p: PropData, solid: bool) -> void:
 		p.body.collision_layer = LAYER_OBSTACLES if solid else 0
 
 
-## Obstacle RIDs this slime may pass through (food yields to the engulf front,
-## it is not a wall). Refreshed by the slime whenever its volume changes.
+## Obstacle RIDs this slime may pass through. Policy: an idle prop is solid to every
+## query until THIS slime has opened an engulf front on it; a prop already dissolving
+## in this slime is past the front. Support and ceilings use the same list, so the
+## horizontal and vertical policies can no longer disagree.
 func rids_edible_by(s: Slime) -> Array[RID]:
 	var rids: Array[RID] = []
 	for p in props:
-		if is_edible_by_push(s, p) and p.body != null:
+		if p.body == null:
+			continue
+		if p.state == STATE_EATING and p.eater == s:
+			rids.append(p.body.get_rid())
+		elif p.state == STATE_IDLE and p.last_presser == s and p.engulf_front > 0.05:
 			rids.append(p.body.get_rid())
 	return rids
 
@@ -399,7 +479,7 @@ func _spawn_test_structures() -> void:
 	pillar_mat.set_shader_parameter("uColor", Color(0.32, 0.72, 0.88))
 	pillar_mat.set_shader_parameter("uDissolve", 0.0)
 
-	# 1. Narrow Slit Gate: Two vertical pillars with a 0.5m gap at (8, 0, 8)
+	# 1. Narrow Slit Gate: Two vertical pillars with a 1.4m gap at (8, 0, 8)
 	var gate_pos := Vector3(8.0, 0.0, 8.0)
 	for side in [-1.0, 1.0]:
 		var p_box := BoxMesh.new()
@@ -414,7 +494,7 @@ func _spawn_test_structures() -> void:
 		mi.name = "GatePillar_%s" % ("L" if side < 0 else "R")
 		mi.mesh = p_box
 		mi.material_override = p.material
-		mi.position = gate_pos + Vector3(side * 0.85, tuning.floor_y + 1.6, 0.0)
+		mi.position = gate_pos + Vector3(side * 1.3, tuning.floor_y + 1.6, 0.0)
 		_prop_root.add_child(mi)
 		p.mesh = mi
 		p.is_static = true
@@ -548,13 +628,20 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		var dir := Vector3(dx / d, 0.0, dz / d)
 		var ro := _horizontal_reach(p, -dir, foot.y)
 		var sr_p := s.model.world_radius_at(m.global_position.y, dir)
+		var gap := d - (sr_p + ro)
+		var target := maxf(0.0, -gap)
+		var inward_speed := s.motor.velocity.x * dir.x + s.motor.velocity.z * dir.z
 
-		var target := maxf(0.0, sr_p + ro - d)
-		if target <= 0.001:
+		# The prop is solid to the sweep until the front opens, so a live press sits at
+		# the face with roughly a skin of clearance rather than overlapping. Contact plus
+		# inward intent is the press signal; the front is the gate that makes it passable.
+		var in_contact := gap <= 0.08
+		var pressing := in_contact and (inward_speed > 0.05 or target > 0.001)
+		if not pressing:
 			if p.last_presser == s:
 				p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
-				var acc := 140.0 * (0.0 - p.pd) - 8.0 * p.pv
-				p.pv += acc * dt
+				var acc_r := 140.0 * (0.0 - p.pd) - 8.0 * p.pv
+				p.pv += acc_r * dt
 				p.pd += p.pv * dt
 				if p.pd <= 0.001 and p.engulf_front <= 0.001:
 					p.pd = 0.0
@@ -573,7 +660,10 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		p.last_presser = s
 		var vol_ratio := clampf(p.real_volume / maxf(1e-4, s_vol), 0.0, 1.0)
 		var thr := ro * (0.85 + 0.45 * vol_ratio) + 0.1 * S
-		var acc := 140.0 * (target - p.pd) - 8.0 * p.pv
+		# Visual press depth ramps across the contact window instead of requiring
+		# penetration the solid sweep will never allow.
+		var press_depth := maxf(target, 0.08 - gap)
+		var acc := 140.0 * (press_depth - p.pd) - 8.0 * p.pv
 		p.pv += acc * dt
 		p.pd += p.pv * dt
 		if p.pd < 0.0:
@@ -583,7 +673,6 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 		p.p_ro = ro
 		p.p_thr = thr
 
-		var inward_speed := s.motor.velocity.x * dir.x + s.motor.velocity.z * dir.z
 		var size_resistance := clampf((vol_ratio - 0.20) / 0.80, 0.0, 1.0)
 
 		# Viscous drag: pushing near-size objects resists forward speed.
@@ -605,16 +694,8 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 			var recoil := 2.5 * size_resistance * (1.0 - p.engulf_front)
 			s.motor.velocity -= dir * recoil * dt
 
-		# Positional front limit, applied through the motor so the pushback itself
-		# is collision-safe against every other obstacle.
-		var max_allowed_pen := (sr_p + ro) * p.engulf_front
-		if target > max_allowed_pen:
-			var over_pen := target - max_allowed_pen
-			s.motor.move_horizontal(-dir * over_pen)
-			var vin := s.motor.velocity.dot(dir)
-			if vin > 0.0:
-				s.motor.velocity -= dir * vin
-
+		# No positional pushback: the prop is solid until the front opens and excluded
+		# afterwards, so the front itself is the only gate on how far the body advances.
 		if p.engulf_front >= 0.95:
 			_begin_eating(p, s)
 
@@ -623,15 +704,76 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 # Passage hints (geometry only; the slime validates posture with real queries)
 # ------------------------------------------------------------------------------------------------
 
-## Returns {} or {width, center, axis, flow, half_length}. A passage requires two
-## genuinely opposing, near-parallel faces AND overlapping extent along the flow
-## direction — two nearby props alone are never a corridor.
+## Measure one specific pair as a passage. Returns {} when either prop is gone,
+## eaten, out of the body's vertical band, or no longer forms two opposing faces
+## with overlapping extent along the flow. A latched session re-measures through
+## here so its width/center/axis track the same two bodies and never get re-scored.
+func measure_passage_pair(s: Slime, a: PropData, b: PropData) -> Dictionary:
+	if a == null or b == null or not is_instance_valid(a) or not is_instance_valid(b):
+		return {}
+	if a.state != STATE_IDLE or b.state != STATE_IDLE or a.mesh == null or b.mesh == null:
+		return {}
+	if not props.has(a) or not props.has(b):
+		return {}
+	var foot := s.model.foot
+	var top := foot.y + s.model.full_height
+	for p: PropData in [a, b]:
+		var he := _half_of(p)
+		var m: Node3D = p.mesh
+		var bottom: float = m.global_position.y - he.y
+		var top_y: float = m.global_position.y + he.y
+		if bottom > tuning.floor_y + 0.5 or top_y < foot.y or bottom > top:
+			return {}
+
+	var ya := a.mesh.global_position.y
+	var yb := b.mesh.global_position.y
+	var ca := _closest_and_normal(a, Vector3(b.mesh.global_position.x, ya, b.mesh.global_position.z))
+	var cb := _closest_and_normal(b, Vector3(a.mesh.global_position.x, yb, a.mesh.global_position.z))
+	ca = _closest_and_normal(a, Vector3(cb.point.x, ya, cb.point.z))
+	cb = _closest_and_normal(b, Vector3(ca.point.x, yb, ca.point.z))
+
+	var gap_vec := Vector3(cb.point.x - ca.point.x, 0.0, cb.point.z - ca.point.z)
+	var w := gap_vec.length()
+	if w < 1e-3:
+		return {}
+	var gap_dir := gap_vec / w
+	var na := Vector3(ca.normal.x, 0.0, ca.normal.z)
+	var nb := Vector3(cb.normal.x, 0.0, cb.normal.z)
+	if na.length() < 0.3 or nb.length() < 0.3:
+		return {}
+	na = na.normalized()
+	nb = nb.normalized()
+	if na.dot(gap_dir) < 0.9 or nb.dot(gap_dir) > -0.9:
+		return {}
+	var flow := Vector3(-gap_dir.z, 0.0, gap_dir.x)
+	var center := Vector3((ca.point.x + cb.point.x) * 0.5, 0.0, (ca.point.z + cb.point.z) * 0.5)
+
+	var ea := _flow_extent(a, flow)
+	var eb := _flow_extent(b, flow)
+	var fa := Vector3(a.mesh.global_position.x, 0.0, a.mesh.global_position.z).dot(flow)
+	var fb := Vector3(b.mesh.global_position.x, 0.0, b.mesh.global_position.z).dot(flow)
+	var lo := maxf(fa - ea, fb - eb)
+	var hi := minf(fa + ea, fb + eb)
+	if hi - lo < 0.05:
+		return {}
+	var half_length := (hi - lo) * 0.5
+	center += flow * ((lo + hi) * 0.5 - center.dot(flow))
+	return {"width": w, "center": center, "axis": gap_dir, "flow": flow, "half_length": half_length}
+
+
+## Returns {} or {width, center, axis, flow, half_length, a, b}. A passage requires
+## two genuinely opposing, near-parallel faces AND overlapping extent along the flow
+## direction — two nearby props alone are never a corridor. Acquisition only: a
+## latched session re-measures its own pair instead.
 func find_passage(s: Slime) -> Dictionary:
 	var result: Dictionary = {}
 	var S := s.model.scale
 	var foot := s.model.foot
 	var top := foot.y + s.model.full_height
-	var reach := s.model.rest_max_radius * S * s.model.spread
+	# Anticipate the fully squeezed footprint: the along-flow stretch is part of the
+	# hull now, so the hint must reach as far as the stretched tip actually does.
+	var stretch_max := 1.0 + (1.0 - tuning.min_liquid_squeeze) * tuning.squeeze_elongation
+	var reach := s.model.rest_max_radius * S * maxf(s.model.spread, tuning.liquid_spread_ratio) * stretch_max
 	var candidates: Array[PropData] = []
 	for p in props:
 		if p.state != STATE_IDLE or p.mesh == null or is_edible_by_push(s, p):
@@ -660,40 +802,15 @@ func find_passage(s: Slime) -> Dictionary:
 		for j in range(i + 1, candidates.size()):
 			var a := candidates[i]
 			var b := candidates[j]
-			var ya := a.mesh.global_position.y
-			var yb := b.mesh.global_position.y
-			var ca := _closest_and_normal(a, Vector3(b.mesh.global_position.x, ya, b.mesh.global_position.z))
-			var cb := _closest_and_normal(b, Vector3(a.mesh.global_position.x, yb, a.mesh.global_position.z))
-			ca = _closest_and_normal(a, Vector3(cb.point.x, ya, cb.point.z))
-			cb = _closest_and_normal(b, Vector3(ca.point.x, yb, ca.point.z))
-
-			var gap_vec := Vector3(cb.point.x - ca.point.x, 0.0, cb.point.z - ca.point.z)
-			var w := gap_vec.length()
-			if w < 1e-3 or w >= reach * 2.0:
+			var m := measure_passage_pair(s, a, b)
+			if m.is_empty():
 				continue
-			var gap_dir := gap_vec / w
-			var na := Vector3(ca.normal.x, 0.0, ca.normal.z)
-			var nb := Vector3(cb.normal.x, 0.0, cb.normal.z)
-			if na.length() < 0.3 or nb.length() < 0.3:
+			var w: float = m["width"]
+			if w >= reach * 2.0:
 				continue
-			na = na.normalized()
-			nb = nb.normalized()
-			if na.dot(gap_dir) < 0.9 or nb.dot(gap_dir) > -0.9:
-				continue
-			var flow := Vector3(-gap_dir.z, 0.0, gap_dir.x)
-			var center := Vector3((ca.point.x + cb.point.x) * 0.5, 0.0, (ca.point.z + cb.point.z) * 0.5)
-
-			var ea := _flow_extent(a, flow)
-			var eb := _flow_extent(b, flow)
-			var fa := Vector3(a.mesh.global_position.x, 0.0, a.mesh.global_position.z).dot(flow)
-			var fb := Vector3(b.mesh.global_position.x, 0.0, b.mesh.global_position.z).dot(flow)
-			var lo := maxf(fa - ea, fb - eb)
-			var hi := minf(fa + ea, fb + eb)
-			if hi - lo < 0.05:
-				continue
-			var half_length := (hi - lo) * 0.5
-			center += flow * ((lo + hi) * 0.5 - center.dot(flow))
-
+			var flow: Vector3 = m["flow"]
+			var half_length: float = m["half_length"]
+			var center: Vector3 = m["center"]
 			var to_gap := center - sp
 			# Only nearby passages the body is actually entering may reshape it: a gate
 			# far away (or already behind the direction of travel) must not squeeze it.
@@ -705,7 +822,9 @@ func find_passage(s: Slime) -> Dictionary:
 			score += (absf(move_dir.dot(flow)) * 2.0) if moving else 0.5
 			if score > best_score:
 				best_score = score
-				result = {"width": w, "center": center, "axis": gap_dir, "flow": flow, "half_length": half_length}
+				result = m.duplicate()
+				result["a"] = a
+				result["b"] = b
 	return result
 
 

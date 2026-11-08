@@ -47,7 +47,6 @@ shader_parameter/uFacing = 0.45
 shader_parameter/uBlink = 1.0
 shader_parameter/uLiquidHeight = 1.0
 shader_parameter/uLiquidSpread = 1.0
-shader_parameter/uSqueezeElong = 0.85
 shader_parameter/uSplitAmt = 0.0
 shader_parameter/uSplitDir = Vector3(0, 0, -1)
 
