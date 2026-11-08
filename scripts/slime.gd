@@ -543,6 +543,12 @@ func _exempt_rids() -> Array[RID]:
 		rids.append(fission_clone.get_proxy_rid())
 	if is_merging and merge_target != null and is_instance_valid(merge_target):
 		rids.append(merge_target.get_proxy_rid())
+	if props != null:
+		for other in props.registered_slimes:
+			if other == self or not is_instance_valid(other):
+				continue
+			if (other.is_merging and other.merge_target == self) or (other.is_budding and other.bud_parent == self):
+				rids.append(other.get_proxy_rid())
 	return rids
 
 
@@ -817,8 +823,10 @@ func _update_scale(dt: float) -> void:
 		new_scale = target_scale
 	if new_scale > slime_scale + 1e-6:
 		var new_core_r := model.rest_max_radius * new_scale * model.min_squeeze()
-		if not motor.core_sphere_clear(motor.core_sweep_origin(), new_core_r) \
-				or not motor.core_sphere_clear(model.core_sphere_center(), new_core_r):
+		var new_sweep_orig := model.foot + Vector3(0.0, new_core_r + 0.04, 0.0)
+		var new_center := model.foot + Vector3(0.0, model.rest_half_height * new_scale, 0.0)
+		if not motor.core_sphere_clear(new_sweep_orig, new_core_r) \
+				or not motor.core_sphere_clear(new_center, new_core_r):
 			expansion_blocked = "growth blocked by geometry"
 			return
 	_set_scale_anchored(new_scale)
@@ -1348,8 +1356,11 @@ func _tick_fission(dt: float) -> void:
 
 	if k >= 1.0:
 		is_fissioning = false
+		if clone != null and is_instance_valid(clone) and clone.is_budding:
+			clone._finish_budding()
 		fission_clone = null
 		_set_scale_anchored(fission_target_scale)
+		_resolve_model(0.0, 1.0, 1.0)
 		_apply_transform()
 		set_shader_param("uSplitAmt", 0.0)
 		set_shader_param("uSplitNeckRadius", 0.0)
@@ -1397,18 +1408,23 @@ func _bud_scale_for(k: float) -> float:
 ## can hold its own progress instead of handing over volume this hull cannot hold.
 func set_bud_scale(k: float) -> bool:
 	var s := maxf(_bud_scale_for(k), 0.02)
-	var ok := true
 	bud_growth_blocked = false
-	# Single target probe when growing past bucket margin, avoiding multi-step QuickHull loops
-	if s > slime_scale + 0.015:
-		if not motor.posture_target_is_legal(s, 0.0, 1.0, 1.0, sq_dir):
-			ok = false
-			bud_growth_blocked = true
-			s = slime_scale
 	if absf(s - slime_scale) > 1e-6:
 		_set_scale_anchored(s)
 		_resolve_model(0.0, 1.0, 1.0)
-	return ok
+	return true
+
+
+func _finish_budding() -> void:
+	is_budding = false
+	bud_parent = null
+	_set_scale_anchored(bud_target_scale)
+	_resolve_model(0.0, 1.0, 1.0)
+	_apply_transform()
+	set_shader_param("uSplitAmt", 0.0)
+	set_shader_param("uSplitNeckRadius", 0.0)
+	set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
+	_sync_proxy()
 
 
 func _tick_budding(dt: float) -> void:
@@ -1470,14 +1486,9 @@ func _tick_budding(dt: float) -> void:
 	set_shader_param("uSplitDir", -bud_fwd)
 
 	if k >= 1.0:
-		is_budding = false
-		bud_parent = null
-		_set_scale_anchored(bud_target_scale)
-		_apply_transform()
-		set_shader_param("uSplitAmt", 0.0)
-		set_shader_param("uSplitNeckRadius", 0.0)
-		set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
-	_sync_proxy()
+		_finish_budding()
+	else:
+		_sync_proxy()
 
 
 ## Growth room this pair's separation still needs, in metres scaled to both bodies.
@@ -1781,12 +1792,10 @@ func merge_nearby_clones() -> void:
 
 
 func _merge_path_clear(other: Slime) -> bool:
-	# The whole hull has to make the trip, not just its endpoints: a merge across a
-	# wall or a pillar would otherwise teleport the source through it. Swept by the
-	# traveller's own motor so its exclusion set and foot are the ones that move.
-	var from := other.model.foot
-	var to := Vector3(model.foot.x, from.y, model.foot.z)
-	return other.motor.sweep_is_clear(from, to, other.slime_scale)
+	var from := other.motor.core_sweep_origin()
+	var to := Vector3(global_position.x, from.y, global_position.z)
+	var fr := other.motor.cast_core_sphere(from, to - from)
+	return float(fr[1]) >= 0.99
 
 
 # ------------------------------------------------------------------------------------------------

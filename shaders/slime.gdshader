@@ -306,8 +306,17 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 	float wx = 1.0 - smoothstep(h.x - 0.05, h.x + 0.65, abs(q.x));
 	vec2 pushZ = vec2(0.0, sz * penZ * wx);
 
-	// Constant-per-obstacle face blend + diagonal corner boost (zero spatial derivative across vertices)
-	float faceW = smoothstep(-0.25, 0.25, ox - oz);
+	// Select X-wall vs Z-wall:
+	// - When slime center is inside Z-span (oz <= 0), X-wall is active (faceW = 1).
+	// - When slime center is inside X-span (ox <= 0), Z-wall is active (faceW = 0).
+	// - In the corner region (ox > 0 && oz > 0, e.g. entering/exiting a gate), use the box's
+	//   Voronoi miter bisector (inZ - inX) so vertices inside the gate channel always push in X!
+	float inX = h.x - abs(q.x);
+	float inZ = h.z - abs(q.z);
+	float cornerFaceW = smoothstep(-0.25, 0.25, inZ - inX);
+	float sideOnlyX = smoothstep(-0.15, 0.15, ox);
+	float sideOnlyZ = smoothstep(-0.15, 0.15, oz);
+	float faceW = mix(sideOnlyX, cornerFaceW, sideOnlyX * sideOnlyZ);
 	float cornerBoost = 1.0 + 1.68 * faceW * (1.0 - faceW);
 	vec2 pushXZ = mix(pushZ, pushX, faceW) * (cornerBoost * winY / domeScale);
 

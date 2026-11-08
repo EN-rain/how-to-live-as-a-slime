@@ -274,11 +274,12 @@ static func erode_points(pts: PackedVector3Array, margin: float) -> PackedVector
 	for i in n:
 		top = maxf(top, pts[i].y)
 	top = maxf(0.0, top - margin)
+	var bot := minf(margin, top)
 	for i in n:
 		var p := pts[i]
 		var r := sqrt(p.x * p.x + p.z * p.z)
 		var f := maxf(0.0, r - margin) / maxf(r, 1e-5)
-		pts[i] = Vector3(p.x * f, minf(p.y, top), p.z * f)
+		pts[i] = Vector3(p.x * f, clampf(p.y, bot, top), p.z * f)
 	return pts
 
 
