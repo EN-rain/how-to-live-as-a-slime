@@ -8,12 +8,12 @@ extends SceneTree
 const VOXEL := 0.80
 const BRICK := 4 # 4x4x4 coarse brick = 3.2 m
 
-const U_MIN := -152.0
-const U_MAX := 40.0
-const Y_MIN := 4.0
+const U_MIN := -210.0
+const U_MAX := 44.0
+const Y_MIN := 0.5
 const Y_MAX := 66.0
 const S_MIN := -32.0
-const S_MAX := 176.0
+const S_MAX := 214.0
 
 
 func _init() -> void:

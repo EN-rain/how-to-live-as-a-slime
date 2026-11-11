@@ -42,23 +42,25 @@ const TUNNELS := {
 	## Deep Descent Passage: branches from South-West Collapse Hall floor and descends into the mountain depths.
 	"deep_descent": [
 		{"p": Vector3(-68.0, 18.5, 76.0), "w": 13.0, "h": 9.5},
-		{"p": Vector3(-76.0, 16.2, 84.0), "w": 12.0, "h": 9.0},
-		{"p": Vector3(-84.0, 13.0, 93.0), "w": 11.5, "h": 8.8},
-		{"p": Vector3(-92.0, 9.8, 103.0), "w": 12.5, "h": 9.2},
+		{"p": Vector3(-76.0, 15.5, 86.0), "w": 12.5, "h": 9.0},
+		{"p": Vector3(-82.0, 12.5, 98.0), "w": 12.0, "h": 9.0},
+		{"p": Vector3(-85.0, 10.2, 110.0), "w": 13.0, "h": 9.5},
 	],
-	## Lake Chasm Passage: branches from Abyssal Atrium into the vast Subterranean Lake cavern.
+	## Lake Chasm Passage: sweeps organically from Abyssal Gallery into the vast Subterranean Lake cavern.
 	"lake_tunnel": [
-		{"p": Vector3(-92.0, 9.8, 103.0), "w": 12.0, "h": 9.0},
-		{"p": Vector3(-79.0, 9.0, 116.0), "w": 12.5, "h": 9.0},
-		{"p": Vector3(-65.0, 8.5, 127.0), "w": 13.5, "h": 9.5},
-		{"p": Vector3(-50.0, 8.0, 136.0), "w": 15.0, "h": 10.5},
+		{"p": Vector3(-85.0, 10.2, 110.0), "w": 13.5, "h": 9.5},
+		{"p": Vector3(-72.0, 9.0, 124.0), "w": 14.5, "h": 10.5},
+		{"p": Vector3(-56.0, 8.0, 138.0), "w": 16.0, "h": 11.5},
+		{"p": Vector3(-38.0, 7.2, 150.0), "w": 18.0, "h": 12.5},
 	],
-	## Vault Door Passage: branches from Abyssal Atrium leading to the monumental Ancient Big Door.
+	## Vault Door Passage: deep descending pilgrimage canyon leading to the monumental Ancient Big Door.
 	"door_tunnel": [
-		{"p": Vector3(-92.0, 9.8, 103.0), "w": 11.5, "h": 8.8},
-		{"p": Vector3(-105.0, 10.0, 99.0), "w": 11.0, "h": 8.5},
-		{"p": Vector3(-118.0, 10.2, 92.0), "w": 11.0, "h": 8.5},
-		{"p": Vector3(-128.0, 10.4, 85.0), "w": 11.5, "h": 9.0},
+		{"p": Vector3(-85.0, 10.2, 110.0), "w": 12.5, "h": 9.5},
+		{"p": Vector3(-98.0, 8.8, 104.0), "w": 12.0, "h": 9.2},
+		{"p": Vector3(-114.0, 7.2, 96.0), "w": 12.0, "h": 9.0},
+		{"p": Vector3(-130.0, 5.5, 86.0), "w": 12.5, "h": 9.2},
+		{"p": Vector3(-148.0, 3.8, 76.0), "w": 13.0, "h": 9.8},
+		{"p": Vector3(-166.0, 2.4, 66.0), "w": 13.5, "h": 10.2},
 	],
 	## Secret route: calibrated to SlimeShapeModel sphere envelope + 0.80m Surface-Nets chord:
 	## - Full slime (scale 1.0): outer sphere diam = 4.08 m -> BLOCKED by ~3.65 m clear width.
@@ -76,9 +78,9 @@ const CHAMBERS := {
 	"breakdown_fork": {"c": Vector3(-32.5, 23.5, 42.0), "rx": 9.5, "rz": 8.5, "h": 11.0},
 	"collapse_hall": {"c": Vector3(-60.0, 18.5, 72.0), "rx": 35.0, "rz": 23.0, "h": 32.0},
 	"geode_pocket": {"c": Vector3(2.0, 15.2, 56.0), "rx": 7.5, "rz": 7.5, "h": 12.0},
-	"abyssal_atrium": {"c": Vector3(-94.0, 9.8, 106.0), "rx": 16.5, "rz": 14.5, "h": 14.0},
-	"underground_lake": {"c": Vector3(-34.0, 7.5, 146.0), "rx": 28.0, "rz": 23.0, "h": 19.5},
-	"vault_sanctum": {"c": Vector3(-135.0, 10.4, 82.0), "rx": 13.5, "rz": 11.5, "h": 12.5},
+	"abyssal_atrium": {"c": Vector3(-85.0, 10.0, 112.0), "rx": 18.0, "rz": 16.0, "h": 16.0},
+	"underground_lake": {"c": Vector3(-12.0, 6.0, 162.0), "rx": 48.0, "rz": 40.0, "h": 26.0},
+	"vault_sanctum": {"c": Vector3(-176.0, 2.2, 60.0), "rx": 18.0, "rz": 16.0, "h": 16.0},
 }
 
 ## Geological floor & roof features.
@@ -89,15 +91,15 @@ const SKYLIGHT := {"c": Vector3(-62.0, 56.5, 68.0), "r": 6.4}
 const WATERFALL := Vector3(-52.5, 17.85, 91.5)
 
 ## Big Subterranean Lake feature (vast oval body of cavern water).
-const UNDERGROUND_LAKE := {"c": Vector3(-32.0, 6.0, 148.0), "rx": 23.5, "rz": 18.5, "water_y": 7.60}
+const UNDERGROUND_LAKE := {"c": Vector3(-10.0, 5.0, 164.0), "rx": 44.0, "rz": 34.0, "water_y": 6.80}
 
 ## Monumental Ancient Big Door at the terminus of Vault Sanctum.
 const ANCIENT_DOOR := {
-	"pos": Vector3(-144.5, 10.4, 76.5),
-	"yaw": 1.08, # Facing inward toward chamber center
-	"width": 7.4,
-	"height": 9.2,
-	"depth": 2.0,
+	"pos": Vector3(-188.5, 2.2, 55.0),
+	"yaw": 1.05, # Facing inward toward chamber center
+	"width": 8.6,
+	"height": 11.0,
+	"depth": 2.4,
 }
 
 ## Climbable ledge route spiralling up the Collapse Hall's west/north wall to the Skylight Rim exit.
@@ -193,17 +195,17 @@ const BENCHMARK_SHOTS := [
 	{
 		"file": "shot_09_underground_lake.png",
 		"label": "9. Big Underground Lake (Vast cavern lake & karst column)",
-		"slime": Vector3(-48.0, 8.2, 138.0),
-		"cam": Vector3(-53.0, 11.5, 133.0),
-		"look": Vector3(-32.0, 7.8, 148.0),
+		"slime": Vector3(-38.0, 7.2, 150.0),
+		"cam": Vector3(-46.0, 11.0, 142.0),
+		"look": Vector3(-12.0, 6.5, 162.0),
 		"fov": 56.0,
 	},
 	{
 		"file": "shot_10_ancient_door.png",
 		"label": "10. Ancient Big Door (Monumental carved portal & braziers)",
-		"slime": Vector3(-136.0, 10.4, 81.0),
-		"cam": Vector3(-131.0, 12.5, 84.5),
-		"look": Vector3(-144.5, 12.0, 76.5),
+		"slime": Vector3(-180.0, 2.2, 59.0),
+		"cam": Vector3(-172.0, 4.5, 64.0),
+		"look": Vector3(-188.5, 3.2, 55.0),
 		"fov": 54.0,
 	},
 ]

@@ -26,6 +26,10 @@ enum PassageState {
 
 ## Fallback when no tuning resource is assigned.
 const LIQUID_BLEND_RATE := 2.8
+const LAYER_TERRAIN := 1
+const LAYER_SLIMES := 2
+const LAYER_OBSTACLES := 4
+const LAYER_SOLID := LAYER_TERRAIN | LAYER_OBSTACLES | LAYER_SLIMES
 ## Shared clone prefab and mesh LOD variants (one resource per level, not per slime).
 static var _slime_scene: PackedScene = null
 static var _lod_meshes: Array[SphereMesh] = []
@@ -267,7 +271,7 @@ func _activate_from_pool() -> void:
 		body.position = Vector3.ZERO
 		body.scale = Vector3.ONE
 	if _proxy != null:
-		_proxy.collision_layer = SlimeMotor.LAYER_SLIMES
+		_proxy.collision_layer = LAYER_SLIMES
 
 	is_fissioning = false
 	fission_timer = 0.0
@@ -424,7 +428,7 @@ func _ready() -> void:
 			var ray := PhysicsRayQueryParameters3D.new()
 			ray.from = Vector3(global_position.x, 30.0, global_position.z)
 			ray.to = Vector3(global_position.x, tuning.floor_y, global_position.z)
-			ray.collision_mask = SlimeMotor.LAYER_OBSTACLES
+			ray.collision_mask = LAYER_OBSTACLES
 			var hit := space.intersect_ray(ray)
 			if not hit.is_empty():
 				start_surface_y = (hit.position as Vector3).y
@@ -488,7 +492,7 @@ func _setup_proxy() -> void:
 	_proxy = StaticBody3D.new()
 	_proxy.name = "SlimeProxy"
 	_proxy.top_level = true
-	_proxy.collision_layer = SlimeMotor.LAYER_SLIMES
+	_proxy.collision_layer = LAYER_SLIMES
 	_proxy.collision_mask = 0
 	_proxy_cs = CollisionShape3D.new()
 	_proxy_cs.shape = model.shape
@@ -1207,7 +1211,7 @@ func _tick_dev_movement(dt: float) -> void:
 			var dy := motor.velocity.y * dt
 			if absf(dy) > 1e-6:
 				motor._sync_foot()
-				var fr_v := motor._cast(model.foot, Vector3(0.0, dy, 0.0), true, null, SlimeMotor.LAYER_TERRAIN | SlimeMotor.LAYER_SOLID)
+				var fr_v := motor._cast(model.foot, Vector3(0.0, dy, 0.0), true, null, LAYER_SOLID)
 				var safe_v: float = 1.0 if float(fr_v[1]) >= 0.999999 else clampf(float(fr_v[0]), 0.0, 1.0)
 				global_position.y += dy * safe_v
 			motor.vertical_vel = 0.0

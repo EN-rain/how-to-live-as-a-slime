@@ -58,8 +58,8 @@ func _run() -> void:
 		for f in 100:
 			var dt := 1.0 / 60.0
 			var motion := push_dir * 4.0 * dt
-			var sphere := slime.motor.body_sphere_shape()
-			var r := slime.model.body_collision_radius()
+			var sphere: SphereShape3D = slime.motor.core_sphere_shape()
+			var r: float = slime.model.core_sphere_radius()
 			var sweep_pos := slime.global_position
 
 			var q := PhysicsShapeQueryParameters3D.new()
@@ -107,8 +107,8 @@ func _run() -> void:
 				if d_surf < r:
 					max_penetration = maxf(max_penetration, r - d_surf)
 
-		var cur_r := slime.model.body_collision_radius()
-		var cur_core := slime.model.core_sphere_radius()
+		var cur_r: float = slime.model.core_sphere_radius()
+		var cur_core: float = slime.model.core_sphere_radius()
 		var stopped_d := Vector2(slime.global_position.x - rock_pos.x, slime.global_position.z - rock_pos.z).length()
 
 		print("Angle %d (%3.0f°): stop_d_center=%.2fm min_d_surf=%.3fm body_r=%.2fm pen=%.3fm core_clear=%.3fm" % [

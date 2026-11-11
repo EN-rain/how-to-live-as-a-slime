@@ -64,10 +64,10 @@ static func is_in_portal_scatter_exclusion(x: float, z: float, is_grass: bool = 
 
 
 static func is_subterranean_or_cutout(x: float, z: float, foot_y: float, overworld_h: float) -> bool:
-	if x < -320.0 or x > 45.0 or z < -350.0 or z > -60.0:
+	if x < -380.0 or x > 60.0 or z < -380.0 or z > 15.0:
 		return false
 	var cl := CaveLayout.to_local(Vector3(x, foot_y, z))
-	if cl.x < -160.0 or cl.x > 36.0 or cl.z < -25.0 or cl.z > 185.0:
+	if cl.x < -210.0 or cl.x > 45.0 or cl.z < -35.0 or cl.z > 214.0:
 		return false
 
 	# 1. Inside either heightfield cutout (Entrance Outcrop or Skylight hole), always use SDF mesh
@@ -448,11 +448,9 @@ func _build_interior_lighting_rig() -> void:
 		["TwilightArchOmni", Vector3(-34.0, 22.5, 42.0), Color(0.95, 0.78, 0.52), 1.35, 22.0, 1.50],
 		["GrottoArchOmni", Vector3(-42.0, 20.8, 86.0), Color(0.32, 0.86, 0.98), 1.65, 24.0, 1.45],
 		["SpiralLedgeStartOmni", Vector3(-73.0, 23.5, 81.0), Color(0.65, 0.55, 1.0), 1.45, 22.0, 1.45],
-		["GrottoCoolOmni", Vector3(-22.0, 21.5, 95.5), Color(0.42, 0.84, 0.98), 2.10, 32.0, 1.45],
 		["GeodeCrystalOmni", Vector3(2.0, 21.8, 56.5), Color(0.68, 0.60, 1.0), 3.25, 26.0, 1.35],
-		["AtriumDescentOmni", Vector3(-92.0, 14.5, 104.0), Color(0.52, 0.76, 0.92), 2.05, 30.0, 1.40],
-		["UndergroundLakeOmni", Vector3(-32.0, 14.0, 148.0), Color(0.22, 0.74, 0.90), 2.95, 38.0, 1.35],
-		["VaultDoorOmni", Vector3(-138.0, 13.5, 82.0), Color(1.0, 0.76, 0.38), 3.10, 28.0, 1.35],
+		["UndergroundLakeOmni", Vector3(-10.0, 12.0, 164.0), Color(0.20, 0.78, 0.92), 3.40, 48.0, 1.35],
+		["VaultDoorOmni", Vector3(-182.0, 6.5, 58.0), Color(1.0, 0.76, 0.38), 3.40, 32.0, 1.35],
 	]
 	for a: Array in accents:
 		var omni := OmniLight3D.new()
@@ -838,6 +836,12 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 		[Vector3(-71.5, 19.5, 87.5), Color(0.30, 0.78, 1.0), 1.50, 5],
 		# Split-Slime Crawlway mouth teaser crystals (warm violet/cyan)
 		[Vector3(-29.5, 19.2, 43.2), Color(0.68, 0.44, 1.0), 0.95, 4],
+		# Abyssal Gallery to Underground Lake beacon (radiant cyan)
+		[Vector3(-42.0, 8.0, 146.0), Color(0.18, 0.88, 0.95), 1.60, 6],
+		# Sanctum Descent threshold (warm amber beacon leading to the Ancient Door)
+		[Vector3(-96.0, 10.0, 106.0), Color(1.0, 0.72, 0.32), 1.60, 6],
+		# Ancient Big Door forecourt (monumental gold beacon)
+		[Vector3(-180.0, 3.2, 59.0), Color(1.0, 0.68, 0.28), 1.80, 6],
 	]
 	for lc_item: Array in landmark_clusters:
 		var lpos: Vector3 = lc_item[0]

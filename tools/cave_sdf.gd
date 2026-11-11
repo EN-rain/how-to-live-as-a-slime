@@ -118,9 +118,9 @@ func _compile_primitives() -> void:
 		[-28.0, 18.8, 102.0, 5.5, 3.2, 4.8],
 		[-2.0, 17.8, 86.0, 5.0, 3.4, 5.8],
 		# Abyssal Atrium & Deep Chambers side dissolution bays
-		[-98.0, 13.0, 114.0, 6.5, 5.0, 6.0],  # Abyssal Atrium north alcove
-		[-18.0, 10.5, 138.0, 8.0, 6.0, 7.5],  # Underground Lake east cove
-		[-140.0, 13.0, 88.0, 5.5, 4.5, 5.0],  # Vault Sanctum north alcove
+		[-90.0, 12.0, 124.0, 7.5, 5.5, 7.0],  # Abyssal Gallery north-west alcove
+		[-2.0, 10.0, 172.0, 12.0, 8.0, 10.5],  # Underground Lake east cove
+		[-180.0, 4.5, 72.0, 7.0, 5.0, 6.5],  # Vault Sanctum north alcove
 	]
 	for alc: Array in alcoves:
 		_alcove_data.append_array([float(alc[0]), float(alc[1]), float(alc[2]), float(alc[3]), float(alc[4]), float(alc[5])])
@@ -130,7 +130,8 @@ func _compile_primitives() -> void:
 	var pillars := [
 		[-35.0, 74.0, 17.0, 52.0, 4.4, 6.2], # East hall buttress framing Pool bay
 		[-36.5, 59.5, 17.0, 50.0, 4.2, 5.8], # South-east hall shoulder flanking throat (keeps west spiral ledge clear)
-		[-20.0, 154.0, 5.5, 26.0, 4.2, 5.6], # Grand Karst Column in Underground Lake
+		[-8.0, 168.0, 4.0, 30.0, 4.8, 6.4],  # Grand Karst Column in Underground Lake
+		[-152.0, 78.0, 1.8, 14.0, 2.4, 3.2], # Sanctum Colonnade Pillar
 	]
 	for pl: Array in pillars:
 		_pillar_data.append_array([float(pl[0]), float(pl[1]), float(pl[2]), float(pl[3]), float(pl[4]), float(pl[5])])
