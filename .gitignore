@@ -4,3 +4,11 @@
 
 # Generated source snapshot
 full_source_code.pdf
+
+# Local sandbox scripts & temporary logs
+*-sbx*.ps1
+fetch-cloud-image.ps1
+dogwatcher.bat
+watchdog.log
+*.png
+*.png.import

@@ -6,19 +6,35 @@
 [ext_resource type="Shader" uid="uid://qeelh8bvw3or" path="res://shaders/floor.gdshader" id="5_floor_shader"]
 [ext_resource type="Script" uid="uid://bsn3fclfde6cq" path="res://scripts/props.gd" id="6_props_script"]
 [ext_resource type="Script" uid="uid://b1jvytjt3j1k4" path="res://scripts/hud.gd" id="7_hud_script"]
+[ext_resource type="PackedScene" path="res://terrain/terrain.tscn" id="9_terrain_scene"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_world"]
+sky_top_color = Color(0.384, 0.635, 0.878, 1)
+sky_horizon_color = Color(0.718, 0.824, 0.898, 1)
+ground_bottom_color = Color(0.24, 0.28, 0.32, 1)
+ground_horizon_color = Color(0.718, 0.824, 0.898, 1)
+sun_angle_max = 30.0
+
+[sub_resource type="Sky" id="Sky_world"]
+sky_material = SubResource("ProceduralSkyMaterial_world")
 
 [sub_resource type="Environment" id="Environment_studio"]
-background_mode = 1
-background_color = Color(0.337, 0.471, 0.565, 1)
-ambient_light_source = 2
+background_mode = 2
+sky = SubResource("Sky_world")
+ambient_light_source = 3
 ambient_light_color = Color(0.859, 0.918, 0.996, 1)
-ambient_light_energy = 0.85
+ambient_light_sky_contribution = 0.75
+ambient_light_energy = 0.9
+tonemap_mode = 2
+glow_enabled = true
+glow_intensity = 0.5
+glow_bloom = 0.08
 fog_enabled = true
 fog_mode = 1
-fog_light_color = Color(0.337, 0.471, 0.565, 1)
+fog_light_color = Color(0.70, 0.80, 0.88, 1)
 fog_density = 1.0
-fog_depth_begin = 25.0
-fog_depth_end = 90.0
+fog_depth_begin = 200.0
+fog_depth_end = 3500.0
 
 [sub_resource type="StandardMaterial3D" id="Mat_red"]
 albedo_color = Color(0.867, 0.373, 0.373, 1)
@@ -102,11 +118,13 @@ transform = Transform3D(0.7809, -0.4877, 0.3904, 0, 0.625, 0.7807, -0.6247, -0.6
 light_energy = 0.9
 
 [node name="Slime" parent="." instance=ExtResource("8_slime_scene") node_paths=PackedStringArray("camera", "floor_mesh", "props")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -150.61, 22.85, -159.45)
 camera = NodePath("../CameraRig/Camera3D")
 floor_mesh = NodePath("../Floor")
 props = NodePath("../Ecosystem")
 
 [node name="CameraRig" type="Node3D" parent="." unique_id=870445326 node_paths=PackedStringArray("camera", "follow")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -150.61, 22.85, -159.45)
 script = ExtResource("4_orbit_script")
 camera = NodePath("Camera3D")
 follow = NodePath("../Slime")
@@ -115,7 +133,7 @@ follow = NodePath("../Slime")
 current = true
 fov = 42.0
 near = 0.1
-far = 100.0
+far = 4000.0
 
 [node name="Props" type="Node3D" parent="." unique_id=432529286]
 visible = false
@@ -180,7 +198,10 @@ transform = Transform3D(0.7794, 0, 0.45, 0, 0.9, 0, -0.45, 0, 0.7794, -5.47, -0.
 material_override = SubResource("Mat_purple")
 mesh = SubResource("BoxMesh_prop")
 
+[node name="TerrainScene" parent="." instance=ExtResource("9_terrain_scene")]
+
 [node name="Floor" type="MeshInstance3D" parent="." unique_id=1904116251]
+visible = false
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.2, 0)
 material_override = SubResource("ShaderMaterial_floor")
 cast_shadow = 0
@@ -190,6 +211,7 @@ mesh = SubResource("PlaneMesh_floor")
 script = ExtResource("6_props_script")
 slime = NodePath("../Slime")
 floor_mesh = NodePath("../Floor")
+enable_test_structures = false
 
 [node name="HudLayer" type="CanvasLayer" parent="." unique_id=1288801345]
 

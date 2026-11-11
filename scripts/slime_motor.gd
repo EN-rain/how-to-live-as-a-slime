@@ -8,12 +8,10 @@ extends RefCounted
 ## walls). Posture/expansion changes are collision-tested over the whole footprint
 ## before being committed. Nothing else may write the actor's position.
 
-const LAYER_OBSTACLES := 1
-## Other slimes publish a baked-hull proxy on this layer. Horizontal sweeps,
-## posture probes and recovery see them; support/ceiling do not (a slime is not
-## ground and must not be climbed).
+const LAYER_TERRAIN := 1
 const LAYER_SLIMES := 2
-const LAYER_SOLID := LAYER_OBSTACLES | LAYER_SLIMES
+const LAYER_OBSTACLES := 4
+const LAYER_SOLID := LAYER_TERRAIN | LAYER_OBSTACLES | LAYER_SLIMES
 ## Minimum intermediate probes between the resolved and the candidate posture.
 ## Actual density is derived from vertex displacement so a thin wall can never slip
 ## between samples at low tick rates.
@@ -37,6 +35,9 @@ var vertical_vel := 0.0
 var support_y := -1.2
 var on_ground := true
 var ground_body: Object = null
+var ground_normal := Vector3.UP
+var just_landed := false
+var landing_impact_speed := 0.0
 
 ## Why the requested posture could not be reached ("" when unrestricted).
 var expansion_blocked := ""
@@ -338,14 +339,14 @@ func update_support() -> void:
 	# makes the body jump onto (or off) a ledge.
 	var reach := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
 	var start := model.foot + Vector3(0, reach, 0)
-	var fr := _cast(start, Vector3(0, -(reach + 2.0 * model.scale), 0), false, null, LAYER_OBSTACLES)
+	var fr := _cast(start, Vector3(0, -(reach + 2.0 * model.scale), 0), false, null, LAYER_TERRAIN | LAYER_OBSTACLES)
 	var unsafe: float = fr[1]
 	var best := tuning.floor_y
 	var body: Object = null
 	if unsafe < 0.999999:
 		var at := start + Vector3(0, -(reach + 2.0 * model.scale), 0) * unsafe
 		debug_rest_count += 1
-		var rest := _space().get_rest_info(_query(at, null, false, LAYER_OBSTACLES))
+		var rest := _space().get_rest_info(_query(at, null, false, LAYER_TERRAIN | LAYER_OBSTACLES))
 		if not rest.is_empty() and rest.normal.y > 0.5:
 			var top: float = rest.point.y
 			if top <= model.foot.y + reach + tuning.skin and top > best:
@@ -355,6 +356,7 @@ func update_support() -> void:
 				if rise <= 1e-4 or ceiling_clearance_up(rise) >= rise - 1e-4:
 					best = top
 					body = rest.get("collider")
+					ground_normal = rest.normal
 	support_y = best
 	ground_body = body
 
@@ -380,15 +382,20 @@ func ceiling_clearance_from(from_foot: Vector3, max_rise: float, probe: Shape3D 
 ## Vertical integration anchored to support; never sinks below the floor, and every
 ## position change is the result of a downward/upward sweep.
 func move_vertical(dt: float, target_scale: float) -> void:
+	just_landed = false
 	var target_foot := support_y + tuning.skin
 	var foot_y := owner_node.global_position.y - model.rest_half_height * model.scale
 	var shrinking := target_scale < model.scale - 0.01
 	var desired := 0.0
+	var was_airborne := not on_ground
 	if foot_y > target_foot + 0.02 and not shrinking:
 		on_ground = false
 		vertical_vel -= tuning.gravity * dt
 		desired = vertical_vel * dt
 	else:
+		if was_airborne:
+			just_landed = true
+			landing_impact_speed = absf(vertical_vel)
 		vertical_vel = 0.0
 		on_ground = true
 		desired = (target_foot - foot_y) * (1.0 - exp(-16.0 * dt))
@@ -400,6 +407,9 @@ func move_vertical(dt: float, target_scale: float) -> void:
 	if desired < 0.0 and next_foot < target_foot:
 		next_foot = target_foot
 	if safe < 0.999999:
+		if was_airborne:
+			just_landed = true
+			landing_impact_speed = absf(vertical_vel)
 		vertical_vel = 0.0
 		on_ground = true
 	owner_node.global_position.y = next_foot + model.rest_half_height * model.scale

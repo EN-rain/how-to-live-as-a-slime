@@ -3,46 +3,75 @@
 [ext_resource type="Script" path="res://terrain/terrain.gd" id="1_terrain_script"]
 [ext_resource type="Shader" path="res://terrain/terrain.gdshader" id="2_terrain_shader"]
 [ext_resource type="Shader" path="res://terrain/grass.gdshader" id="3_grass_shader"]
+[ext_resource type="Shader" path="res://terrain/water.gdshader" id="4_water_shader"]
+[ext_resource type="Texture2D" path="res://assets/nature/Grass.png" id="5_grass_texture"]
+[ext_resource type="Script" path="res://terrain/cave_system.gd" id="6_cave_script"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_terrain"]
 render_priority = 0
 shader = ExtResource("2_terrain_shader")
-shader_parameter/grass_sun_color = Color(0.45, 0.75, 0.26, 1)
-shader_parameter/grass_mid_color = Color(0.29, 0.6, 0.2, 1)
-shader_parameter/grass_deep_color = Color(0.18, 0.44, 0.15, 1)
-shader_parameter/dirt_light_color = Color(0.58, 0.44, 0.3, 1)
-shader_parameter/dirt_dark_color = Color(0.39, 0.28, 0.18, 1)
-shader_parameter/rock_light_color = Color(0.52, 0.5, 0.47, 1)
-shader_parameter/rock_dark_color = Color(0.34, 0.32, 0.3, 1)
-shader_parameter/detail_scale = 2.4
-shader_parameter/micro_scale = 18.0
-shader_parameter/macro_scale = 0.07
-shader_parameter/slope_threshold = 0.85
-shader_parameter/slope_softness = 0.08
-shader_parameter/dirt_patch_amount = 0.26
-shader_parameter/relief_strength = 0.22
+shader_parameter/grass_sun_color = Color(0.48, 0.84, 0.28, 1)
+shader_parameter/grass_mid_color = Color(0.36, 0.72, 0.22, 1)
+shader_parameter/grass_deep_color = Color(0.28, 0.62, 0.18, 1)
+shader_parameter/sand_light_color = Color(0.88, 0.8, 0.56, 1)
+shader_parameter/sand_dark_color = Color(0.74, 0.64, 0.44, 1)
+shader_parameter/wet_sand_color = Color(0.46, 0.42, 0.34, 1)
+shader_parameter/sea_level = 0.0
+shader_parameter/beach_height = 4.5
+shader_parameter/beach_blend = 2.5
+shader_parameter/alpine_height = 115.0
+shader_parameter/alpine_blend = 25.0
+shader_parameter/rock_light_color = Color(0.58, 0.6, 0.64, 1)
+shader_parameter/rock_dark_color = Color(0.38, 0.4, 0.44, 1)
+shader_parameter/alpine_rock_color = Color(0.44, 0.48, 0.54, 1)
+shader_parameter/snow_color = Color(0.78, 0.84, 0.92, 1)
+shader_parameter/detail_scale = 0.25
+shader_parameter/macro_scale = 0.025
+shader_parameter/slope_threshold = 0.46
+shader_parameter/slope_softness = 0.04
 shader_parameter/surface_roughness = 0.92
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_terrain_initial"]
-size = Vector2(160, 160)
-subdivide_width = 48
-subdivide_depth = 48
+size = Vector2(7200, 7200)
+subdivide_width = 1
+subdivide_depth = 1
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_terrain_initial"]
-size = Vector3(160, 1, 160)
+size = Vector3(7200, 260, 7200)
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_grass"]
 render_priority = 0
 shader = ExtResource("3_grass_shader")
-shader_parameter/grass_sun_color = Color(0.45, 0.75, 0.26, 1)
-shader_parameter/grass_mid_color = Color(0.29, 0.6, 0.2, 1)
-shader_parameter/grass_deep_color = Color(0.18, 0.44, 0.15, 1)
-shader_parameter/tip_color = Color(0.56, 0.85, 0.32, 1)
-shader_parameter/macro_scale = 0.07
+shader_parameter/grass_texture = ExtResource("5_grass_texture")
+shader_parameter/alpha_scissor_threshold = 0.45
+shader_parameter/grass_sun_color = Color(0.48, 0.84, 0.28, 1)
+shader_parameter/grass_mid_color = Color(0.36, 0.72, 0.22, 1)
+shader_parameter/grass_deep_color = Color(0.28, 0.62, 0.18, 1)
+shader_parameter/tip_color = Color(0.54, 0.88, 0.32, 1)
+shader_parameter/macro_scale = 0.025
 shader_parameter/roughness = 0.92
 
 [sub_resource type="MultiMesh" id="MultiMesh_grass"]
 transform_format = 1
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_water"]
+render_priority = 0
+shader = ExtResource("4_water_shader")
+shader_parameter/shallow_color = Color(0.18, 0.78, 0.84, 1)
+shader_parameter/deep_color = Color(0.06, 0.32, 0.68, 1)
+shader_parameter/foam_color = Color(0.95, 0.98, 1, 1)
+shader_parameter/water_opacity = 0.85
+shader_parameter/depth_distance = 6.5
+shader_parameter/foam_depth = 0.65
+shader_parameter/wave_speed = 0.85
+shader_parameter/wave_amplitude = 0.12
+shader_parameter/wave_frequency = 0.12
+shader_parameter/roughness_val = 0.12
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_water"]
+size = Vector2(22000, 22000)
+subdivide_width = 1
+subdivide_depth = 1
 
 [node name="TerrainScene" type="Node3D"]
 script = ExtResource("1_terrain_script")
@@ -53,14 +82,90 @@ cast_shadow = 0
 mesh = SubResource("PlaneMesh_terrain_initial")
 
 [node name="StaticBody3D" type="StaticBody3D" parent="Terrain"]
+collision_layer = 1
+collision_mask = 0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Terrain/StaticBody3D"]
 shape = SubResource("BoxShape3D_terrain_initial")
 
+[node name="Water" type="MeshInstance3D" parent="."]
+material_override = SubResource("ShaderMaterial_water")
+cast_shadow = 0
+mesh = SubResource("PlaneMesh_water")
+
 [node name="Grass" type="MultiMeshInstance3D" parent="."]
 material_override = SubResource("ShaderMaterial_grass")
 cast_shadow = 0
-visibility_range_end = 55.0
-visibility_range_end_margin = 8.0
-visibility_range_fade_mode = 1
-multimesh = SubResource("MultiMesh_grass")
+visibility_range_end = 160.0
+visibility_range_end_margin = 35.0
+
+[node name="GrassWispy" type="MultiMeshInstance3D" parent="."]
+material_override = SubResource("ShaderMaterial_grass")
+cast_shadow = 0
+visibility_range_end = 160.0
+visibility_range_end_margin = 35.0
+
+[node name="Trees" type="Node3D" parent="."]
+
+[node name="CommonTree1" type="MultiMeshInstance3D" parent="Trees"]
+cast_shadow = 1
+visibility_range_end = 550.0
+visibility_range_end_margin = 60.0
+
+[node name="CommonTree2" type="MultiMeshInstance3D" parent="Trees"]
+cast_shadow = 1
+visibility_range_end = 550.0
+visibility_range_end_margin = 60.0
+
+[node name="Pine1" type="MultiMeshInstance3D" parent="Trees"]
+cast_shadow = 1
+visibility_range_end = 550.0
+visibility_range_end_margin = 60.0
+
+[node name="Pine2" type="MultiMeshInstance3D" parent="Trees"]
+cast_shadow = 1
+visibility_range_end = 550.0
+visibility_range_end_margin = 60.0
+
+[node name="TrunkColliders" type="StaticBody3D" parent="Trees"]
+collision_layer = 4
+collision_mask = 0
+
+[node name="Rocks" type="Node3D" parent="."]
+
+[node name="Rock1" type="MultiMeshInstance3D" parent="Rocks"]
+cast_shadow = 1
+visibility_range_end = 450.0
+visibility_range_end_margin = 50.0
+
+[node name="Rock2" type="MultiMeshInstance3D" parent="Rocks"]
+cast_shadow = 1
+visibility_range_end = 450.0
+visibility_range_end_margin = 50.0
+
+[node name="RockColliders" type="StaticBody3D" parent="Rocks"]
+collision_layer = 4
+collision_mask = 0
+
+[node name="Vegetation" type="Node3D" parent="."]
+
+[node name="Bush" type="MultiMeshInstance3D" parent="Vegetation"]
+cast_shadow = 1
+visibility_range_end = 260.0
+visibility_range_end_margin = 40.0
+
+[node name="Plant" type="MultiMeshInstance3D" parent="Vegetation"]
+cast_shadow = 1
+visibility_range_end = 220.0
+visibility_range_end_margin = 35.0
+
+[node name="Flowers" type="MultiMeshInstance3D" parent="Vegetation"]
+cast_shadow = 1
+visibility_range_end = 220.0
+visibility_range_end_margin = 35.0
+
+[node name="Cave" type="Node3D" parent="."]
+script = ExtResource("6_cave_script")
+
+
+

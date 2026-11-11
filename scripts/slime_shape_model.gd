@@ -183,22 +183,35 @@ func posture_key() -> int:
 ## reuses buckets, fine enough that the hull never strays more than half a step from
 ## the rendered dimensions (~0.25% of the radius).
 static func posture_key_for(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, _p_axis: Vector3) -> int:
-	var sx := int(roundf(p_scale * 25.0))
-	var lq := int(roundf(p_liquid * 25.0))
-	var hr := int(roundf(p_height_ratio * 25.0))
-	var sq := int(roundf(p_squeeze * 25.0))
+	var sx := int(roundf(p_scale * 200.0))
+	var lq := int(roundf(p_liquid * 100.0))
+	var hr := int(roundf(p_height_ratio * 100.0))
+	var sq := int(roundf(p_squeeze * 200.0))
 	return (sx << 40) | (lq << 32) | (hr << 24) | (sq << 16)
 
 
-## Cache entry for one quantized posture bucket.
+## Cache entry for one quantized posture bucket. The entry is CONSERVATIVE: it
+## stores the largest support extents (across-axis, along-axis, height) seen in the
+## bucket, so the hull always contains every posture that maps to it. A quantized
+## hull may therefore block up to a centimetre early but can never let the rendered
+## body clip into geometry the physics hull considers clear.
 func _cache_entry(p_scale: float, p_liquid: float, p_height_ratio: float, p_squeeze: float, p_axis: Vector3) -> Dictionary:
 	var key := posture_key_for(p_scale, p_liquid, p_height_ratio, p_squeeze, p_axis)
+	var dims := _envelope_dims(p_scale, p_liquid, p_height_ratio, p_squeeze)
+	var ax := _canonical_axis(p_axis)
 	var e = _hull_cache.get(key)
 	if e != null:
+		var have: Vector3 = e["dims"]
+		if dims.x <= have.x and dims.y <= have.y and dims.z <= have.z:
+			return e
+		dims = Vector3(maxf(have.x, dims.x), maxf(have.y, dims.y), maxf(have.z, dims.z))
+		e["dims"] = dims
+		e["axis"] = ax
+		e["points"] = _bake_dims(dims, ax)
+		e["raw"] = null
+		e["e2"] = null
+		e["e05"] = null
 		return e
-	var q_scale := roundf(p_scale * 25.0) / 25.0
-	var dims := _envelope_dims(q_scale, p_liquid, p_height_ratio, p_squeeze)
-	var ax := _canonical_axis(p_axis)
 	e = {"dims": dims, "axis": ax, "points": _bake_dims(dims, ax), "raw": null, "e2": null, "e05": null}
 	_hull_cache[key] = e
 	_hull_order.append(key)
@@ -274,12 +287,11 @@ static func erode_points(pts: PackedVector3Array, margin: float) -> PackedVector
 	for i in n:
 		top = maxf(top, pts[i].y)
 	top = maxf(0.0, top - margin)
-	var bot := minf(margin, top)
 	for i in n:
 		var p := pts[i]
 		var r := sqrt(p.x * p.x + p.z * p.z)
 		var f := maxf(0.0, r - margin) / maxf(r, 1e-5)
-		pts[i] = Vector3(p.x * f, clampf(p.y, bot, top), p.z * f)
+		pts[i] = Vector3(p.x * f, minf(p.y, top), p.z * f)
 	return pts
 
 

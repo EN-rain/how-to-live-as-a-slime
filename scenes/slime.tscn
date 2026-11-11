@@ -61,8 +61,18 @@ script = ExtResource("2_script")
 body = NodePath("Body")
 
 [node name="Body" type="MeshInstance3D" parent="."]
+layers = 3
 material_override = SubResource("ShaderMaterial_instance")
 cast_shadow = 0
 extra_cull_margin = 4.0
 mesh = SubResource("SphereMesh_body")
+
+[node name="SlimeFillLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 0)
+light_color = Color(0.85, 0.95, 1, 1)
+light_energy = 0.85
+light_cull_mask = 2
+shadow_enabled = false
+omni_range = 8.0
+omni_attenuation = 1.0
 

@@ -69,7 +69,6 @@ func _ready() -> void:
 	Input.action_release("move_left")
 	Input.action_release("move_right")
 	Input.action_release("run")
-	Input.action_release("slime_liquid")
 
 	_initial_volume = slime.get_volume()
 	_next_phase()
@@ -84,10 +83,6 @@ func _physics_process(delta: float) -> void:
 		get_tree().quit(3)
 		return
 	phase_t += delta
-
-	# Z is pressed mid-approach, not at the start: the squeeze must engage while moving.
-	if phase == 3 and phase_t >= 0.6 and not Input.is_action_pressed("slime_liquid"):
-		_press("slime_liquid", true)
 
 	p_min_z = minf(p_min_z, slime.global_position.z)
 	p_max_z = maxf(p_max_z, slime.global_position.z)
@@ -132,43 +127,39 @@ func _next_phase() -> void:
 			_press("move_forward", true)
 			phase_len = 2.2
 		2:
-			# 1.4 m gate with no Z: too wide to fit.
+			# 1.4 m gate: Core Sphere automatically passes through.
 			_clear_fixtures()
 			_build_gate(6.0, 1.4)
 			_reset_player(Vector3.ZERO)
 			_press("move_forward", true)
-			phase_len = 3.0
+			phase_len = 5.0
 		3:
-			# Same gate with Z held: squash + squeeze must carry it through.
+			# Repeat 1.4 m gate traversal check.
 			_reset_player(Vector3.ZERO)
 			_press("move_forward", true)
 			phase_len = 5.6
 		4:
-			# 0.5 m gate: below the legal minimum width, must stay blocked.
+			# 0.5 m gate: below the legal Core-Sphere width, must stay blocked.
 			_clear_fixtures()
 			_build_gate(6.0, 0.5)
 			_reset_player(Vector3.ZERO)
 			_press("move_forward", true)
-			_press("slime_liquid", true)
 			phase_len = 3.0
 		5:
-			# Low roof: enter flat, then release Z underneath it.
+			# Low roof: Core Sphere passes underneath low tunnel.
 			_clear_fixtures()
 			_add_box(Vector3(0.0, _floor() + 1.05, 6.0), Vector3(4.0, 0.3, 4.0))
 			_reset_player(Vector3.ZERO)
 			_press("move_forward", true)
-			_press("slime_liquid", true)
 			phase_len = 2.8
 		6:
 			_press("move_forward", false)
-			_press("slime_liquid", false)
 			phase_len = 2.0
 		7:
 			# Split a follower, then lead it through the 1.4 m gate.
 			_clear_fixtures()
 			_build_gate(6.0, 1.4)
 			_reset_player(Vector3.ZERO)
-			_press("slime_liquid", false)
 			_press("move_forward", false)
 			_pre_split_scale = slime.slime_scale
 			slime.split_clone(Slime.Role.FOLLOWER)
@@ -176,14 +167,10 @@ func _next_phase() -> void:
 		8:
 			follower = _find_role(Slime.Role.FOLLOWER)
 			_press("move_forward", true)
-			_press("slime_liquid", true)
-			# A liquid squeeze stretches the body lengthwise, so the leader's tail stays
-			# in the gate for seconds before the follower can close up behind it.
 			phase_len = 12.0
 		9:
-			# Roamer: leaves Z, wanders on its own.
+			# Roamer: wanders on its own.
 			_press("move_forward", false)
-			_press("slime_liquid", false)
 			_reset_player(Vector3.ZERO, false)
 			slime.split_clone(Slime.Role.ROAMER)
 			phase_len = 3.0
@@ -210,18 +197,17 @@ func _next_phase() -> void:
 			_last_positions.clear()
 			phase_len = 1.6
 		11:
-			# Engulf: an edible prop under the puddle is devoured only with Z held.
+			# Push-eat: an edible prop ahead is devoured by pushing into it.
 			_clear_fixtures()
 			_reset_player(Vector3.ZERO)
 			_add_edible_box(Vector3(0.0, _floor() + 0.25, 2.5), Vector3(0.5, 0.5, 0.5))
-			_press("slime_liquid", true)
+			_press("move_forward", true)
 			phase_len = 5.0
 		12:
 			# Split with a wall half a metre behind the body: the spawn preflight must
 			# pick a free direction, and the volume curve must conserve the pair.
 			_clear_fixtures()
 			_reset_player(Vector3.ZERO)
-			_press("slime_liquid", false)
 			_press("move_forward", false)
 			_add_box(Vector3(0.0, _floor() + 1.5, 2.9), Vector3(8.0, 3.0, 0.8))
 			_pre_split_scale = slime.slime_scale
@@ -231,7 +217,6 @@ func _next_phase() -> void:
 			# Split cleanly in the open so the merge test below starts from a known pair.
 			_clear_fixtures()
 			_reset_player(Vector3.ZERO)
-			_press("slime_liquid", false)
 			_press("move_forward", false)
 			slime.split_clone(Slime.Role.ROAMER)
 			phase_len = 0.9
@@ -392,8 +377,6 @@ func _add_edible_box(center: Vector3, size: Vector3) -> void:
 
 
 func _normalize_posture(s: Slime) -> void:
-	s.liquid_request = false
-	s.engulf_request = false
 	s.liquid_amt = 0.0
 	s.height_ratio = 1.0
 	s.squeeze_k = 1.0
@@ -446,10 +429,7 @@ func _reset_player(flat_pos: Vector3, reset_scale := true) -> void:
 	Input.action_release("move_back")
 	Input.action_release("move_left")
 	Input.action_release("move_right")
-	Input.action_release("slime_liquid")
 
-	slime.liquid_request = false
-	slime.engulf_request = false
 	slime.liquid_amt = 0.0
 	slime.height_ratio = 1.0
 	slime.squeeze_k = 1.0

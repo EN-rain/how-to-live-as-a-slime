@@ -4,14 +4,33 @@ extends Control
 
 @export var slime: Slime
 @export var props: SlimeProps
-@export var hint_text := "WASD move · Shift run · E split follower · Q split roamer · M merge · Click poke"
+@export var hint_text := "WASD move · Shift run · E split · Q roam · M merge · F5-F8 quality · F4 dev · Esc menu"
 @export var debug_posture := false
+
+@export_group("Pill Styling")
+@export var stat_color: Color = Color("eaf4fb")
+@export var hint_color: Color = Color("bcd3e4")
+@export var debug_color: Color = Color("a6f0c4")
+@export var dev_color: Color = Color("ffd97d")
+@export var pill_bg_color: Color = Color(16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 0.55)
+@export var pill_corner_radius: int = 999
+@export var pill_font_size: int = 12
+@export var hud_padding_left: float = 12.0
+@export var hud_padding_top: float = 12.0
+@export var h_separation: int = 10
+@export var v_separation: int = 6
 
 var _stat: Label
 var _hint: Label
+var _dev_line: Label
+var _dev_pill: PanelContainer
 var _debug_line: Label
 var _debug_pill: PanelContainer
+var _toast_line: Label
+var _toast_pill: PanelContainer
+var _toast_timer: float = 0.0
 var _last := ""
+var _last_dev := ""
 var _last_dbg := ""
 
 var _frames_ms: Array = []
@@ -26,40 +45,61 @@ var _dbg_im: ImmediateMesh
 
 
 func _ready() -> void:
+	add_to_group("hud")
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var row := HFlowContainer.new()
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_theme_constant_override("h_separation", 10)
-	row.add_theme_constant_override("v_separation", 6)
+	row.add_theme_constant_override("h_separation", h_separation)
+	row.add_theme_constant_override("v_separation", v_separation)
 	row.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	row.offset_left = 12.0
-	row.offset_top = 12.0
-	row.offset_right = -12.0
+	row.offset_left = hud_padding_left
+	row.offset_top = hud_padding_top
+	row.offset_right = -hud_padding_left
 	add_child(row)
 
-	_stat = _make_pill(Color("eaf4fb"))
+	_stat = _make_pill(stat_color)
 	row.add_child(_stat.get_parent())
-	_hint = _make_pill(Color("bcd3e4"))
+	_hint = _make_pill(hint_color)
 	_hint.text = hint_text
 	row.add_child(_hint.get_parent())
 
-	_debug_line = _make_pill(Color("a6f0c4"))
+	_dev_line = _make_pill(dev_color)
+	_dev_pill = _dev_line.get_parent()
+	_dev_pill.visible = false
+	row.add_child(_dev_pill)
+
+	_debug_line = _make_pill(debug_color)
 	_debug_pill = _debug_line.get_parent()
 	_debug_pill.visible = debug_posture
 	row.add_child(_debug_pill)
 
+	_toast_line = _make_pill(Color(0.62, 0.96, 1.0))
+	_toast_pill = _toast_line.get_parent()
+	_toast_pill.visible = false
+	row.add_child(_toast_pill)
+
 	_prev_pframe = Engine.get_physics_frames()
 	call_deferred("_ensure_debug_mesh")
+
+
+func show_toast(msg: String, color: Color = Color(0.62, 0.96, 1.0), duration: float = 3.5) -> void:
+	if _toast_line == null or _toast_pill == null:
+		return
+	_toast_line.text = msg
+	_toast_line.add_theme_color_override("font_color", color)
+	_toast_pill.modulate = Color(1.0, 1.0, 1.0, 1.0)
+	_toast_pill.visible = true
+	_toast_timer = maxf(duration, 0.25)
 
 
 func _make_pill(font_color: Color) -> Label:
 	var panel := PanelContainer.new()
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var box := StyleBoxFlat.new()
-	box.bg_color = Color(16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 0.55)
-	box.set_corner_radius_all(999)
+	box.bg_color = pill_bg_color
+	box.set_corner_radius_all(pill_corner_radius)
 	box.content_margin_left = 11.0
 	box.content_margin_right = 11.0
 	box.content_margin_top = 5.0
@@ -68,14 +108,16 @@ func _make_pill(font_color: Color) -> Label:
 
 	var label := Label.new()
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	label.add_theme_font_size_override("font_size", 12)
+	label.add_theme_font_size_override("font_size", pill_font_size)
 	label.add_theme_color_override("font_color", font_color)
 	panel.add_child(label)
 	return label
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F3:
+	if not (event is InputEventKey and event.pressed and not event.echo):
+		return
+	if event.keycode == KEY_F3:
 		debug_posture = not debug_posture
 		_debug_pill.visible = debug_posture
 		if not debug_posture and _dbg_im != null:
@@ -83,6 +125,40 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		elif debug_posture:
 			_ensure_debug_mesh()
 		accept_event()
+	elif event.keycode == KEY_ESCAPE:
+		if FileAccess.file_exists("res://main_menu/main_menu.tscn"):
+			accept_event()
+			get_tree().change_scene_to_file("res://main_menu/main_menu.tscn")
+	elif event.keycode == KEY_F5:
+		var s := SlimeSettings.get_or_create()
+		if s:
+			s.set_quality_preset(0)
+			accept_event()
+	elif event.keycode == KEY_F6:
+		var s := SlimeSettings.get_or_create()
+		if s:
+			s.set_quality_preset(1)
+			accept_event()
+	elif event.keycode == KEY_F7:
+		var s := SlimeSettings.get_or_create()
+		if s:
+			s.set_quality_preset(2)
+			accept_event()
+	elif event.keycode == KEY_F8:
+		var s := SlimeSettings.get_or_create()
+		if s:
+			s.set_quality_preset(3)
+			accept_event()
+	elif event.keycode == KEY_F10:
+		var s := SlimeSettings.get_or_create()
+		if s:
+			s.cycle_quality_preset()
+			accept_event()
+
+
+func set_hint_visible(is_visible: bool) -> void:
+	if _hint and _hint.get_parent():
+		_hint.get_parent().visible = is_visible
 
 
 func _ensure_debug_mesh() -> void:
@@ -209,17 +285,27 @@ func _draw_debug_3d() -> void:
 
 func _process(_delta: float) -> void:
 	_sample(_delta)
+	if _toast_timer > 0.0 and _toast_pill != null:
+		_toast_timer -= _delta
+		if _toast_timer <= 0.0:
+			_toast_pill.visible = false
+		elif _toast_timer < 0.75:
+			_toast_pill.modulate = Color(1.0, 1.0, 1.0, clampf(_toast_timer / 0.75, 0.0, 1.0))
 	if slime == null or props == null:
 		return
 
 	# Authoritative volume and mass calculations
 	var mass := slime.get_volume()
 	var clone_count := maxi(0, props.registered_slimes.size() - 1)
-	var text := "Eaten %d / %d  ·  Vol %.1f m³ (Scale %.2f×)" % [props.eaten, props.total(), mass, slime.target_scale]
+	var text := ""
+	if props.total() > 0:
+		text = "Eaten %d / %d  ·  Vol %.1f m³ (Scale %.2f×)" % [props.eaten, props.total(), mass, slime.target_scale]
+	else:
+		text = "Vol %.1f m³ (Scale %.2f×)" % [mass, slime.target_scale]
 	if clone_count > 0:
 		text += "  ·  Clones: %d" % clone_count
 
-	# Check active push-eating engulf front or Z-cover progress
+	# Check active push-eating engulf front progress
 	var active_engulf_p = null
 	for p in props.props:
 		if p.last_presser == slime and p.engulf_front > 0.01:
@@ -235,10 +321,6 @@ func _process(_delta: float) -> void:
 			text += "  ·  Engulfing %d%% [Resisting]" % int(active_engulf_p.engulf_front * 100.0)
 		else:
 			text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
-	elif slime.engulf_progress > 0.05:
-		text += "  ·  Z-Drape %d%%" % int(slime.engulf_progress * 100.0)
-	elif slime.liquid_amt > 0.5:
-		text += "  ·  [Liquid Mode]"
 
 	if debug_posture and slime.model != null:
 		text += "  ·  h %.2f  sq %.2f  liq %.2f" % [slime.height_ratio, slime.squeeze_k, slime.liquid_amt]
@@ -248,4 +330,18 @@ func _process(_delta: float) -> void:
 	if text != _last:
 		_last = text
 		_stat.text = text
+
+	if _dev_pill != null:
+		var show_dev := slime.dev_mode
+		_dev_pill.visible = show_dev
+		if show_dev:
+			var dev_txt := "DEV · FLY %s (V) · NOCLIP %s (N) · SPEED %.0f m/s ([ / ] or Alt+Wheel · Shift ×2.5) · Space/C ▲▼ · F4 off" % [
+				"ON" if slime.dev_fly else "OFF",
+				"ON" if slime.dev_noclip else "OFF",
+				slime.dev_speed,
+			]
+			if dev_txt != _last_dev:
+				_last_dev = dev_txt
+				_dev_line.text = dev_txt
+
 	_update_debug_overlay()

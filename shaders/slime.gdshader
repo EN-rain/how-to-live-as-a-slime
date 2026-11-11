@@ -414,6 +414,14 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	float gentleSway = sin(p.y * 2.2 - t * 2.4) * 0.012 * uJiggleStrength;
 	p.xz += norm.xz * gentleSway * smoothstep(0.05, 0.5, height01);
 
+	if (abs(uSplat) > 0.001 || abs(uSpread) > 0.001) {
+		float hRel = max(p.y - groundFloor, 0.0);
+		float yScale = clamp(1.0 - uSplat * 0.42, 0.58, 1.32);
+		float xzScale = clamp(1.0 + (uSplat * 0.24 + uSpread * 0.16) * (1.0 - 0.35 * height01), 0.84, 1.38);
+		p.y = groundFloor + hRel * yScale;
+		p.xz *= xzScale;
+	}
+
 	vec3 impulseOffset = vec3(0.0);
 	if (uImpulseTime < 3.5) {
 		float distToPoke = distance(pos, uImpulsePos);

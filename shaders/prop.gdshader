@@ -49,7 +49,7 @@ void fragment() {
 	ROUGHNESS = uRoughness;
 	METALLIC = uMetallic;
 	if (uFlatShading) {
-		NORMAL = normalize(cross(dFdx(VERTEX), dFdy(VERTEX)));
+		NORMAL = normalize(cross(dFdy(VERTEX), dFdx(VERTEX)));
 	}
 	// Skip 3D trilinear noise on intact props (99% of props at rest)
 	if (uDissolve > 0.001) {

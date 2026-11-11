@@ -13,19 +13,27 @@ extends Resource
 @export var run_speed := 10.0
 @export var liquid_speed := 2.2
 @export var velocity_response := 8.0
-@export var arena_radius := 190.0
+@export var arena_radius := 4200.0
 ## Max horizontal travel per physics tick as a fraction of body radius (sweep budget, not a teleport cap).
 @export var max_step_fraction := 0.3
 @export var gravity := 22.0
 ## How far above the foot the motor may step/climb onto support, per unit scale.
-@export var climb_reach := 0.08
-@export var liquid_climb_reach := 0.08
+@export var climb_reach := 0.40
+@export var liquid_climb_reach := 0.30
 @export var slide_iterations := 4
 @export var recovery_iterations := 6
 ## Resolve slime-vs-slime overlap analytically from the shape model instead of
 ## relying on the static proxies and the generic sweep. Partner hulls stay in the
 ## sweep for movement intent; separation itself only tests level geometry.
 @export var use_analytic_slime_collision := true
+
+@export_group("Solver Quality")
+## Maximum intermediate probe steps tested between resolved and candidate posture.
+@export_range(2, 32, 1) var max_probe_steps: int = 12
+## Minimum intermediate probe steps tested between resolved and candidate posture.
+@export_range(1, 8, 1) var min_probe_steps: int = 2
+## Maximum equal budgeted substeps for horizontal movement sweep.
+@export_range(1, 16, 1) var max_move_substeps: int = 6
 
 @export_group("Size")
 @export var start_scale := 1.0
@@ -39,7 +47,7 @@ extends Resource
 @export var volume_radius := 1.6
 
 @export_group("World")
-@export var floor_y := -1.2
+@export var floor_y := -45.0
 
 @export_group("Shape and Traversal")
 ## Liquid height as a fraction of rest height.
@@ -71,7 +79,7 @@ extends Resource
 @export var squeeze_height_gain := 0.0
 @export var squeeze_in_rate := 36.0
 @export var squeeze_out_rate := 8.0
-## Liquid blend rate (1/s) driving the Z-key melt/reform transition.
+## Liquid blend rate (1/s) driving automated shape conformity during compression.
 @export var liquid_blend_rate := 2.8
 
 @export_group("Crawl and lean")
@@ -158,3 +166,6 @@ func validate() -> void:
 	bud_duration = maxf(bud_duration, 0.1)
 	merge_duration = maxf(merge_duration, 0.05)
 	min_split_scale = clampf(min_split_scale, 0.05, 0.99)
+	max_probe_steps = clampi(max_probe_steps, 2, 64)
+	min_probe_steps = clampi(min_probe_steps, 1, max_probe_steps)
+	max_move_substeps = clampi(max_move_substeps, 1, 32)

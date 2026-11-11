@@ -17,7 +17,7 @@ const STATE_IDLE := 0
 const STATE_EATING := 1
 const STATE_GONE := 2
 
-const LAYER_OBSTACLES := 1
+const LAYER_OBSTACLES := 4
 
 @export var slime: Slime
 @export var floor_mesh: MeshInstance3D
@@ -25,6 +25,20 @@ const LAYER_OBSTACLES := 1
 @export var prop_count := 36
 @export var spawn_seed := 0
 @export var tuning: SlimeTuning
+@export var enable_test_structures := true
+@export var enable_food_cubes := true
+
+@export_group("Simulation Tuning")
+## Exponential decay rate for prop squeeze resistance when contact is lost.
+@export var press_decay_rate: float = 15.0
+## Linear decay rate for prop engulfment when contact is lost.
+@export var engulf_decay_rate: float = 2.5
+
+@export_group("Structure Colors")
+@export var gate_color: Color = Color(0.32, 0.72, 0.88)
+@export var tunnel_color: Color = Color(0.42, 0.62, 0.92)
+@export var corridor_color: Color = Color(0.36, 0.82, 0.76)
+@export var wall_color: Color = Color(0.52, 0.56, 0.68)
 
 var props: Array[PropData] = []
 var registered_slimes: Array[Slime] = []
@@ -144,8 +158,10 @@ func _ready() -> void:
 
 	_add_floor_collider()
 	# Test structures first so random props never block the gate or bridge.
-	_spawn_test_structures()
-	_spawn_props()
+	if enable_test_structures:
+		_spawn_test_structures()
+	if enable_food_cubes:
+		_spawn_props()
 	_spawned_total = props.size()
 
 	_eat_pos_buf.resize(6)
@@ -260,9 +276,9 @@ func step(dt: float) -> void:
 		var presser: Slime = p.last_presser
 		if presser != null and is_instance_valid(presser) and presser.pressing_props.has(p):
 			continue
-		p.pd = maxf(0.0, p.pd * exp(-15.0 * dt))
+		p.pd = maxf(0.0, p.pd * exp(-press_decay_rate * dt))
 		p.pv = 0.0
-		p.engulf_front = maxf(0.0, p.engulf_front - dt * 2.5)
+		p.engulf_front = maxf(0.0, p.engulf_front - dt * engulf_decay_rate)
 		if p.pd <= 0.001 and p.engulf_front <= 0.001:
 			p.pd = 0.0
 			p.engulf_front = 0.0
@@ -673,7 +689,7 @@ func _spawn_cube_box(cname: String, pos: Vector3, size: Vector3, color: Color, p
 
 func _spawn_props() -> void:
 	# Deterministic Edible Cube Lineup (South Station: z = -9.0 and z = -14.0)
-	# Row 1: Small-to-medium cubes (edible at starting scale by push or Z engulf)
+	# Row 1: Small-to-medium cubes (edible at starting scale by push)
 	var row1_sizes := [0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15]
 	for i in row1_sizes.size():
 		var s: float = row1_sizes[i]
@@ -682,7 +698,7 @@ func _spawn_props() -> void:
 		var col := _hsl(0.32 - float(i) * 0.04, 0.70, 0.58)
 		_spawn_cube_box("EdibleCube_S%d" % i, Vector3(x, tuning.floor_y + s * 0.5, z), Vector3(s, s, s), col, false)
 
-	# Row 2: Larger cubes (test growth progression, heavy resistance, and Z engulfing)
+	# Row 2: Larger cubes (test growth progression and heavy resistance)
 	var row2_sizes := [1.25, 1.40, 1.60, 1.80, 2.05, 2.35]
 	for i in row2_sizes.size():
 		var s: float = row2_sizes[i]
@@ -693,13 +709,13 @@ func _spawn_props() -> void:
 
 
 func _spawn_test_structures() -> void:
-	var gate_col := Color(0.32, 0.72, 0.88)
-	var tunnel_col := Color(0.42, 0.62, 0.92)
-	var corridor_col := Color(0.36, 0.82, 0.76)
-	var wall_col := Color(0.52, 0.56, 0.68)
+	var gate_col := gate_color
+	var tunnel_col := tunnel_color
+	var corridor_col := corridor_color
+	var wall_col := wall_color
 
 	# --- STATION 1 (North, z = 9.0): Gate Width Progression ---
-	# 1A. Wide Gate (2.8m gap) at x = -9.0: passable in normal mode without Z
+	# 1A. Wide Gate (2.8m gap) at x = -9.0: passable at rest width
 	var gate_28 := Vector3(-9.0, 0.0, 9.0)
 	for side in [-1.0, 1.0]:
 		_spawn_cube_box(
@@ -707,7 +723,7 @@ func _spawn_test_structures() -> void:
 			gate_28 + Vector3(side * (1.4 + 0.7), tuning.floor_y + 1.5, 0.0),
 			Vector3(1.4, 3.0, 1.4), gate_col, true)
 
-	# 1B. Standard Narrow Gate (1.4m gap) at x = 0.0: blocked in normal mode, passes with Z
+	# 1B. Standard Narrow Gate (1.4m gap) at x = 0.0: automatic lateral squeeze
 	var gate_14 := Vector3(0.0, 0.0, 9.0)
 	for side in [-1.0, 1.0]:
 		_spawn_cube_box(
@@ -715,7 +731,7 @@ func _spawn_test_structures() -> void:
 			gate_14 + Vector3(side * (0.7 + 0.7), tuning.floor_y + 1.5, 0.0),
 			Vector3(1.4, 3.0, 1.4), gate_col, true)
 
-	# 1C. Tight Liquid Gate (1.12m gap) at x = 8.0: tight Z-mode core sphere pass
+	# 1C. Tight Gate (1.12m gap) at x = 8.0: tight Core-Sphere clearance pass
 	var gate_11 := Vector3(8.0, 0.0, 9.0)
 	for side in [-1.0, 1.0]:
 		_spawn_cube_box(
@@ -723,7 +739,7 @@ func _spawn_test_structures() -> void:
 			gate_11 + Vector3(side * (0.56 + 0.7), tuning.floor_y + 1.5, 0.0),
 			Vector3(1.4, 3.0, 1.4), gate_col, true)
 
-	# 1D. Impossible Gate (0.55m gap) at x = 15.5: narrower than core sphere, blocks even in Z
+	# 1D. Impossible Gate (0.55m gap) at x = 15.5: narrower than Core Sphere, blocks
 	var gate_05 := Vector3(15.5, 0.0, 9.0)
 	for side in [-1.0, 1.0]:
 		_spawn_cube_box(
@@ -772,6 +788,67 @@ func _spawn_test_structures() -> void:
 
 	# --- STATION 4 (South-West, x = -12.0, z = -12.0): Solid Cube Wall ---
 	_spawn_cube_box("SolidWall_Test", Vector3(-12.5, tuning.floor_y + 1.5, -11.5), Vector3(1.2, 3.0, 5.0), wall_col, true)
+
+
+# ------------------------------------------------------------------------------------------------
+# Masked Scatter & Grounding Utilities (Phase 2 Task C)
+# ------------------------------------------------------------------------------------------------
+
+## Checks if terrain surface is suitable for vegetation (bushes/trees/flowers):
+## Spawns on low/moderate slopes (< 30°, normal.y >= 0.866) and moderate elevation.
+static func evaluate_vegetation_scatter(normal_y: float, height: float, min_h := 4.0, max_h := 75.0) -> bool:
+	if height < min_h or height > max_h:
+		return false
+	return normal_y >= 0.866 # < 30 degrees
+
+
+## Checks if terrain surface is suitable for stone/rocks:
+## Rocks spawn on steeper slopes (normal.y <= 0.94) and ridge lines.
+static func evaluate_rock_scatter(normal_y: float, ridge_val: float, height: float, min_h := 1.5, max_h := 135.0, min_rock_norm_y := 0.42) -> bool:
+	if height < min_h or height > max_h:
+		return false
+	if normal_y < min_rock_norm_y:
+		return false
+	var is_steep: bool = normal_y <= 0.94 # slope >= ~20°
+	var is_ridge: bool = ridge_val >= 0.62
+	return is_steep or is_ridge
+
+
+## Mutual exclusion check: ensures props/rocks do not spawn inside trees.
+static func is_far_from_trees(x: float, z: float, tree_positions: Array[Vector3], min_dist: float) -> bool:
+	var min_d_sq := min_dist * min_dist
+	for tp in tree_positions:
+		var dx := tp.x - x
+		var dz := tp.z - z
+		if (dx * dx + dz * dz) < min_d_sq:
+			return false
+	return true
+
+
+## Computes grounded transform with root burial and slope normal alignment.
+static func compute_grounded_transform(
+	surf: Vector4,
+	yaw: float,
+	scale_xz: float,
+	scale_y: float,
+	root_burial := 0.15,
+	normal_blend := 0.20,
+	pitch := 0.0,
+	roll := 0.0
+) -> Transform3D:
+	var y := surf.w - root_burial
+	var normal := Vector3(surf.x, surf.y, surf.z)
+	var up := (Vector3.UP * (1.0 - normal_blend) + normal * normal_blend).normalized()
+	var fwd := Vector3(sin(yaw), 0.0, cos(yaw))
+	var right := up.cross(fwd).normalized()
+	fwd = right.cross(up).normalized()
+
+	var basis := Basis(right * scale_xz, up * scale_y, fwd * scale_xz)
+	if absf(pitch) > 1e-4:
+		basis = basis.rotated(right, pitch)
+	if absf(roll) > 1e-4:
+		basis = basis.rotated(fwd, roll)
+	return Transform3D(basis, Vector3(surf.x, y, surf.z))
 
 
 func _hsl(h: float, s: float, l: float) -> Color:

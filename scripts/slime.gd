@@ -29,18 +29,23 @@ const LIQUID_BLEND_RATE := 2.8
 ## Shared clone prefab and mesh LOD variants (one resource per level, not per slime).
 static var _slime_scene: PackedScene = null
 static var _lod_meshes: Array[SphereMesh] = []
-const LOD_FAR_DISTANCE := 18.0
-const LOD_SMALL_SCALE := 0.55
-## Normalized split progress where the neck pinches to zero. Shared by the volume
-## curve, the separation curve and the shader neck so all three snap together.
-const SPLIT_SNAP := 0.68
-## Neck radius at the seam as a fraction of the smaller half's radius.
-const SPLIT_NECK_RATIO := 0.32
-## Angles the spawn preflight tries for the bud direction, in degrees.
-const SPLIT_ANGLES := [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 135.0, -135.0, 180.0]
 
 @export var role: Role = Role.PLAYER
 @export var tuning: SlimeTuning
+
+@export_group("LOD & Mesh Optimization")
+## Distance from camera beyond which the slime drops to the low-poly mesh.
+@export var lod_far_distance: float = 18.0
+## Scale threshold below which the slime uses the low-poly mesh.
+@export var lod_small_scale: float = 0.55
+
+@export_group("Mitosis & Fission Shape")
+## Normalized split progress where the neck pinches to zero. Shared by volume curve, separation, and shader neck.
+@export_range(0.1, 0.95, 0.01) var split_snap: float = 0.68
+## Neck radius at the seam as a fraction of the smaller half's radius.
+@export_range(0.05, 0.8, 0.01) var split_neck_ratio: float = 0.32
+## Angles the spawn preflight tries for the bud direction, in degrees.
+@export var split_angles: Array[float] = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 135.0, -135.0, 180.0]
 
 @export_group("Nodes")
 @export var body: MeshInstance3D
@@ -53,21 +58,21 @@ const SPLIT_ANGLES := [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 135.0, -135.0
 @export var start_scale := 1.0
 @export var target_leader: Slime = null
 
+@export_group("Developer Mode")
+## Enables free 3D flight, speed multiplier steps, and noclip through terrain/walls (toggle in-game with F4).
+@export var dev_mode := false
+@export var dev_fly := true
+@export var dev_noclip := true
+@export var dev_speed := 32.0
+
+const DEV_SPEED_STEPS := [8.0, 16.0, 32.0, 64.0, 128.0, 240.0, 420.0]
+
 var model: SlimeShapeModel
 var motor: SlimeMotor
 
 var slime_scale := 1.0
 var target_scale := 1.0
 var speed01 := 0.0
-
-# Intent (what the agent WANTS), kept separate from the resolved posture.
-var liquid_request := false
-var engulf_request := false
-var liquid_mode: bool:
-	get:
-		return liquid_request
-	set(value):
-		liquid_request = value
 
 # Resolved posture (what the world actually allows).
 var liquid_amt := 0.0
@@ -191,6 +196,7 @@ var _safe_posture: Array = []
 ## and collision always read the node's physics transform, never the mesh.
 var _prev_global_pos := Vector3.ZERO
 var _prev_scale := 1.0
+var _visual_up := Vector3.UP
 
 ## Baked-hull proxy on SlimeMotor.LAYER_SLIMES. It shares the model's shape resource,
 ## so every posture change is published to other slimes automatically.
@@ -202,6 +208,7 @@ static var _core_material: StandardMaterial3D
 ## Posture key whose hull was last proven clear; steady ticks skip the re-check.
 var _verified_key := -1
 var fission_clone: Slime = null
+var _dev_speed_idx := 2
 
 var time: float:
 	get:
@@ -282,8 +289,6 @@ func _activate_from_pool() -> void:
 	merge_timer = 0.0
 	_has_merged = false
 
-	liquid_request = false
-	engulf_request = false
 	liquid_amt = 0.0
 	height_ratio = 1.0
 	squeeze_k = 1.0
@@ -358,9 +363,29 @@ func _activate_from_pool() -> void:
 	set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
 
 
+func get_active_camera() -> Camera3D:
+	if is_instance_valid(camera):
+		return camera
+	var vp := get_viewport()
+	if vp != null:
+		var cam := vp.get_camera_3d()
+		if is_instance_valid(cam):
+			camera = cam
+			return cam
+	var rig_cam := get_node_or_null("../CameraRig/Camera3D") as Camera3D
+	if is_instance_valid(rig_cam):
+		camera = rig_cam
+		return rig_cam
+	return null
+
+
 func _ready() -> void:
 	if tuning == null:
 		tuning = load("res://resources/slime_tuning.tres") as SlimeTuning
+	if camera == null:
+		camera = get_active_camera()
+	if floor_mesh == null:
+		floor_mesh = get_node_or_null("../Floor") as MeshInstance3D
 	if props == null:
 		props = get_node_or_null("../Ecosystem") as SlimeProps
 
@@ -386,8 +411,27 @@ func _ready() -> void:
 
 	_resolve_model(0.0, 1.0, 1.0)
 	sq_dir = model.axis
-	motor.support_y = tuning.floor_y
-	global_position.y = tuning.floor_y + tuning.skin + model.rest_half_height * slime_scale
+	var start_surface_y := 1.25
+	var terrain_node := get_node_or_null("../TerrainScene")
+	if terrain_node != null and terrain_node.has_method("sample_spawn_floor_y"):
+		var est_foot_y := global_position.y - model.rest_half_height * slime_scale
+		start_surface_y = float(terrain_node.sample_spawn_floor_y(global_position.x, global_position.z, est_foot_y))
+	elif terrain_node != null and terrain_node.has_method("sample_height"):
+		start_surface_y = terrain_node.sample_height(global_position.x, global_position.z)
+	else:
+		var space := get_world_3d().direct_space_state if is_inside_tree() else null
+		if space != null:
+			var ray := PhysicsRayQueryParameters3D.new()
+			ray.from = Vector3(global_position.x, 30.0, global_position.z)
+			ray.to = Vector3(global_position.x, tuning.floor_y, global_position.z)
+			ray.collision_mask = SlimeMotor.LAYER_OBSTACLES
+			var hit := space.intersect_ray(ray)
+			if not hit.is_empty():
+				start_surface_y = (hit.position as Vector3).y
+
+	global_position.y = start_surface_y + tuning.skin + model.rest_half_height * slime_scale
+	motor.support_y = start_surface_y
+	motor.on_ground = true
 	model.set_foot(global_position + Vector3(0.0, -model.rest_half_height * slime_scale, 0.0))
 	_apply_transform()
 	_setup_proxy()
@@ -510,8 +554,8 @@ func _update_lod(dt: float) -> void:
 	var level := 0
 	if role != Role.PLAYER:
 		var cam := get_viewport().get_camera_3d()
-		var far := cam == null or cam.global_position.distance_to(global_position) > LOD_FAR_DISTANCE
-		if far or slime_scale < LOD_SMALL_SCALE:
+		var far := cam == null or cam.global_position.distance_to(global_position) > lod_far_distance
+		if far or slime_scale < lod_small_scale:
 			level = 1
 	if level == _lod_level:
 		return
@@ -587,7 +631,43 @@ func _reset_array_uniforms() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if role != Role.PLAYER:
 		return
-	if event.is_action_pressed("slime_poke") and camera:
+	if event is InputEventKey and event.pressed and not event.echo:
+		var kev := event as InputEventKey
+		if kev.keycode == KEY_F4 or kev.keycode == KEY_QUOTELEFT or kev.physical_keycode == KEY_QUOTELEFT:
+			toggle_dev_mode()
+			get_viewport().set_input_as_handled()
+			return
+		if dev_mode:
+			if kev.keycode == KEY_N:
+				toggle_dev_noclip()
+				get_viewport().set_input_as_handled()
+				return
+			elif kev.keycode == KEY_V:
+				toggle_dev_fly()
+				get_viewport().set_input_as_handled()
+				return
+			elif kev.keycode == KEY_BRACKETRIGHT or kev.keycode == KEY_EQUAL or kev.keycode == KEY_KP_ADD:
+				adjust_dev_speed(1)
+				get_viewport().set_input_as_handled()
+				return
+			elif kev.keycode == KEY_BRACKETLEFT or kev.keycode == KEY_MINUS or kev.keycode == KEY_KP_SUBTRACT:
+				adjust_dev_speed(-1)
+				get_viewport().set_input_as_handled()
+				return
+	if dev_mode and event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.pressed and mb.alt_pressed:
+			if mb.button_index == MOUSE_BUTTON_WHEEL_UP:
+				adjust_dev_speed(1)
+				get_viewport().set_input_as_handled()
+				return
+			elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				adjust_dev_speed(-1)
+				get_viewport().set_input_as_handled()
+				return
+
+	var cam := get_active_camera()
+	if event.is_action_pressed("slime_poke") and cam:
 		if event is InputEventMouseButton or event is InputEventMouseMotion:
 			_try_poke(event.position)
 		elif event is InputEventScreenTouch:
@@ -604,11 +684,51 @@ func _unhandled_input(event: InputEvent) -> void:
 		merge_nearby_clones()
 
 
+func is_dev_fly_active() -> bool:
+	return role == Role.PLAYER and dev_mode and dev_fly
+
+
+func is_dev_noclip_active() -> bool:
+	return role == Role.PLAYER and dev_mode and dev_noclip
+
+
+func toggle_dev_mode() -> void:
+	dev_mode = not dev_mode
+	if dev_mode:
+		_dev_speed_idx = clampi(_dev_speed_idx, 0, DEV_SPEED_STEPS.size() - 1)
+		dev_speed = DEV_SPEED_STEPS[_dev_speed_idx]
+		motor.vertical_vel = 0.0
+	else:
+		motor.vertical_vel = 0.0
+		motor.velocity = Vector3(motor.velocity.x, 0.0, motor.velocity.z) * 0.25
+		_sync_proxy()
+		if is_inside_tree():
+			motor.update_support()
+
+
+func toggle_dev_fly() -> void:
+	dev_fly = not dev_fly
+	motor.vertical_vel = 0.0
+
+
+func toggle_dev_noclip() -> void:
+	dev_noclip = not dev_noclip
+	if not dev_noclip and is_inside_tree():
+		_sync_proxy()
+		motor.update_support()
+
+
+func adjust_dev_speed(step_delta: int) -> void:
+	_dev_speed_idx = clampi(_dev_speed_idx + step_delta, 0, DEV_SPEED_STEPS.size() - 1)
+	dev_speed = DEV_SPEED_STEPS[_dev_speed_idx]
+
+
 func _try_poke(screen_pos: Vector2) -> void:
-	if camera == null or model == null:
+	var cam := get_active_camera()
+	if cam == null or model == null:
 		return
-	var origin := camera.project_ray_origin(screen_pos)
-	var dir := camera.project_ray_normal(screen_pos)
+	var origin := cam.project_ray_origin(screen_pos)
+	var dir := cam.project_ray_normal(screen_pos)
 	var center := model.center()
 	var ax := model.axis
 	var perp := Vector3(-ax.z, 0.0, ax.x)
@@ -636,7 +756,7 @@ func _try_poke(screen_pos: Vector2) -> void:
 		return
 	var hit := origin + dir * t
 	var local_point := ((hit - global_position) / maxf(slime_scale, 1e-4)).normalized() * tuning.reference_radius
-	var push := (hit - camera.global_position).normalized() * tuning.poke_strength
+	var push := (hit - cam.global_position).normalized() * tuning.poke_strength
 	push.y -= tuning.poke_downward
 	trigger_poke(local_point, push)
 
@@ -696,11 +816,26 @@ func _process(_delta: float) -> void:
 	if body == null:
 		return
 	var f := Engine.get_physics_interpolation_fraction()
-	body.global_position = _prev_global_pos.lerp(global_position, f)
+	var interp_pos := _prev_global_pos.lerp(global_position, f)
 	var s := lerpf(_prev_scale, slime_scale, f)
+	var target_up := Vector3.UP
+	if motor != null and motor.on_ground and motor.ground_normal.y > 0.3:
+		target_up = motor.ground_normal.normalized()
+	_visual_up = _visual_up.slerp(target_up, 1.0 - exp(-14.0 * _delta)).normalized()
+	var rot_q := Quaternion(Vector3.UP, _visual_up).normalized()
+
+	# Foot-anchored slope alignment:
+	# In body local coordinates, foot is at (0, -model.rest_half_height * s, 0).
+	# Placing body.global_position at (visual_foot + _visual_up * foot_offset) ensures
+	# the bottom of the mesh touches the slope surface at visual_foot, and the entire
+	# base disc lies flush against the slope plane without dipping underground.
+	var foot_offset := (model.rest_half_height if model != null else 1.28) * s
+	var visual_foot := interp_pos - Vector3(0.0, foot_offset, 0.0)
+	body.global_position = visual_foot + _visual_up * foot_offset
+
 	# The node already applies slime_scale; undo it on the child so the total visual
 	# scale is exactly the interpolated one and never compounds between ticks.
-	body.scale = Vector3.ONE * (s / maxf(slime_scale, 1e-4))
+	body.basis = Basis(rot_q).orthonormalized().scaled(Vector3.ONE * (s / maxf(slime_scale, 1e-4)))
 	if props != null and not _is_sleeping:
 		props._update_solid_uniforms(self, true)
 
@@ -758,6 +893,9 @@ func _physics_process(delta: float) -> void:
 	# Refresh before any posture/growth probe so this tick validates against the
 	# current yielding set instead of last tick's.
 	_refresh_exclusions()
+	if role == Role.PLAYER and dev_mode:
+		_tick_dev_movement(dt)
+		return
 	var v_resp := tuning.velocity_response
 	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
 	pre_move_velocity = motor.velocity
@@ -931,10 +1069,7 @@ func _update_passage() -> void:
 		passage_state = PassageState.OPEN
 		return
 	var required := _required_squeeze(hint["width"])
-	# The floor follows INTENT, not the current blend: with Z held the slime is
-	# heading for the liquid posture, whose minimum applies. Using the current
-	# (still-normal) floor would refuse to latch until it was already too late.
-	var floor_sq := tuning.min_liquid_squeeze if liquid_request else tuning.min_normal_squeeze
+	var floor_sq := tuning.min_normal_squeeze
 	# Fail case: a corridor narrower than the legal floor is never latched. The sweep
 	# stops the body at the pillars and describe_block explains the refusal.
 	if required >= 1.0 or required < floor_sq - 1e-3:
@@ -979,7 +1114,6 @@ func _resolve_posture(_dt: float) -> void:
 	sq_target = 1.0
 	squeeze_k = 1.0
 	squeeze_v = 0.0
-	liquid_request = false
 	liquid_amt = 0.0
 	height_ratio = 1.0
 
@@ -988,30 +1122,42 @@ func _height_ratio_for(_liq: float, _sq: float) -> float:
 	return 1.0
 
 
-func _set_liquid_request(_value: bool) -> void:
-	liquid_request = false
-
-
 # ------------------------------------------------------------------------------------------------
 # Role input / AI
 # ------------------------------------------------------------------------------------------------
 
 func _process_player_input() -> Vector3:
-	liquid_request = false
-	engulf_request = false
-
 	var in_z := Input.get_axis("move_back", "move_forward")
 	var in_x := Input.get_axis("move_left", "move_right")
 
+	var cam := get_active_camera()
 	var fwd := Vector3(0.0, 0.0, -1.0)
-	if camera:
-		fwd = -camera.global_transform.basis.z
+	var right := Vector3(1.0, 0.0, 0.0)
+	if cam != null:
+		fwd = -cam.global_transform.basis.z
 		fwd.y = 0.0
-		fwd = fwd.normalized()
-	var right := fwd.cross(Vector3.UP)
+		if fwd.length_squared() < 0.0001:
+			fwd = -cam.global_transform.basis.y
+			fwd.y = 0.0
+		if fwd.length_squared() > 0.0001:
+			fwd = fwd.normalized()
+		else:
+			fwd = Vector3(0.0, 0.0, -1.0)
+
+		right = cam.global_transform.basis.x
+		right.y = 0.0
+		if right.length_squared() > 0.0001:
+			right = right.normalized()
+		else:
+			right = fwd.cross(Vector3.UP).normalized()
+	else:
+		right = fwd.cross(Vector3.UP).normalized()
+
 	var desired := fwd * in_z + right * in_x
 
-	if Input.is_action_pressed("run"):
+	if dev_mode:
+		cur_max = dev_speed * (2.5 if Input.is_action_pressed("run") else 1.0)
+	elif Input.is_action_pressed("run"):
 		cur_max = tuning.run_speed
 	else:
 		cur_max = tuning.walk_speed
@@ -1019,6 +1165,66 @@ func _process_player_input() -> Vector3:
 	if desired.length_squared() > 0.0:
 		desired = desired.normalized() * cur_max
 	return desired
+
+
+func _tick_dev_movement(dt: float) -> void:
+	var desired_horiz := _process_player_input()
+	var in_y := 0.0
+	if dev_fly:
+		if Input.is_key_pressed(KEY_SPACE):
+			in_y += 1.0
+		if Input.is_key_pressed(KEY_C) or Input.is_key_pressed(KEY_CTRL):
+			in_y -= 1.0
+	var active_speed := dev_speed * (2.5 if Input.is_action_pressed("run") else 1.0)
+	cur_max = active_speed
+	var desired := desired_horiz + Vector3(0.0, in_y * active_speed, 0.0)
+	if desired.length_squared() > active_speed * active_speed and dev_fly:
+		desired = desired.normalized() * active_speed
+
+	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-18.0 * dt))
+	pre_move_velocity = motor.velocity
+	_update_scale(dt)
+	_resolve_posture(dt)
+	_resolve_model()
+
+	if dev_noclip:
+		# Noclip: ignore walls, terrain, caves, and arena boundaries in all 3 axes.
+		if dev_fly:
+			global_position += motor.velocity * dt
+			motor.vertical_vel = 0.0
+			motor.on_ground = false
+			motor.ground_normal = Vector3.UP
+			motor.support_y = global_position.y - model.rest_half_height * model.scale
+		else:
+			# Ground-follow noclip (walks through cave walls & props while hugging terrain/cave floor).
+			global_position += Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt
+			motor.update_support()
+			motor.move_vertical(dt, target_scale)
+	else:
+		# Clip-enabled Dev Fly / Dev Sprint: collides solidly with cave walls and terrain.
+		if dev_fly:
+			motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
+			var dy := motor.velocity.y * dt
+			if absf(dy) > 1e-6:
+				motor._sync_foot()
+				var fr_v := motor._cast(model.foot, Vector3(0.0, dy, 0.0), true, null, SlimeMotor.LAYER_TERRAIN | SlimeMotor.LAYER_SOLID)
+				var safe_v: float = 1.0 if float(fr_v[1]) >= 0.999999 else clampf(float(fr_v[0]), 0.0, 1.0)
+				global_position.y += dy * safe_v
+			motor.vertical_vel = 0.0
+			motor.on_ground = false
+			motor.ground_normal = Vector3.UP
+			motor.support_y = global_position.y - model.rest_half_height * model.scale
+		else:
+			motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
+			motor.update_support()
+			motor.move_vertical(dt, target_scale)
+
+	_apply_transform()
+	_verify_posture_after_move()
+	_sync_proxy()
+	_update_presentation(dt)
+	_update_engulf(dt)
+	_tick_props(dt)
 
 
 func _process_follower_ai(dt: float) -> Vector3:
@@ -1082,7 +1288,6 @@ func _process_follower_ai(dt: float) -> Vector3:
 		to_target.y = 0.0
 		dist = to_target.length()
 
-	liquid_request = false
 	cur_max = tuning.walk_speed
 	if dist > tuning.follower_catch_up_distance:
 		cur_max = tuning.run_speed * 0.9
@@ -1119,8 +1324,6 @@ func _process_roamer_ai(dt: float) -> Vector3:
 			_ai_target_pos = escape_dest
 			_ai_stuck_timer = 0.0
 			_ai_recovery_timer = tuning.roamer_recover_time
-
-	liquid_request = false
 
 	if _ai_roam_timer > 0.0 and (global_position.distance_squared_to(_ai_target_pos) < 9.0 or _ai_target_pos == Vector3.ZERO):
 		_ai_roam_timer = 0.0
@@ -1167,6 +1370,19 @@ func _update_presentation(dt: float) -> void:
 		_lean_vel = Vector3.ZERO
 		_lean *= exp(-14.0 * dt)
 
+	if motor.just_landed:
+		var imp := clampf(motor.landing_impact_speed / 16.0, 0.18, 1.35)
+		splat_v += imp * 5.8
+		spread_v += imp * 4.2
+		trigger_poke(Vector3(0.0, 0.85 * tuning.reference_radius, 0.0), Vector3(0.0, -imp * 1.4, 0.0))
+		trigger_poke2(Vector3(0.0, -0.45 * tuning.reference_radius, 0.0), Vector3(0.0, imp * 0.85, 0.0))
+
+	var splat_target := -clampf((-motor.vertical_vel - 1.2) / 20.0, 0.0, 0.26) if not motor.on_ground else 0.0
+	splat_v += (splat_target - splat_x) * 44.0 * sdt - splat_v * 9.0 * sdt
+	splat_x = clampf(splat_x + splat_v * sdt, -0.28, 0.62)
+	spread_v += (0.0 - spread_x) * 30.0 * sdt - spread_v * 7.5 * sdt
+	spread_x = clampf(spread_x + spread_v * sdt, -0.18, 0.52)
+
 	if speed > tuning.moving_threshold:
 		var diff := atan2(_crawl_dir.x, _crawl_dir.z) - _facing_yaw
 		diff = atan2(sin(diff), cos(diff))
@@ -1180,7 +1396,9 @@ func _update_presentation(dt: float) -> void:
 		set_shader_param("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
 		set_shader_param("uCrawl", _crawl_phase)
 		set_shader_param("uLean", _lean)
-		set_shader_param("uRippleIntensity", tuning.ripple_base + tuning.ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28)
+		set_shader_param("uSplat", splat_x)
+		set_shader_param("uSpread", spread_x)
+		set_shader_param("uRippleIntensity", tuning.ripple_base + tuning.ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28 + absf(splat_x) * 0.35)
 		set_shader_param("uFacing", _facing_yaw)
 		set_shader_param("uBlink", blink)
 		set_shader_param("uLiquid", liquid_amt)
@@ -1229,56 +1447,6 @@ func _update_engulf(dt: float) -> void:
 	if props == null:
 		return
 
-	var target_p = null
-	if engulf_request and liquid_amt > 0.35:
-		var puddle_radius := model.rest_max_radius * slime_scale * model.spread
-		var my_volume := get_volume()
-		var best_score := -INF
-		for p in props.query_nearby_props(Vector2(global_position.x, global_position.z), puddle_radius * 1.05):
-			if p.is_static:
-				continue
-			var m: MeshInstance3D = p.mesh
-			if m == null or not is_instance_valid(m):
-				continue
-			var he: Vector3 = props._half_of(p)
-			var prop_top: float = m.global_position.y + he.y
-			var prop_bottom: float = m.global_position.y - he.y
-
-			var top_area := 4.0 * he.x * he.z if p.shape == SlimeProps.SHAPE_BOX else (PI * he.x * he.z)
-			var side_area := (4.0 * he.x + 4.0 * he.z) * (2.0 * he.y)
-			var needed_shell_volume := (top_area + side_area) * 0.08 * slime_scale
-			if my_volume < needed_shell_volume * 0.8:
-				continue
-
-			var flat_d: float = Vector2(global_position.x - m.global_position.x, global_position.z - m.global_position.z).length()
-			var prop_max_r: float = Vector2(he.x, he.z).length()
-			var covers_horiz := flat_d + prop_max_r <= puddle_radius * 1.05
-			var touches_vert := model.foot.y <= prop_top + 0.3 * slime_scale and global_position.y + 0.5 * slime_scale >= prop_bottom
-			if covers_horiz and touches_vert:
-				var score := 1000.0 - flat_d
-				if score > best_score:
-					best_score = score
-					target_p = p
-
-	if target_p != null:
-		if engulf_target != target_p:
-			engulf_target = target_p
-			engulf_progress = 0.0
-		engulf_progress = minf(1.0, engulf_progress + dt / maxf(tuning.devour_duration, 0.1))
-		var m: MeshInstance3D = target_p.mesh
-		if _mat and m and is_instance_valid(m):
-			set_shader_param("uDrapePos", (m.global_position - global_position) / maxf(slime_scale, 1e-4))
-			set_shader_param("uDrapeHalf", props._half_of(target_p) / maxf(slime_scale, 1e-4))
-			set_shader_param("uDrapeShape", float(target_p.shape) + target_p.sides * 0.01)
-			set_shader_param("uDrapeYaw", m.rotation.y)
-			set_shader_param("uDrapeAmt", engulf_progress)
-		if engulf_progress >= 1.0:
-			props.devour(target_p, self)
-			engulf_progress = 0.0
-			engulf_target = null
-			set_shader_param("uDrapeAmt", 0.0)
-		return
-
 	if engulf_progress > 0.0:
 		engulf_progress = maxf(0.0, engulf_progress - dt * 2.0)
 		set_shader_param("uDrapeAmt", engulf_progress)
@@ -1318,7 +1486,7 @@ func _tick_fission(dt: float) -> void:
 	# backwards only as far as the preflight found room for, and the clone tracks the
 	# parent's live position, so the pair never separates past free space.
 	if tuning.use_coupled_split and clone != null and k < 1.0:
-		var progress := smoothstep(0.0, SPLIT_SNAP, k)
+		var progress := smoothstep(0.0, split_snap, k)
 		if role == Role.PLAYER and not is_merging:
 			var desired := _process_player_input() * 0.45
 			motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-tuning.velocity_response * dt))
@@ -1331,9 +1499,9 @@ func _tick_fission(dt: float) -> void:
 			fission_back_done = back_needed
 			motor.move_horizontal(-fission_fwd * back_step)
 
-	if k < SPLIT_SNAP:
+	if k < split_snap:
 		# Phase 1: tension stretch and neck formation against the separating half.
-		var stretch_k := k / SPLIT_SNAP
+		var stretch_k := k / split_snap
 		var e := sin(stretch_k * PI * 0.5)
 		set_shader_param("uSplitAmt", e * 0.95)
 	else:
@@ -1343,7 +1511,7 @@ func _tick_fission(dt: float) -> void:
 			trigger_poke(Vector3(fission_fwd.x, 0.25, fission_fwd.z).normalized() * 1.5, -fission_fwd * 1.6)
 			trigger_poke2(Vector3(-fission_fwd.x, -0.1, -fission_fwd.z).normalized() * 1.5, fission_fwd * 0.8)
 
-		var snap_k := (k - SPLIT_SNAP) / (1.0 - SPLIT_SNAP)
+		var snap_k := (k - split_snap) / (1.0 - split_snap)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
 		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
 
@@ -1374,7 +1542,7 @@ func _tick_fission(dt: float) -> void:
 func _split_alpha(k: float) -> float:
 	if not tuning.use_coupled_split:
 		return 0.5 * clampf(k, 0.0, 1.0)
-	return 0.5 * smoothstep(0.0, SPLIT_SNAP, k)
+	return 0.5 * smoothstep(0.0, split_snap, k)
 
 
 func _parent_scale_for(k: float) -> float:
@@ -1382,17 +1550,17 @@ func _parent_scale_for(k: float) -> float:
 
 
 ## Publish the world-coupled hourglass to the shader. The neck radius peaks mid-split
-## and pinches to zero exactly at SPLIT_SNAP, so both surfaces meet at the seam until
+## and pinches to zero exactly at split_snap, so both surfaces meet at the seam until
 ## the instant they separate.
 func _update_split_neck(k: float, partner: Slime) -> void:
-	if not tuning.use_coupled_split or partner == null or not is_instance_valid(partner) or k >= SPLIT_SNAP:
+	if not tuning.use_coupled_split or partner == null or not is_instance_valid(partner) or k >= split_snap:
 		set_shader_param("uSplitNeckRadius", 0.0)
 		set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
 		return
-	var ramp := sin(clampf((k - 0.15) / (SPLIT_SNAP - 0.15), 0.0, 1.0) * PI)
+	var ramp := sin(clampf((k - 0.15) / (split_snap - 0.15), 0.0, 1.0) * PI)
 	var r_self := model.rest_max_radius * slime_scale
 	var r_partner := partner.model.rest_max_radius * partner.slime_scale
-	var neck_world := minf(r_self, r_partner) * SPLIT_NECK_RATIO * ramp
+	var neck_world := minf(r_self, r_partner) * split_neck_ratio * ramp
 	var local_radius := neck_world / maxf(slime_scale * model.spread, 1e-4)
 	set_shader_param("uSplitPartnerLocal", model.mesh_local(partner.global_position - global_position))
 	set_shader_param("uSplitNeckRadius", local_radius)
@@ -1444,10 +1612,10 @@ func _tick_budding(dt: float) -> void:
 		set_bud_scale(k)
 
 	var coupled := tuning.use_coupled_split and bud_parent != null and is_instance_valid(bud_parent)
-	var progress := smoothstep(0.0, SPLIT_SNAP, k)
-	if k < SPLIT_SNAP:
+	var progress := smoothstep(0.0, split_snap, k)
+	if k < split_snap:
 		# Phase 1: the droplet clings to the parent and is drawn out under tension.
-		var stretch_k := k / SPLIT_SNAP
+		var stretch_k := k / split_snap
 		var e := sin(stretch_k * PI * 0.5)
 		set_shader_param("uSplitAmt", e * 0.95)
 		if bud_parent and is_instance_valid(bud_parent):
@@ -1463,7 +1631,7 @@ func _tick_budding(dt: float) -> void:
 			trigger_poke(Vector3(-bud_fwd.x, 0.25, -bud_fwd.z).normalized() * 1.5, bud_fwd * 1.6)
 			trigger_poke2(Vector3(bud_fwd.x, -0.1, bud_fwd.z).normalized() * 1.4, -bud_fwd * 0.8)
 
-		var snap_k := (k - SPLIT_SNAP) / (1.0 - SPLIT_SNAP)
+		var snap_k := (k - split_snap) / (1.0 - split_snap)
 		var snap_e := sin(snap_k * PI * 0.5)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
 		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
@@ -1586,7 +1754,7 @@ func _cancel_merge() -> void:
 func split_clone(clone_role: Role) -> void:
 	if target_scale < tuning.min_split_scale or is_fissioning or is_budding or is_merging:
 		return
-	if liquid_amt > 0.1 or engulf_target != null or liquid_request:
+	if liquid_amt > 0.1 or engulf_target != null:
 		return
 	# A coupled split sculpts the neck from both surfaces, which only reads correctly
 	# on a settled, unsqueezed body that is not mid-passage.
@@ -1595,11 +1763,12 @@ func split_clone(clone_role: Role) -> void:
 				or passage_state != PassageState.OPEN:
 			return
 
+	var cam := get_active_camera()
 	var fwd: Vector3
 	if motor.velocity.length() > 0.3:
 		fwd = _crawl_dir.normalized()
-	elif camera:
-		fwd = -camera.global_transform.basis.z
+	elif cam:
+		fwd = -cam.global_transform.basis.z
 		fwd.y = 0.0
 		fwd = fwd.normalized()
 	else:
@@ -1622,7 +1791,7 @@ func split_clone(clone_role: Role) -> void:
 	var spawn_offset := Vector3.ZERO
 	if tuning.use_coupled_split:
 		var found := false
-		for deg in SPLIT_ANGLES:
+		for deg in split_angles:
 			var d: Vector3 = split_fwd.rotated(Vector3.UP, deg_to_rad(deg))
 			var r_dir := model.horizontal_support(d) * (new_target_scale / maxf(slime_scale, 1e-4))
 			var need := r_dir * 2.0 + tuning.skin * 2.0
@@ -1757,7 +1926,7 @@ func _spawn_fission_clone(clone_role: Role, fwd_dir: Vector3, clone_target_scale
 func merge_nearby_clones() -> void:
 	if props == null or is_merging or is_fissioning or is_budding:
 		return
-	if liquid_amt > 0.1 or liquid_request:
+	if liquid_amt > 0.1:
 		return
 
 	var merge_rad := model.rest_max_radius * slime_scale * tuning.merge_range_factor + 1.0
@@ -1766,7 +1935,7 @@ func merge_nearby_clones() -> void:
 	for s in props.registered_slimes:
 		if s == self or not is_instance_valid(s) or s.is_merging or s.is_fissioning or s.is_budding:
 			continue
-		if s.liquid_amt > 0.1 or s.liquid_request:
+		if s.liquid_amt > 0.1:
 			continue
 		var dist := global_position.distance_to(s.global_position)
 		if dist > merge_rad + s.model.rest_max_radius * s.slime_scale:
@@ -1784,8 +1953,6 @@ func merge_nearby_clones() -> void:
 		s.merge_timer = 0.0
 		s.merge_source_scale = s.target_scale
 		s.velocity = Vector3.ZERO
-		s.liquid_request = false
-		s.engulf_request = false
 		s.set_shader_param("uDrapeAmt", 0.0)
 
 	trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.6, 0.0))
