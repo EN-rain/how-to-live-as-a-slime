@@ -2430,27 +2430,23 @@ func _build_water_features() -> void:
 	stream_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(stream_mi)
 
-	# 3. Thin Drip Waterfall Ribbon (top embedded into back ceiling rock lip) + Soft Splash Spray
-	wf_mat = ShaderMaterial.new()
-	wf_mat.shader = water_shader
-	wf_mat.set_shader_parameter("is_waterfall", true)
-
+	# 3. Dynamic Cascading Waterfall Column (parabolic spill from back rock lip) + Billowing Plunge Mist
 	var wf_loc := CaveLayout.WATERFALL
 	var wf_ceil_y := clampf(_sample_ceiling_y(sdf, wf_loc.x, wf_loc.y + 2.0, wf_loc.z, 40.0), wf_loc.y + 8.0, 36.5)
 	var st_wf := SurfaceTool.new()
 	st_wf.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var w_segs := 6
-	var h_segs := 10
+	var w_segs := 12
+	var h_segs := 22
 	var wf_grid: Array[Array] = []
 	for iy in range(h_segs + 1):
 		var vt := float(iy) / float(h_segs)
-		var y_cur := lerpf(wf_ceil_y + 1.4, wf_loc.y - 0.25, vt)
-		var w_half := lerpf(0.45, 1.05, pow(vt, 0.7))
+		var y_cur := lerpf(wf_ceil_y + 1.4, wf_loc.y - 0.30, vt)
+		var w_half := lerpf(0.52, 1.24, pow(vt, 0.72))
 		var row_wf: Array = []
 		for ix in range(w_segs + 1):
 			var ut := float(ix) / float(w_segs)
 			var u_off := (ut * 2.0 - 1.0) * w_half
-			var bow := sin(ut * PI) * 0.42 + vt * 1.15 - 0.85
+			var bow := sin(ut * PI) * 0.46 + (vt * vt) * 1.38 + vt * 0.25 - 0.88
 			var lp := Vector3(wf_loc.x + u_off, y_cur, wf_loc.z - bow)
 			row_wf.append({"pos": CaveLayout.to_world(lp), "uv": Vector2(ut, vt)})
 		wf_grid.append(row_wf)
@@ -2466,19 +2462,50 @@ func _build_water_features() -> void:
 			var nrm: Vector3 = tv.cross(tu).normalized()
 			wf_grid[iy][ix]["nrm"] = nrm
 
+	var col_column := Color(0.0, 0.0, 0.0, 1.0)
 	for iy in h_segs:
 		for ix in w_segs:
 			var a: Dictionary = wf_grid[iy][ix]
 			var b: Dictionary = wf_grid[iy][ix + 1]
 			var c: Dictionary = wf_grid[iy + 1][ix + 1]
 			var d: Dictionary = wf_grid[iy + 1][ix]
-			st_wf.set_normal(a["nrm"]); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(b["nrm"]); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
-			st_wf.set_normal(c["nrm"]); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(a["nrm"]); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(c["nrm"]); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(d["nrm"]); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
+			st_wf.set_normal(a["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+			st_wf.set_normal(b["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
+			st_wf.set_normal(c["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+			st_wf.set_normal(a["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+			st_wf.set_normal(c["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+			st_wf.set_normal(d["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
 
+	# Plunge mist collar dome around waterfall base (v_col.b = 1.0 selects billowing spray boil in shader)
+	var col_mist := Color(0.0, 0.0, 1.0, 1.0)
+	var mist_rings := 4
+	var mist_segs := 20
+	var mist_grid: Array[Array] = []
+	for ir in range(mist_rings + 1):
+		var rt := float(ir) / float(mist_rings)
+		var mr := lerpf(0.38, 2.85, rt)
+		var my := wf_loc.y + sin(rt * PI) * 0.72 + (1.0 - rt) * 0.14
+		var m_row: Array = []
+		for iseg in range(mist_segs + 1):
+			var ut := float(iseg) / float(mist_segs)
+			var ang := ut * TAU
+			var lp := Vector3(wf_loc.x + cos(ang) * mr, my, (wf_loc.z - 0.65) + sin(ang) * mr * 0.85)
+			m_row.append({"pos": CaveLayout.to_world(lp), "uv": Vector2(ut, rt)})
+		mist_grid.append(m_row)
+	for ir in mist_rings:
+		for iseg in mist_segs:
+			var a: Dictionary = mist_grid[ir][iseg]
+			var b: Dictionary = mist_grid[ir][iseg + 1]
+			var c: Dictionary = mist_grid[ir + 1][iseg + 1]
+			var d: Dictionary = mist_grid[ir + 1][iseg]
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
+
+	st_wf.generate_tangents()
 	var wf_mi := MeshInstance3D.new()
 	wf_mi.name = "WaterfallRibbon"
 	wf_mi.mesh = st_wf.commit()

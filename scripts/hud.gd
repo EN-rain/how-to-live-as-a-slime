@@ -21,6 +21,8 @@ extends Control
 @export var v_separation: int = 6
 
 var _stat: Label
+var _perf_line: Label
+var _perf_pill: PanelContainer
 var _hint: Label
 var _dev_line: Label
 var _dev_pill: PanelContainer
@@ -32,6 +34,20 @@ var _toast_timer: float = 0.0
 var _last := ""
 var _last_dev := ""
 var _last_dbg := ""
+
+var _perf_accum_dt: float = 0.0
+var _perf_accum_frames: int = 0
+var _perf_cpu_ms_smooth: float = 0.0
+var _perf_dt_ms_smooth: float = 16.67
+
+var _dark_overlay: ColorRect
+var _dark_alpha: float = 0.0
+var _death_backdrop: Control
+var _death_title_label: Label
+var _death_reason_label: Label
+var _btn_new_game: Button
+var _btn_retry: Button
+var _btn_exit: Button
 
 var _frames_ms: Array = []
 var _phys_ms: Array = []
@@ -61,6 +77,12 @@ func _ready() -> void:
 
 	_stat = _make_pill(stat_color)
 	row.add_child(_stat.get_parent())
+
+	_perf_line = _make_pill(Color("a6f0c4"))
+	_perf_line.text = "FPS --  ·  CPU --%"
+	_perf_pill = _perf_line.get_parent()
+	row.add_child(_perf_pill)
+
 	_hint = _make_pill(hint_color)
 	_hint.text = hint_text
 	row.add_child(_hint.get_parent())
@@ -80,8 +102,213 @@ func _ready() -> void:
 	_toast_pill.visible = false
 	row.add_child(_toast_pill)
 
+	_build_death_ui()
+	if slime != null and is_instance_valid(slime) and slime.has_signal("died"):
+		if not slime.died.is_connected(_on_slime_died):
+			slime.died.connect(_on_slime_died)
+
 	_prev_pframe = Engine.get_physics_frames()
 	call_deferred("_ensure_debug_mesh")
+
+
+func _on_slime_died(_reason: String) -> void:
+	_sync_death_ui(1.0)
+
+
+func _sync_death_ui(dt: float = 0.016) -> void:
+	if slime == null or not is_instance_valid(slime):
+		return
+	var target_dark := 1.0 if slime.is_dead else clampf(slime.sea_darkness, 0.0, 1.0)
+	if slime.is_dead:
+		_dark_alpha = 1.0
+	else:
+		_dark_alpha = lerpf(_dark_alpha, target_dark, 1.0 - exp(-14.0 * clampf(dt, 0.0, 0.1)))
+		if _dark_alpha < 0.004 and target_dark <= 0.0:
+			_dark_alpha = 0.0
+	if _dark_overlay != null:
+		_dark_overlay.visible = _dark_alpha > 0.002
+		_dark_overlay.color = Color(0.0, 0.0, 0.0, _dark_alpha)
+	if _death_backdrop != null:
+		var want_panel := slime.is_dead
+		if _death_backdrop.visible != want_panel:
+			_death_backdrop.visible = want_panel
+			if want_panel and _death_reason_label != null:
+				_death_reason_label.text = slime.death_reason if slime.death_reason != "" else "You were killed by an unknown creature"
+				if _btn_retry != null and is_inside_tree():
+					_btn_retry.grab_focus()
+
+
+func _make_death_button(label_text: String, primary: bool = false) -> Button:
+	var btn := Button.new()
+	btn.text = label_text
+	btn.custom_minimum_size = Vector2(126.0, 42.0)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_font_size_override("font_size", 14)
+	btn.add_theme_color_override("font_color", Color("f4f7fb"))
+	btn.add_theme_color_override("font_hover_color", Color.WHITE)
+	btn.add_theme_color_override("font_pressed_color", Color.WHITE)
+
+	var make_style := func(bg: Color, border: Color) -> StyleBoxFlat:
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = bg
+		sb.border_color = border
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(10)
+		sb.content_margin_left = 14.0
+		sb.content_margin_right = 14.0
+		sb.content_margin_top = 8.0
+		sb.content_margin_bottom = 8.0
+		return sb
+
+	var base_bg := Color(0.56, 0.14, 0.18, 0.92) if primary else Color(0.12, 0.14, 0.19, 0.90)
+	var base_bd := Color(0.95, 0.42, 0.46, 0.78) if primary else Color(0.42, 0.48, 0.58, 0.45)
+	var hover_bg := Color(0.70, 0.18, 0.23, 0.96) if primary else Color(0.20, 0.24, 0.32, 0.95)
+	var hover_bd := Color(1.0, 0.58, 0.60, 0.92) if primary else Color(0.68, 0.78, 0.90, 0.75)
+	var press_bg := Color(0.44, 0.10, 0.14, 1.0) if primary else Color(0.08, 0.10, 0.14, 1.0)
+
+	btn.add_theme_stylebox_override("normal", make_style.call(base_bg, base_bd))
+	btn.add_theme_stylebox_override("hover", make_style.call(hover_bg, hover_bd))
+	btn.add_theme_stylebox_override("focus", make_style.call(hover_bg, hover_bd))
+	btn.add_theme_stylebox_override("pressed", make_style.call(press_bg, hover_bd))
+	return btn
+
+
+func _build_death_ui() -> void:
+	_dark_overlay = ColorRect.new()
+	_dark_overlay.name = "SeaDarknessOverlay"
+	_dark_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_dark_overlay.color = Color(0.0, 0.0, 0.0, 0.0)
+	_dark_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dark_overlay.visible = false
+	add_child(_dark_overlay)
+
+	var center := CenterContainer.new()
+	center.name = "DeathPanelBackdrop"
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_STOP
+	center.visible = false
+	add_child(center)
+	_death_backdrop = center
+
+	var card := PanelContainer.new()
+	card.name = "DeathCard"
+	card.custom_minimum_size = Vector2(460.0, 0.0)
+	var card_style := StyleBoxFlat.new()
+	card_style.bg_color = Color(0.055, 0.045, 0.065, 0.94)
+	card_style.border_color = Color(0.86, 0.22, 0.26, 0.58)
+	card_style.set_border_width_all(2)
+	card_style.set_corner_radius_all(18)
+	card_style.content_margin_left = 34.0
+	card_style.content_margin_right = 34.0
+	card_style.content_margin_top = 28.0
+	card_style.content_margin_bottom = 26.0
+	card_style.shadow_color = Color(0.0, 0.0, 0.0, 0.65)
+	card_style.shadow_size = 24
+	card.add_theme_stylebox_override("panel", card_style)
+	center.add_child(card)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 14)
+	card.add_child(vbox)
+
+	_death_title_label = Label.new()
+	_death_title_label.text = "YOU DIED"
+	_death_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_death_title_label.add_theme_font_size_override("font_size", 28)
+	_death_title_label.add_theme_color_override("font_color", Color(0.98, 0.36, 0.38))
+	vbox.add_child(_death_title_label)
+
+	_death_reason_label = Label.new()
+	_death_reason_label.text = "You were killed by an unknown creature"
+	_death_reason_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_death_reason_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_death_reason_label.add_theme_font_size_override("font_size", 17)
+	_death_reason_label.add_theme_color_override("font_color", Color(0.91, 0.93, 0.96))
+	vbox.add_child(_death_reason_label)
+
+	var sep := HSeparator.new()
+	sep.modulate = Color(1.0, 0.45, 0.45, 0.35)
+	vbox.add_child(sep)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 14)
+	vbox.add_child(btn_row)
+
+	_btn_new_game = _make_death_button("New Game", false)
+	_btn_new_game.name = "BtnNewGame"
+	_btn_new_game.pressed.connect(_on_new_game_pressed)
+	btn_row.add_child(_btn_new_game)
+
+	_btn_retry = _make_death_button("Retry", true)
+	_btn_retry.name = "BtnRetry"
+	_btn_retry.pressed.connect(_on_retry_pressed)
+	btn_row.add_child(_btn_retry)
+
+	_btn_exit = _make_death_button("Exit", false)
+	_btn_exit.name = "BtnExit"
+	_btn_exit.pressed.connect(_on_exit_pressed)
+	btn_row.add_child(_btn_exit)
+
+
+func _on_new_game_pressed() -> void:
+	if get_tree() != null:
+		get_tree().reload_current_scene()
+
+
+func _on_retry_pressed() -> void:
+	if slime != null and is_instance_valid(slime) and slime.has_method("revive_at_safe_pos"):
+		slime.revive_at_safe_pos()
+	_dark_alpha = 0.0
+	if _dark_overlay != null:
+		_dark_overlay.color.a = 0.0
+		_dark_overlay.visible = false
+	if _death_backdrop != null:
+		_death_backdrop.visible = false
+
+
+func _on_exit_pressed() -> void:
+	if get_tree() == null:
+		return
+	if FileAccess.file_exists("res://main_menu/main_menu.tscn"):
+		get_tree().change_scene_to_file("res://main_menu/main_menu.tscn")
+	else:
+		get_tree().quit()
+
+
+func _update_perf_indicator(delta: float) -> void:
+	if _perf_line == null:
+		return
+	var dt := maxf(delta, 0.0001)
+	# Ignore one-frame screenshot / loading stalls (> 0.10s) so smoothed CPU time stays accurate.
+	if dt <= 0.10:
+		var proc_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+		var phys_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+		var sim_cpu_ms := proc_ms + phys_ms
+		var frame_ms := maxf(dt * 1000.0, 1.0)
+		var smooth_a := 1.0 - exp(-6.0 * dt)
+		_perf_cpu_ms_smooth = lerpf(_perf_cpu_ms_smooth, sim_cpu_ms, smooth_a) if _perf_cpu_ms_smooth > 0.0 else sim_cpu_ms
+		_perf_dt_ms_smooth = lerpf(_perf_dt_ms_smooth, frame_ms, smooth_a)
+
+	_perf_accum_dt += minf(dt, 0.10)
+	_perf_accum_frames += 1
+	if _perf_accum_dt < 0.25:
+		return
+
+	var eng_fps := Engine.get_frames_per_second()
+	var inst_fps := roundi(eng_fps if eng_fps > 0.5 else float(_perf_accum_frames) / maxf(_perf_accum_dt, 0.001))
+	var cpu_pct := clampf((_perf_cpu_ms_smooth / maxf(_perf_dt_ms_smooth, 1.0)) * 100.0, 0.0, 100.0)
+	_perf_accum_dt = 0.0
+	_perf_accum_frames = 0
+
+	_perf_line.text = "FPS %d  ·  CPU %.0f%% (%.1f ms)" % [inst_fps, cpu_pct, _perf_cpu_ms_smooth]
+	var c := Color("a6f0c4")
+	if inst_fps < 30:
+		c = Color("ff8a8a")
+	elif inst_fps < 50:
+		c = Color("ffd97d")
+	_perf_line.add_theme_color_override("font_color", c)
 
 
 func show_toast(msg: String, color: Color = Color(0.62, 0.96, 1.0), duration: float = 3.5) -> void:
@@ -285,12 +512,19 @@ func _draw_debug_3d() -> void:
 
 func _process(_delta: float) -> void:
 	_sample(_delta)
+	_update_perf_indicator(_delta)
 	if _toast_timer > 0.0 and _toast_pill != null:
 		_toast_timer -= _delta
 		if _toast_timer <= 0.0:
 			_toast_pill.visible = false
 		elif _toast_timer < 0.75:
 			_toast_pill.modulate = Color(1.0, 1.0, 1.0, clampf(_toast_timer / 0.75, 0.0, 1.0))
+
+	if slime != null and is_instance_valid(slime):
+		if slime.has_signal("died") and not slime.died.is_connected(_on_slime_died):
+			slime.died.connect(_on_slime_died)
+		_sync_death_ui(_delta)
+
 	if slime == null or props == null:
 		return
 

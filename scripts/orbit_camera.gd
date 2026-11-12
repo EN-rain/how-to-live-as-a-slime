@@ -86,7 +86,8 @@ func _notification(what: int) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if follow == null:
+	if follow == null or follow.is_dead:
+		_dragging = false
 		return
 	if event.is_action_pressed("orbit_drag") or (event is InputEventMouseButton and (event.button_index == MOUSE_BUTTON_RIGHT or event.button_index == MOUSE_BUTTON_MIDDLE) and event.pressed):
 		_dragging = true

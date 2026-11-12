@@ -579,6 +579,16 @@ func sample_height(x: float, z: float) -> float:
 	return maxf(base_h, sea_bed)
 
 
+func sample_coast_distance(x: float, z: float) -> float:
+	var dist := Vector2(x, z).length()
+	var eff_dist := dist
+	if dist > 1100.0:
+		var warp_macro := _noise.get_noise_2d(x * 0.00055 + 120.0, z * 0.00055 - 180.0) * 480.0
+		var warp_bays := _noise.get_noise_2d(x * 0.0014 - 250.0, z * 0.0014 + 210.0) * 160.0
+		eff_dist = dist + warp_macro + warp_bays
+	return eff_dist - (continent_radius + 180.0)
+
+
 func sample_normal(x: float, z: float) -> Vector3:
 	var eps := 4.0
 	var hL := sample_height(x - eps, z)

@@ -7,6 +7,7 @@ extends Node3D
 ## SlimeProps exposes obstacle geometry, passage hints and digestion.
 
 signal poked(local_point: Vector3, impulse: Vector3)
+signal died(reason: String)
 
 enum Role {
 	PLAYER,
@@ -214,6 +215,13 @@ var _verified_key := -1
 var fission_clone: Slime = null
 var _dev_speed_idx := 2
 var _swim_ripple_timer := 0.0
+
+var is_dead := false
+var sea_darkness := 0.0
+var death_reason := ""
+var _last_safe_pos := Vector3.ZERO
+var _terrain_ref: Node = null
+var _sea_warned := false
 
 var time: float:
 	get:
@@ -443,6 +451,7 @@ func _ready() -> void:
 	_setup_core_visual()
 	_prev_global_pos = global_position
 	_prev_scale = slime_scale
+	_last_safe_pos = global_position
 
 	if props:
 		_rng.seed = props.next_slime_seed()
@@ -634,7 +643,7 @@ func _reset_array_uniforms() -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _unhandled_input(event: InputEvent) -> void:
-	if role != Role.PLAYER:
+	if role != Role.PLAYER or is_dead:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		var kev := event as InputEventKey
@@ -895,6 +904,13 @@ func _physics_process(delta: float) -> void:
 	# Cleared once per tick so posture/growth reasons survive until presentation.
 	expansion_blocked = ""
 
+	if role == Role.PLAYER and is_dead:
+		motor.velocity = Vector3.ZERO
+		motor.vertical_vel = 0.0
+		_update_presentation(dt)
+		_tick_props(dt)
+		return
+
 	if is_merging:
 		_tick_merge(dt)
 		return
@@ -961,9 +977,85 @@ func _physics_process(delta: float) -> void:
 	_verify_posture_after_move()
 	_sync_proxy()
 
+	if role == Role.PLAYER and not is_dev_noclip_active():
+		_tick_ocean_boundary(dt)
+
 	_update_presentation(dt)
 	_update_engulf(dt)
 	_tick_props(dt)
+
+
+func _tick_ocean_boundary(dt: float) -> void:
+	if is_dead or _is_subterranean_for_water():
+		if _is_subterranean_for_water():
+			sea_darkness = maxf(0.0, sea_darkness - dt * 0.65)
+		return
+	if _terrain_ref == null or not is_instance_valid(_terrain_ref):
+		var parent_node := get_parent()
+		if parent_node != null:
+			_terrain_ref = parent_node.get_node_or_null("TerrainScene")
+	if _terrain_ref == null or not _terrain_ref.has_method("sample_coast_distance"):
+		return
+
+	var coast_dist := float(_terrain_ref.sample_coast_distance(global_position.x, global_position.z))
+	if not motor.in_water and motor.on_ground and coast_dist < -20.0 and global_position.y >= 0.6:
+		_last_safe_pos = global_position
+
+	var in_ocean_zone := motor.in_water or global_position.y < 14.0
+	if in_ocean_zone and coast_dist >= 80.0 and not _sea_warned:
+		_sea_warned = true
+		var hud := get_tree().get_first_node_in_group("hud")
+		if hud != null and hud.has_method("show_toast"):
+			hud.show_toast("Something stirs in the abyssal sea... turn back!", Color(1.0, 0.52, 0.48), 4.0)
+
+	if in_ocean_zone and coast_dist >= 130.0:
+		var darken_rate := clampf(0.18 + (coast_dist - 130.0) * 0.0014, 0.18, 0.42)
+		sea_darkness = clampf(sea_darkness + darken_rate * dt, 0.0, 1.0)
+		if sea_darkness >= 1.0:
+			trigger_death("You were killed by an unknown creature")
+	else:
+		sea_darkness = maxf(0.0, sea_darkness - dt * 0.48)
+		if coast_dist < 55.0:
+			_sea_warned = false
+
+
+func trigger_death(reason: String = "You were killed by an unknown creature") -> void:
+	if is_dead:
+		return
+	is_dead = true
+	sea_darkness = 1.0
+	death_reason = reason
+	if motor != null:
+		motor.velocity = Vector3.ZERO
+		motor.vertical_vel = 0.0
+	died.emit(reason)
+
+
+func revive_at_safe_pos() -> void:
+	var fallback := Vector3(0.0, 22.0, 0.0)
+	var safe := _last_safe_pos if _last_safe_pos.length_squared() > 0.001 else fallback
+	if _terrain_ref != null and _terrain_ref.has_method("sample_height"):
+		var ground_h := float(_terrain_ref.sample_height(safe.x, safe.z))
+		var half_h := (model.rest_half_height if model != null else 1.28) * slime_scale
+		safe.y = maxf(safe.y, ground_h + tuning.skin + half_h)
+	global_position = safe
+	_prev_global_pos = safe
+	is_dead = false
+	sea_darkness = 0.0
+	death_reason = ""
+	_sea_warned = false
+	if motor != null:
+		motor.velocity = Vector3.ZERO
+		motor.vertical_vel = 0.0
+		motor.in_water = false
+		motor.water_submersion = 0.0
+		motor.water_depth = 0.0
+		motor.water_flow_vel = Vector3.ZERO
+		motor.on_ground = true
+	_apply_transform()
+	_sync_proxy()
+	if is_inside_tree() and motor != null:
+		motor.update_support()
 
 
 func _is_subterranean_for_water() -> bool:
