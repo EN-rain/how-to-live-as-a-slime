@@ -8,12 +8,13 @@ extends SceneTree
 const VOXEL := 0.80
 const BRICK := 4 # 4x4x4 coarse brick = 3.2 m
 
-const U_MIN := -210.0
-const U_MAX := 44.0
-const Y_MIN := 0.5
+const U_MIN := -220.0
+const U_MAX := 74.0
+const Y_MIN := -1.0
 const Y_MAX := 66.0
-const S_MIN := -32.0
-const S_MAX := 214.0
+const S_MIN := -34.0
+const S_MAX := 240.0
+const BAKE_CACHE_PATH := "res://.godot/cave_bake_cache.bin"
 
 
 func _init() -> void:
@@ -21,11 +22,33 @@ func _init() -> void:
 	var t0 := Time.get_ticks_msec()
 
 	DirAccess.make_dir_recursive_absolute("res://terrain/cave")
+	DirAccess.make_dir_recursive_absolute("res://.godot")
 
-	# Instantiate TerrainScene solely to sample exact base+karst overworld heights on the 2D (u, s) grid
-	var terrain_sc := load("res://terrain/terrain.tscn") as PackedScene
-	var terrain := terrain_sc.instantiate()
-	terrain.set("enable_cave", true)
+	var force_full := false
+	var has_region := false
+	var reg_u0 := U_MIN
+	var reg_s0 := S_MIN
+	var reg_u1 := U_MAX
+	var reg_s1 := S_MAX
+	var all_args := OS.get_cmdline_args()
+	all_args.append_array(OS.get_cmdline_user_args())
+	for arg in all_args:
+		if arg == "--full":
+			force_full = true
+		elif arg == "--region=lake":
+			has_region = true
+			reg_u0 = -76.0
+			reg_s0 = 122.0
+			reg_u1 = 74.0
+			reg_s1 = 240.0
+		elif arg.begins_with("--region="):
+			var parts := arg.substr(9).split(",")
+			if parts.size() == 4:
+				has_region = true
+				reg_u0 = float(parts[0])
+				reg_s0 = float(parts[1])
+				reg_u1 = float(parts[2])
+				reg_s1 = float(parts[3])
 
 	var sdf := CaveSDF.new(1337)
 
@@ -35,47 +58,99 @@ func _init() -> void:
 	var gx := nx + 1
 	var gy := ny + 1
 	var gz := nz + 1
-	print("Grid dimensions: %d x %d x %d corners (%.2f m voxel)" % [gx, gy, gz, VOXEL])
-
-	# 1. Precompute 2D karst hill heights for every (ix, iz) column
-	var karst_2d := PackedFloat32Array()
-	karst_2d.resize(gx * gz)
-	var patch_2d := PackedFloat32Array()
-	patch_2d.resize(gx * gz)
-	for iz in gz:
-		var s := S_MIN + float(iz) * VOXEL
-		for ix in gx:
-			var u := U_MIN + float(ix) * VOXEL
-			var wp := CaveLayout.to_world(Vector3(u, 0.0, s))
-			var kh: float = float(terrain.call("sample_height", wp.x, wp.z))
-			karst_2d[iz * gx + ix] = kh
-			patch_2d[iz * gx + ix] = CaveSDF.eval_surface_patch_t(u, s)
-
-	terrain.free()
-
-	# 2. Coarse 4x4x4 brick culling (scan column [kh_min, kh_max] per brick so steep cliffs never get skipped!)
 	var bx_cnt := int(ceil(float(nx) / float(BRICK)))
 	var by_cnt := int(ceil(float(ny) / float(BRICK)))
 	var bz_cnt := int(ceil(float(nz) / float(BRICK)))
-
-	# Allocate full SDF corner array initialized to +99.0 (solid rock)
 	var total_corners := gx * gy * gz
+	var grid_sig := [U_MIN, U_MAX, Y_MIN, Y_MAX, S_MIN, S_MAX, VOXEL, BRICK, gx, gy, gz]
+	print("Grid dimensions: %d x %d x %d corners (%.2f m voxel)" % [gx, gy, gz, VOXEL])
+
+	var karst_2d := PackedFloat32Array()
+	var patch_2d := PackedFloat32Array()
 	var field := PackedFloat32Array()
-	field.resize(total_corners)
-	field.fill(99.0)
-
 	var computed_corner := PackedByteArray()
-	computed_corner.resize(total_corners)
-
 	var active_bricks: Array[Vector3i] = []
+	var color_cache_by_cell: Dictionary = {}
+	var incremental_ok := false
+
+	if has_region and not force_full and FileAccess.file_exists(BAKE_CACHE_PATH):
+		var fc := FileAccess.open_compressed(BAKE_CACHE_PATH, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+		if fc != null:
+			var cache_d = fc.get_var(true)
+			fc.close()
+			if cache_d is Dictionary and cache_d.get("sig", []) == grid_sig:
+				karst_2d = cache_d["karst_2d"]
+				patch_2d = cache_d["patch_2d"]
+				field = cache_d["field"]
+				computed_corner = cache_d["computed_corner"]
+				var old_bricks: Array = cache_d.get("active_bricks", [])
+				var cached_cells: PackedInt32Array = cache_d.get("vert_cells", PackedInt32Array())
+				var cached_cols: PackedColorArray = cache_d.get("vert_colors", PackedColorArray())
+				for ci in mini(cached_cells.size(), cached_cols.size()):
+					color_cache_by_cell[cached_cells[ci]] = cached_cols[ci]
+				var cull_u0 := reg_u0 - 8.0
+				var cull_u1 := reg_u1 + 8.0
+				var cull_s0 := reg_s0 - 8.0
+				var cull_s1 := reg_s1 + 8.0
+				for bv: Vector3i in old_bricks:
+					var b_u0 := U_MIN + float(bv.x * BRICK) * VOXEL
+					var b_u1 := U_MIN + float((bv.x + 1) * BRICK) * VOXEL
+					var b_s0 := S_MIN + float(bv.z * BRICK) * VOXEL
+					var b_s1 := S_MIN + float((bv.z + 1) * BRICK) * VOXEL
+					if b_u1 < cull_u0 or b_u0 > cull_u1 or b_s1 < cull_s0 or b_s0 > cull_s1:
+						active_bricks.append(bv)
+				incremental_ok = karst_2d.size() == gx * gz and field.size() == total_corners
+				if incremental_ok:
+					print("Incremental region bake active: u=[%.1f..%.1f] s=[%.1f..%.1f] (preserved %d bricks, %d vertex caches)" % [
+						reg_u0, reg_u1, reg_s0, reg_s1, active_bricks.size(), color_cache_by_cell.size()
+					])
+
+	if not incremental_ok:
+		# Instantiate TerrainScene solely to sample exact base+karst overworld heights on the 2D (u, s) grid
+		var terrain_sc := load("res://terrain/terrain.tscn") as PackedScene
+		var terrain := terrain_sc.instantiate()
+		terrain.set("enable_cave", true)
+
+		# 1. Precompute 2D karst hill heights for every (ix, iz) column
+		karst_2d.resize(gx * gz)
+		patch_2d.resize(gx * gz)
+		for iz in gz:
+			var s := S_MIN + float(iz) * VOXEL
+			for ix in gx:
+				var u := U_MIN + float(ix) * VOXEL
+				var wp := CaveLayout.to_world(Vector3(u, 0.0, s))
+				var kh: float = float(terrain.call("sample_height", wp.x, wp.z))
+				karst_2d[iz * gx + ix] = kh
+				patch_2d[iz * gx + ix] = CaveSDF.eval_surface_patch_t(u, s)
+
+		terrain.free()
+
+		field.resize(total_corners)
+		field.fill(99.0)
+		computed_corner.resize(total_corners)
+
+	# 2. Coarse 4x4x4 brick culling (scan only region box in incremental mode, else full grid)
 	var brick_half_diag := float(BRICK) * VOXEL * 0.87 + 5.5
+	var scan_u0 := (reg_u0 - 8.0) if incremental_ok else U_MIN - 99.0
+	var scan_u1 := (reg_u1 + 8.0) if incremental_ok else U_MAX + 99.0
+	var scan_s0 := (reg_s0 - 8.0) if incremental_ok else S_MIN - 99.0
+	var scan_s1 := (reg_s1 + 8.0) if incremental_ok else S_MAX + 99.0
+	var eval_bricks: Array[Vector3i] = []
 
 	for bz in bz_cnt:
-		var s_mid := S_MIN + (float(bz * BRICK) + float(BRICK) * 0.5) * VOXEL
+		var s_b0 := S_MIN + float(bz * BRICK) * VOXEL
+		var s_b1 := S_MIN + float((bz + 1) * BRICK) * VOXEL
+		if incremental_ok and (s_b1 < scan_s0 or s_b0 > scan_s1):
+			continue
+		var s_mid := 0.5 * (s_b0 + s_b1)
 		var iz0 := maxi(bz * BRICK - 1, 0)
 		var iz1 := mini((bz + 1) * BRICK + 1, nz)
 		for bx in bx_cnt:
-			var u_mid := U_MIN + (float(bx * BRICK) + float(BRICK) * 0.5) * VOXEL
+			var u_b0 := U_MIN + float(bx * BRICK) * VOXEL
+			var u_b1 := U_MIN + float((bx + 1) * BRICK) * VOXEL
+			if incremental_ok and (u_b1 < scan_u0 or u_b0 > scan_u1):
+				continue
+			var u_mid := 0.5 * (u_b0 + u_b1)
 			var ix0 := maxi(bx * BRICK - 1, 0)
 			var ix1 := mini((bx + 1) * BRICK + 1, nx)
 			var kh_min := 1e9
@@ -97,19 +172,48 @@ func _init() -> void:
 
 				var dc := sdf.eval_cave_void_smooth(u_mid, y_mid, s_mid)
 				var near_cave := absf(dc) <= brick_half_diag
-				var near_patch_surface := (pt_min <= 1.0) and (y_hi >= kh_min - 6.0) and (y_lo <= kh_max + 4.5)
+				var near_patch_surface := (pt_min <= 0.92) and (y_hi >= kh_min - 7.0) and (y_lo <= kh_max + 4.5)
 				if near_cave or near_patch_surface:
-					active_bricks.append(Vector3i(bx, by, bz))
+					var bv := Vector3i(bx, by, bz)
+					active_bricks.append(bv)
+					eval_bricks.append(bv)
 
-	print("Active surface bricks: %d / %d (%.1f%%)" % [
-		active_bricks.size(), bx_cnt * by_cnt * bz_cnt,
-		100.0 * float(active_bricks.size()) / float(maxi(bx_cnt * by_cnt * bz_cnt, 1))
+	print("Active surface bricks: %d / %d (evaluating SDF on %d bricks)" % [
+		active_bricks.size(), bx_cnt * by_cnt * bz_cnt, eval_bricks.size()
 	])
 
-	# Evaluate fine SDF corners on active bricks + 1-cell border so neighbor quads never miss corners
+	# Evaluate fine SDF corners on dirty bricks + 1-cell border so neighbor quads never miss corners
 	var stride_y := gx
 	var stride_z := gx * gy
-	for bvec: Vector3i in active_bricks:
+	if incremental_ok:
+		# Clear stale interior SDF values strictly inside the edited box so filled-in voids never linger
+		var clr_x0 := maxi(int(floor((scan_u0 + VOXEL * 2.0 - U_MIN) / VOXEL)), 0)
+		var clr_x1 := mini(int(ceil((scan_u1 - VOXEL * 2.0 - U_MIN) / VOXEL)), nx)
+		var clr_z0 := maxi(int(floor((scan_s0 + VOXEL * 2.0 - S_MIN) / VOXEL)), 0)
+		var clr_z1 := mini(int(ceil((scan_s1 - VOXEL * 2.0 - S_MIN) / VOXEL)), nz)
+		for iz in range(clr_z0, clr_z1 + 1):
+			var z_off := iz * stride_z
+			for iy in gy:
+				var yz_off := z_off + iy * stride_y
+				for ix in range(clr_x0, clr_x1 + 1):
+					var c_idx := yz_off + ix
+					field[c_idx] = 99.0
+					computed_corner[c_idx] = 0
+		for bvec: Vector3i in eval_bricks:
+			var x0 := maxi(bvec.x * BRICK - 1, 0)
+			var x1 := mini((bvec.x + 1) * BRICK + 1, nx)
+			var y0 := maxi(bvec.y * BRICK - 1, 0)
+			var y1 := mini((bvec.y + 1) * BRICK + 1, ny)
+			var z0 := maxi(bvec.z * BRICK - 1, 0)
+			var z1 := mini((bvec.z + 1) * BRICK + 1, nz)
+			for iz in range(z0, z1 + 1):
+				var z_off := iz * stride_z
+				for iy in range(y0, y1 + 1):
+					var yz_off := z_off + iy * stride_y
+					for ix in range(x0, x1 + 1):
+						computed_corner[yz_off + ix] = 0
+
+	for bvec: Vector3i in eval_bricks:
 		var x0 := maxi(bvec.x * BRICK - 1, 0)
 		var x1 := mini((bvec.x + 1) * BRICK + 1, nx)
 		var y0 := maxi(bvec.y * BRICK - 1, 0)
@@ -143,6 +247,7 @@ func _init() -> void:
 	var local_verts := PackedVector3Array()
 	var world_verts := PackedVector3Array()
 	var vert_air_dirs := PackedVector3Array()
+	var vert_cells := PackedInt32Array()
 
 	# 12 cube edges as pairs of corner bitmasks (bit0=dx, bit1=dy, bit2=dz)
 	var edge_a := [0, 2, 4, 6, 0, 1, 4, 5, 0, 1, 2, 3]
@@ -171,14 +276,8 @@ func _init() -> void:
 					if cell_vert[cell_idx] != -1:
 						continue
 
-					# Filter out pure overworld hillside cells outside Entrance Outcrop & Skylight Rim patches
 					var pt := patch_2d[iz * gx + ix]
 					var u := U_MIN + float(ix) * VOXEL
-					if pt > 0.995:
-						var dc_cell := sdf.eval_cave_void_smooth(u + VOXEL * 0.5, y + VOXEL * 0.5, s + VOXEL * 0.5)
-						if dc_cell > 3.6:
-							continue
-
 					var has_neg := false
 					var has_pos := false
 					for c in 8:
@@ -193,6 +292,12 @@ func _init() -> void:
 							has_pos = true
 					if not (has_neg and has_pos):
 						continue
+
+					# Filter out pure overworld hillside cells outside Entrance Outcrop & Skylight Rim patches
+					if pt > 0.88:
+						var dc_cell := sdf.eval_cave_void_smooth(u + VOXEL * 0.5, y + VOXEL * 0.5, s + VOXEL * 0.5)
+						if dc_cell > 2.5:
+							continue
 
 					for c in 8:
 						corner_pos[c] = Vector3(
@@ -231,6 +336,7 @@ func _init() -> void:
 					local_verts.append(p_local)
 					world_verts.append(CaveLayout.to_world(p_local))
 					vert_air_dirs.append(air_dir)
+					vert_cells.append(cell_idx)
 
 	var vert_count := world_verts.size()
 	print("Welded Surface-Nets vertices: %d" % vert_count)
@@ -289,9 +395,11 @@ func _init() -> void:
 		var dc_rw := sdf.dist_to_crawlway(lp.x, lp.y, lp.z)
 		var pt_rw := CaveSDF.eval_surface_patch_t(lp.x, lp.z)
 		var air_y := vert_air_dirs[i].y
-		# Keep floors smooth (0.34) for buttery locomotion, but preserve crisp rock relief on walls & ceilings (0.15)
-		var base_rw := lerpf(0.15, 0.34, clampf((air_y - 0.25) / 0.55, 0.0, 1.0))
-		relax_weights[i] = base_rw * smoothstep(-0.1, 1.2, dc_rw) * (1.0 - smoothstep(0.78, 0.89, pt_rw))
+		# Keep dry floors smooth (0.34) for buttery locomotion, but keep walls, ceilings & submerged lakebed rock relief crisp
+		var sub_lk := smoothstep(6.05, 5.05, lp.y) * smoothstep(128.0, 138.0, lp.z) * smoothstep(-58.0, -48.0, lp.x)
+		var floor_rw := lerpf(0.34, 0.18, sub_lk)
+		var base_rw := lerpf(0.15, floor_rw, clampf((air_y - 0.25) / 0.55, 0.0, 1.0))
+		relax_weights[i] = base_rw * smoothstep(-0.1, 1.2, dc_rw) * (1.0 - smoothstep(0.68, 0.82, pt_rw))
 
 	var nb_sum := PackedVector3Array()
 	nb_sum.resize(vert_count)
@@ -340,7 +448,7 @@ func _init() -> void:
 		)
 
 	var tri_count := indices.size() / 3
-	print("Emitted triangles: %d (budget <= 120,000)" % tri_count)
+	print("Emitted triangles: %d (budget <= 250,000)" % tri_count)
 
 	# 5. Compute smooth area-weighted vertex normals & split physics faces (Floor layer 1 vs Wall layer 4)
 	var normals := PackedVector3Array()
@@ -364,10 +472,10 @@ func _init() -> void:
 		var fn_len := fn.length()
 		var n_unit := fn / fn_len if fn_len > 1e-8 else Vector3.UP
 		# Classify physics triangles between CaveFloorBody (Layer 1) and CaveWallBody (Layer 4):
-		# - Walkable floors/ramps (n_unit.y >= 0.46, up to ~62 deg slope) belong on Layer 1.
-		# - Steep cave walls (n_unit.y < 0.46), pillars, crawlway walls, and ceilings belong on Layer 4
-		#   so horizontal sweeps solidly block the slime from climbing up steep walls!
-		if n_unit.y >= 0.46:
+		# - Walkable floors/ramps (n_unit.y >= 0.54, matching SlimeMotor update_support's > 0.5 threshold) belong on Layer 1.
+		# - Steep cave walls (n_unit.y < 0.54), pillars, crawlway walls, and ceilings belong on Layer 4
+		#   so horizontal sweeps solidly block the slime from climbing up steep walls or pinching into corners!
+		if n_unit.y >= 0.54:
 			floor_faces.append(p0)
 			floor_faces.append(p1)
 			floor_faces.append(p2)
@@ -400,11 +508,10 @@ func _init() -> void:
 					wall_faces.append(p2)
 			else:
 				# Near-vertical face:
-				# Only put very low ankle fillets (< 0.50m above floor) or step drop-off rims on Layer 1;
-				# true walls (where there is solid rock behind and no floor within 0.50m below) stay on Layer 4!
-				var d_under_floor := sdf.eval_cave_void_smooth(lp_mid.x + hu * 0.25, lp_mid.y - 0.48, lp_mid.z + hs * 0.25)
+				# Only put true free-standing step/ledge drop-off lips (open air behind rim) on Layer 1;
+				# true solid-backed cave walls (< 0.54 normal.y) remain strictly on Layer 4!
 				var d_back_step_air := sdf.eval_cave_void_smooth(lp_mid.x - hu * 1.15, lp_mid.y + 1.25, lp_mid.z - hs * 1.15)
-				if (n_unit.y >= 0.20 and d_under_floor >= 0.0) or d_back_step_air < -0.15:
+				if n_unit.y >= 0.38 and d_back_step_air < -0.25:
 					floor_faces.append(p0)
 					floor_faces.append(p1)
 					floor_faces.append(p2)
@@ -434,81 +541,118 @@ func _init() -> void:
 	var pool_c: Vector3 = CaveLayout.POOL["c"]
 	var pool_rx: float = float(CaveLayout.POOL["rx"])
 	var pool_rz: float = float(CaveLayout.POOL["rz"])
+	var lake_c_w: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
+	var lake_rx_w: float = float(CaveLayout.UNDERGROUND_LAKE["rx"])
+	var lake_rz_w: float = float(CaveLayout.UNDERGROUND_LAKE["rz"])
+	var lake_wy: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"])
+	var ao_u0 := reg_u0 - 12.0
+	var ao_u1 := reg_u1 + 12.0
+	var ao_s0 := reg_s0 - 12.0
+	var ao_s1 := reg_s1 + 12.0
+	var ao_reused := 0
 
 	for i in vert_count:
 		var lp := local_verts[i]
 		var wp := world_verts[i]
 		var wn := normals[i]
-		var ln := Vector3(
-			wn.x * CaveLayout.RIGHT_XZ.x + wn.z * CaveLayout.RIGHT_XZ.y,
-			wn.y,
-			wn.x * CaveLayout.FWD_XZ.x + wn.z * CaveLayout.FWD_XZ.y
-		).normalized()
-
-		# A. 4-step SDF Ambient Occlusion
-		var occ := 0.0
-		var w_sum := 0.0
-		for si in 4:
-			var dist_s: float = ao_steps[si]
-			var sp := lp + ln * dist_s
-			var clearance := maxf(-sdf.eval_cave_void_smooth(sp.x, sp.y, sp.z), 0.0)
-			var w := 1.0 / float(si + 1)
-			occ += clampf(clearance / dist_s, 0.0, 1.0) * w
-			w_sum += w
-		# Exterior outcrop & skylight rim open directly to sky -> boost AO smoothly
-		var pt := CaveSDF.eval_surface_patch_t(lp.x, lp.z)
-		var is_exterior := clampf((lp.y - 31.0) / 8.0, 0.0, 1.0) if lp.z < 6.0 else clampf((lp.y - 51.0) / 5.0, 0.0, 1.0)
-		var ao := clampf(occ / w_sum, 0.12, 1.0)
-		if pt < 0.95:
-			ao = lerpf(ao, maxf(ao, 0.88), is_exterior * (1.0 - smoothstep(0.6, 0.95, pt)))
-
-		# B. Skylight & Entrance Mouth Ray-Marched Daylight Visibility
+		var cid := vert_cells[i]
+		var ao := 0.5
 		var sky_vis := 0.0
-		var to_sky := sky_target - lp
-		var d_sky := to_sky.length()
-		if d_sky < 48.0:
-			var dir_s := to_sky / maxf(d_sky, 0.01)
-			var ndl_s := clampf(ln.dot(dir_s) * 0.7 + 0.3, 0.0, 1.0)
-			if ndl_s > 0.02:
-				var vis_s := 1.0
-				for ms in range(1, 7):
-					var mp := lp + dir_s * (d_sky * float(ms) / 7.0)
-					if mp.y < 54.0:
+		var wet := 0.0
+		if incremental_ok and (lp.x < ao_u0 or lp.x > ao_u1 or lp.z < ao_s0 or lp.z > ao_s1) and color_cache_by_cell.has(cid):
+			var c_prev: Color = color_cache_by_cell[cid]
+			ao = c_prev.r
+			sky_vis = c_prev.g
+			wet = c_prev.b
+			ao_reused += 1
+		else:
+			var ln := Vector3(
+				wn.x * CaveLayout.RIGHT_XZ.x + wn.z * CaveLayout.RIGHT_XZ.y,
+				wn.y,
+				wn.x * CaveLayout.FWD_XZ.x + wn.z * CaveLayout.FWD_XZ.y
+			).normalized()
+
+			# A. 4-step SDF Ambient Occlusion
+			var occ := 0.0
+			var w_sum := 0.0
+			for si in 4:
+				var dist_s: float = ao_steps[si]
+				var sp := lp + ln * dist_s
+				var clearance := maxf(-sdf.eval_cave_void_smooth(sp.x, sp.y, sp.z), 0.0)
+				var w := 1.0 / float(si + 1)
+				occ += clampf(clearance / dist_s, 0.0, 1.0) * w
+				w_sum += w
+			# Exterior outcrop & skylight rim open directly to sky -> boost AO smoothly
+			var pt := CaveSDF.eval_surface_patch_t(lp.x, lp.z)
+			var is_exterior := clampf((lp.y - 31.0) / 8.0, 0.0, 1.0) if lp.z < 6.0 else clampf((lp.y - 51.0) / 5.0, 0.0, 1.0)
+			ao = clampf(occ / w_sum, 0.12, 1.0)
+			if pt < 0.95:
+				ao = lerpf(ao, maxf(ao, 0.88), is_exterior * (1.0 - smoothstep(0.6, 0.95, pt)))
+
+			# B. Skylight & Entrance Mouth Ray-Marched Daylight Visibility
+			var to_sky := sky_target - lp
+			var d_sky := to_sky.length()
+			if d_sky < 48.0:
+				var dir_s := to_sky / maxf(d_sky, 0.01)
+				var ndl_s := clampf(ln.dot(dir_s) * 0.7 + 0.3, 0.0, 1.0)
+				if ndl_s > 0.02:
+					var vis_s := 1.0
+					for ms in range(1, 7):
+						var mp := lp + dir_s * (d_sky * float(ms) / 7.0)
+						if mp.y < 54.0:
+							var md := -sdf.eval_cave_void_smooth(mp.x, mp.y, mp.z)
+							vis_s = minf(vis_s, clampf((md + 0.6) / 3.2, 0.0, 1.0))
+					sky_vis = maxf(sky_vis, vis_s * ndl_s * (1.0 - smoothstep(22.0, 48.0, d_sky)))
+
+			var to_mouth := mouth_target - lp
+			var d_mouth := to_mouth.length()
+			if d_mouth < 34.0 and lp.z < 26.0:
+				var dir_m := to_mouth / maxf(d_mouth, 0.01)
+				var ndl_m := clampf(ln.dot(dir_m) * 0.65 + 0.35, 0.0, 1.0)
+				var vis_m := 1.0
+				for mm in range(1, 5):
+					var mp := lp + dir_m * (d_mouth * float(mm) / 5.0)
+					if mp.z > -1.0:
 						var md := -sdf.eval_cave_void_smooth(mp.x, mp.y, mp.z)
-						vis_s = minf(vis_s, clampf((md + 0.6) / 3.2, 0.0, 1.0))
-				sky_vis = maxf(sky_vis, vis_s * ndl_s * (1.0 - smoothstep(22.0, 48.0, d_sky)))
+						vis_m = minf(vis_m, clampf((md + 0.8) / 3.5, 0.0, 1.0))
+				sky_vis = maxf(sky_vis, vis_m * ndl_m * (1.0 - smoothstep(8.0, 34.0, d_mouth)))
+			if lp.z < -1.5:
+				sky_vis = 1.0
+			var pt_ext := CaveSDF.eval_surface_patch_t(lp.x, lp.z)
+			if pt_ext < 1.0:
+				var ix_k := clampi(int(roundf((lp.x - U_MIN) / VOXEL)), 0, gx - 1)
+				var iz_k := clampi(int(roundf((lp.z - S_MIN) / VOXEL)), 0, gz - 1)
+				var kh_lp := karst_2d[iz_k * gx + ix_k]
+				var near_mouth_arch := absf(lp.x) < 11.5 and lp.z > -4.0 and lp.z < 11.5 and lp.y < kh_lp - 0.5
+				if lp.y >= kh_lp - 3.5 and not near_mouth_arch:
+					if sdf.eval_sdf_full(lp.x, lp.y + 4.0, lp.z, kh_lp) < -1.0:
+						sky_vis = 1.0
+						ao = maxf(ao, 0.88)
+				elif lp.z >= -4.5 and lp.z <= 11.0 and absf(lp.x) <= 12.5:
+					var out_dir := (ln + Vector3(0.0, 0.35, -0.88)).normalized()
+					var open_out := true
+					for st_k: float in [1.1, 2.4, 4.2, 6.2]:
+						var sp_k := lp + out_dir * st_k
+						var six_k := clampi(int(roundf((sp_k.x - U_MIN) / VOXEL)), 0, gx - 1)
+						var siz_k := clampi(int(roundf((sp_k.z - S_MIN) / VOXEL)), 0, gz - 1)
+						var skh_k := karst_2d[siz_k * gx + six_k]
+						if sdf.eval_sdf_full(sp_k.x, sp_k.y, sp_k.z, skh_k) >= -0.05:
+							open_out = false
+							break
+					if open_out:
+						var fade_z := 1.0 - smoothstep(-2.0, 10.5, lp.z)
+						sky_vis = maxf(sky_vis, 0.55 + 0.40 * fade_z)
+						ao = maxf(ao, 0.45 + 0.30 * fade_z)
 
-		var to_mouth := mouth_target - lp
-		var d_mouth := to_mouth.length()
-		if d_mouth < 34.0 and lp.z < 26.0:
-			var dir_m := to_mouth / maxf(d_mouth, 0.01)
-			var ndl_m := clampf(ln.dot(dir_m) * 0.65 + 0.35, 0.0, 1.0)
-			var vis_m := 1.0
-			for mm in range(1, 5):
-				var mp := lp + dir_m * (d_mouth * float(mm) / 5.0)
-				if mp.z > -1.0:
-					var md := -sdf.eval_cave_void_smooth(mp.x, mp.y, mp.z)
-					vis_m = minf(vis_m, clampf((md + 0.8) / 3.5, 0.0, 1.0))
-			sky_vis = maxf(sky_vis, vis_m * ndl_m * (1.0 - smoothstep(8.0, 34.0, d_mouth)))
-		if lp.z < -1.5:
-			sky_vis = 1.0
-		var pt_ext := CaveSDF.eval_surface_patch_t(lp.x, lp.z)
-		if pt_ext < 1.0:
-			var ix_k := clampi(int(roundf((lp.x - U_MIN) / VOXEL)), 0, gx - 1)
-			var iz_k := clampi(int(roundf((lp.z - S_MIN) / VOXEL)), 0, gz - 1)
-			var kh_lp := karst_2d[iz_k * gx + ix_k]
-			var near_mouth_arch := absf(lp.x) < 10.5 and lp.z > -3.5 and lp.z < 12.5 and lp.y < kh_lp - 0.5
-			if lp.y >= kh_lp - 3.5 and not near_mouth_arch:
-				if sdf.eval_sdf_full(lp.x, lp.y + 4.0, lp.z, kh_lp) < -1.0:
-					sky_vis = 1.0
-					ao = maxf(ao, 0.88)
-
-		# C. Hydrological Wetness (pool shore, waterfall wall, stream grotto bed)
-		var dp_pool: float = Vector2((lp.x - pool_c.x) / (pool_rx + 2.5), (lp.z - pool_c.z) / (pool_rz + 2.5)).length()
-		var pool_wet := (1.0 - smoothstep(0.75, 1.35, dp_pool)) * (1.0 - smoothstep(17.85, 20.5, lp.y))
-		var wf_wet := 1.0 - smoothstep(2.0, 7.5, Vector2(lp.x - CaveLayout.WATERFALL.x, lp.z - CaveLayout.WATERFALL.z).length())
-		var stream_wet := (1.0 - smoothstep(15.5, 18.6, lp.y)) * smoothstep(55.0, 75.0, lp.z) * (1.0 - smoothstep(-46.0, -56.0, lp.x))
-		var wet := clampf(maxf(maxf(pool_wet, wf_wet * 0.85), stream_wet * 0.75), 0.0, 1.0)
+			# C. Hydrological Wetness (pool shore, waterfall wall, stream grotto bed, underground lake shore)
+			var dp_pool: float = Vector2((lp.x - pool_c.x) / (pool_rx + 2.5), (lp.z - pool_c.z) / (pool_rz + 2.5)).length()
+			var pool_wet := (1.0 - smoothstep(0.75, 1.35, dp_pool)) * (1.0 - smoothstep(17.85, 20.5, lp.y))
+			var lake_theta := atan2((lp.z - lake_c_w.z) / maxf(lake_rz_w, 1.0), (lp.x - lake_c_w.x) / maxf(lake_rx_w, 1.0))
+			var dp_lake: float = Vector2((lp.x - lake_c_w.x) / (lake_rx_w + 3.0), (lp.z - lake_c_w.z) / (lake_rz_w + 3.0)).length() / CaveLayout.lake_shore_radius_scale(lake_theta)
+			var lake_wet := (1.0 - smoothstep(0.85, 1.12, dp_lake)) * (1.0 - smoothstep(lake_wy, lake_wy + 1.35, lp.y))
+			var wf_wet := 1.0 - smoothstep(2.0, 7.5, Vector2(lp.x - CaveLayout.WATERFALL.x, lp.z - CaveLayout.WATERFALL.z).length())
+			var stream_wet := (1.0 - smoothstep(15.5, 18.6, lp.y)) * smoothstep(55.0, 75.0, lp.z) * (1.0 - smoothstep(-46.0, -56.0, lp.x))
+			wet = clampf(maxf(maxf(pool_wet, lake_wet * 0.90), maxf(wf_wet * 0.85, stream_wet * 0.75)), 0.0, 1.0)
 
 		# D. 1-Ring Laplacian Curvature (softened on smoothed surface to eliminate contour bands)
 		var curv := 0.5
@@ -521,7 +665,10 @@ func _init() -> void:
 		colors[i] = Color(ao, clampf(sky_vis, 0.0, 1.0), wet, curv)
 		uvs[i] = Vector2(wp.x * 0.12, wp.z * 0.12)
 
-	# 7. Save binary ArrayMesh and ConcavePolygonShape3D resources
+	if incremental_ok:
+		print("Vertex AO/SkyVis reused for %d / %d vertices (recomputed %d in region)" % [ao_reused, vert_count, vert_count - ao_reused])
+
+	# 7. Save binary ArrayMesh, ConcavePolygonShape3D resources, and incremental SDF/vertex cache
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = world_verts
@@ -540,9 +687,23 @@ func _init() -> void:
 	var err_f := ResourceSaver.save(floor_shape, "res://terrain/cave/cave_floor_shape.res", ResourceSaver.FLAG_COMPRESS)
 
 	var wall_shape := ConcavePolygonShape3D.new()
-	wall_shape.backface_collision = false
+	wall_shape.backface_collision = true
 	wall_shape.set_faces(wall_faces)
 	var err_w := ResourceSaver.save(wall_shape, "res://terrain/cave/cave_wall_shape.res", ResourceSaver.FLAG_COMPRESS)
+
+	var fc_out := FileAccess.open_compressed(BAKE_CACHE_PATH, FileAccess.WRITE, FileAccess.COMPRESSION_ZSTD)
+	if fc_out != null:
+		fc_out.store_var({
+			"sig": grid_sig,
+			"karst_2d": karst_2d,
+			"patch_2d": patch_2d,
+			"field": field,
+			"computed_corner": computed_corner,
+			"active_bricks": active_bricks,
+			"vert_cells": vert_cells,
+			"vert_colors": colors,
+		}, true)
+		fc_out.close()
 
 	var dt_total := float(Time.get_ticks_msec() - t0) / 1000.0
 	print("Saved cave_mesh.res (%d), cave_floor_shape.res (%d, %d tris), cave_wall_shape.res (%d, %d tris) in %.2f s" % [

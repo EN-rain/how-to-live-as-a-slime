@@ -6,8 +6,8 @@ extends RefCounted
 ##   y = absolute world height of the walkable floor.
 ## Both the layout map renderer and the P1 SDF Marching-Cubes baker consume this exact data.
 
-## World position of the mouth centre (offset left of the spawn sightline, nestled in a rocky hillside).
-const ORIGIN := Vector3(-72.9, 26.0, -126.9)
+## World position of the mouth centre (visible natural hillside facing Spawn Meadow).
+const ORIGIN := Vector3(-24.0, 27.2, -52.0)
 ## Unit vector INTO the mountain (NNW) and unit vector to the RIGHT (ENE).
 const FWD_XZ := Vector2(-0.425105, -0.905144)
 const RIGHT_XZ := Vector2(0.905144, -0.425105)
@@ -19,11 +19,10 @@ const MOUNTAIN_SURFACE_OVER_HALL := 56.5
 ## Passages: polylines of nodes {p: Vector3(u, floor_y, s), w: clear width, h: ceiling height above floor}.
 const TUNNELS := {
 	"twilight_passage": [
-		{"p": Vector3(0.0, 26.0, -12.0), "w": 12.6, "h": 9.2},
-		{"p": Vector3(0.0, 25.9, -2.0), "w": 11.5, "h": 8.4},
-		{"p": Vector3(-2.0, 25.4, 12.0), "w": 10.6, "h": 8.2},
-		{"p": Vector3(-10.5, 24.2, 26.0), "w": 11.2, "h": 8.8},
-		{"p": Vector3(-22.0, 23.3, 35.5), "w": 12.0, "h": 9.0},
+		{"p": Vector3(0.0, 27.2, -3.5), "w": 11.0, "h": 7.4},
+		{"p": Vector3(-2.0, 25.9, 12.0), "w": 10.8, "h": 7.8},
+		{"p": Vector3(-10.5, 24.4, 26.0), "w": 11.5, "h": 8.8},
+		{"p": Vector3(-22.0, 23.4, 35.5), "w": 12.0, "h": 9.0},
 		{"p": Vector3(-32.0, 23.5, 40.5), "w": 12.8, "h": 9.5},
 	],
 	"hall_throat": [
@@ -39,28 +38,56 @@ const TUNNELS := {
 		{"p": Vector3(0.5, 15.9, 78.0), "w": 9.4, "h": 7.4},
 		{"p": Vector3(2.0, 15.4, 63.0), "w": 9.8, "h": 7.8},
 	],
-	## Deep Descent Passage: branches from South-West Collapse Hall floor and descends into the mountain depths.
+	## Deep Descent Passage: sweeps continuously East then South in a flowing curve from
+	## the distant Geode Pocket down into Abyssal Atrium (far from Collapse Hall Spawn).
 	"deep_descent": [
-		{"p": Vector3(-68.0, 18.5, 76.0), "w": 13.0, "h": 9.5},
-		{"p": Vector3(-76.0, 15.5, 86.0), "w": 12.5, "h": 9.0},
-		{"p": Vector3(-82.0, 12.5, 98.0), "w": 12.0, "h": 9.0},
-		{"p": Vector3(-85.0, 10.2, 110.0), "w": 13.0, "h": 9.5},
+		{"p": Vector3(5.5, 15.1, 52.5), "w": 11.4, "h": 9.2},
+		{"p": Vector3(14.5, 14.5, 49.5), "w": 12.2, "h": 9.2},
+		{"p": Vector3(26.5, 13.6, 55.5), "w": 12.6, "h": 9.4},
+		{"p": Vector3(36.0, 12.5, 70.0), "w": 13.0, "h": 9.5},
+		{"p": Vector3(40.0, 11.2, 92.0), "w": 13.8, "h": 10.0},
+		{"p": Vector3(38.0, 10.1, 112.0), "w": 14.5, "h": 10.2},
 	],
-	## Lake Chasm Passage: sweeps organically from Abyssal Gallery into the vast Subterranean Lake cavern.
+	## Lake Chasm Passage: flowing curve gliding tangentially onto the NNE Organic Lake promenade.
 	"lake_tunnel": [
-		{"p": Vector3(-85.0, 10.2, 110.0), "w": 13.5, "h": 9.5},
-		{"p": Vector3(-72.0, 9.0, 124.0), "w": 14.5, "h": 10.5},
-		{"p": Vector3(-56.0, 8.0, 138.0), "w": 16.0, "h": 11.5},
-		{"p": Vector3(-38.0, 7.2, 150.0), "w": 18.0, "h": 12.5},
+		{"p": Vector3(38.0, 10.1, 112.0), "w": 14.5, "h": 10.2},
+		{"p": Vector3(35.5, 9.4, 121.0), "w": 14.8, "h": 10.6},
+		{"p": Vector3(28.5, 8.6, 129.0), "w": 15.5, "h": 11.2},
+		{"p": Vector3(19.5, 7.9, 134.8), "w": 16.5, "h": 11.8},
+		{"p": Vector3(10.9, 7.5, 141.3), "w": 18.0, "h": 12.5},
 	],
-	## Vault Door Passage: deep descending pilgrimage canyon leading to the monumental Ancient Big Door.
+	## Organic Lagoon Shoreline Promenade: continuous 360-degree dry walkable rock ledge winding around
+	## headlands, the deep southern peninsula, ESE lagoon bay, and NNW grotto cove.
+	"lake_shoreline": [
+		{"p": Vector3(11.6, 7.5, 140.6), "w": 8.6, "h": 7.0},
+		{"p": Vector3(25.7, 7.5, 151.1), "w": 8.6, "h": 7.0},
+		{"p": Vector3(29.2, 7.5, 165.1), "w": 8.6, "h": 7.0},
+		{"p": Vector3(52.4, 7.5, 175.3), "w": 8.6, "h": 7.0},
+		{"p": Vector3(57.8, 7.5, 194.8), "w": 8.6, "h": 7.0},
+		{"p": Vector3(34.3, 7.5, 204.9), "w": 8.6, "h": 7.0},
+		{"p": Vector3(13.7, 7.5, 207.7), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-3.1, 7.5, 202.2), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-19.5, 7.5, 210.7), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-41.6, 7.5, 210.0), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-57.1, 7.5, 197.7), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-54.5, 7.5, 180.3), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-51.6, 7.5, 165.6), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-51.7, 7.5, 146.0), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-32.0, 7.5, 135.1), "w": 8.6, "h": 7.0},
+		{"p": Vector3(-8.4, 7.5, 135.2), "w": 8.6, "h": 7.0},
+		{"p": Vector3(11.6, 7.5, 140.6), "w": 8.6, "h": 7.0},
+	],
+	## Vault Door Passage: sweeping tangential S-curve descending deeper from the WSW lake promenade to the Ancient Big Door.
 	"door_tunnel": [
-		{"p": Vector3(-85.0, 10.2, 110.0), "w": 12.5, "h": 9.5},
-		{"p": Vector3(-98.0, 8.8, 104.0), "w": 12.0, "h": 9.2},
-		{"p": Vector3(-114.0, 7.2, 96.0), "w": 12.0, "h": 9.0},
-		{"p": Vector3(-130.0, 5.5, 86.0), "w": 12.5, "h": 9.2},
-		{"p": Vector3(-148.0, 3.8, 76.0), "w": 13.0, "h": 9.8},
-		{"p": Vector3(-166.0, 2.4, 66.0), "w": 13.5, "h": 10.2},
+		{"p": Vector3(-57.1, 7.5, 197.7), "w": 13.5, "h": 10.5},
+		{"p": Vector3(-69.5, 6.6, 190.5), "w": 12.8, "h": 9.8},
+		{"p": Vector3(-82.0, 5.5, 178.0), "w": 12.5, "h": 9.5},
+		{"p": Vector3(-102.0, 4.5, 162.0), "w": 12.5, "h": 9.5},
+		{"p": Vector3(-120.0, 3.6, 140.0), "w": 12.8, "h": 9.8},
+		{"p": Vector3(-136.0, 2.8, 118.0), "w": 13.0, "h": 10.0},
+		{"p": Vector3(-154.0, 2.3, 100.0), "w": 13.5, "h": 10.4},
+		{"p": Vector3(-168.0, 2.0, 82.0), "w": 14.5, "h": 11.2},
+		{"p": Vector3(-178.0, 2.0, 72.0), "w": 16.0, "h": 12.0},
 	],
 	## Secret route: calibrated to SlimeShapeModel sphere envelope + 0.80m Surface-Nets chord:
 	## - Full slime (scale 1.0): outer sphere diam = 4.08 m -> BLOCKED by ~3.65 m clear width.
@@ -78,25 +105,41 @@ const CHAMBERS := {
 	"breakdown_fork": {"c": Vector3(-32.5, 23.5, 42.0), "rx": 9.5, "rz": 8.5, "h": 11.0},
 	"collapse_hall": {"c": Vector3(-60.0, 18.5, 72.0), "rx": 35.0, "rz": 23.0, "h": 32.0},
 	"geode_pocket": {"c": Vector3(2.0, 15.2, 56.0), "rx": 7.5, "rz": 7.5, "h": 12.0},
-	"abyssal_atrium": {"c": Vector3(-85.0, 10.0, 112.0), "rx": 18.0, "rz": 16.0, "h": 16.0},
-	"underground_lake": {"c": Vector3(-12.0, 6.0, 162.0), "rx": 48.0, "rz": 40.0, "h": 26.0},
-	"vault_sanctum": {"c": Vector3(-176.0, 2.2, 60.0), "rx": 18.0, "rz": 16.0, "h": 16.0},
+	"abyssal_atrium": {"c": Vector3(38.0, 10.1, 112.0), "rx": 16.0, "rz": 15.0, "h": 15.0},
+	"underground_lake": {"c": Vector3(-5.0, 7.5, 178.0), "rx": 44.5, "rz": 34.5, "h": 10.0},
+	"vault_sanctum": {"c": Vector3(-179.0, 2.0, 71.0), "rx": 22.0, "rz": 20.0, "h": 24.0},
 }
 
 ## Geological floor & roof features.
 const MOUND := {"c": Vector3(-62.0, 18.5, 68.0), "r": 12.0, "rise": 3.4}
 const RUBBLE_CREST := {"c": Vector3(-35.0, 23.5, 44.0), "r": 6.8, "rise": 1.6}
-const POOL := {"c": Vector3(-48.0, 16.0, 87.5), "rx": 10.2, "rz": 5.8, "water_y": 17.85}
+const POOL := {"c": Vector3(-48.0, 16.0, 87.5), "rx": 10.2, "rz": 5.8, "water_y": 17.35}
 const SKYLIGHT := {"c": Vector3(-62.0, 56.5, 68.0), "r": 6.4}
-const WATERFALL := Vector3(-52.5, 17.85, 91.5)
+const WATERFALL := Vector3(-52.5, 17.35, 91.5)
 
-## Big Subterranean Lake feature (vast oval body of cavern water).
-const UNDERGROUND_LAKE := {"c": Vector3(-10.0, 5.0, 164.0), "rx": 44.0, "rz": 34.0, "water_y": 6.80}
+## Outflow Stream spline (shared between CaveSystem mesh builder and SlimeMotor water detection).
+const STREAM_CTRL: Array[Vector3] = [
+	Vector3(-42.5, 17.35, 90.2),
+	Vector3(-39.5, 16.92, 92.2),
+	Vector3(-35.0, 16.66, 95.0),
+	Vector3(-27.5, 16.84, 98.2),
+	Vector3(-20.0, 16.16, 99.5),
+	Vector3(-13.0, 16.44, 96.2),
+	Vector3(-7.0, 15.54, 92.5),
+	Vector3(-2.8, 15.66, 85.2),
+	Vector3(0.5, 14.98, 78.0),
+	Vector3(1.5, 15.32, 70.0),
+	Vector3(1.8, 14.60, 63.5),
+]
+
+## Big Subterranean Lake feature (organic expanded multi-cove cavern lagoon + sculpted deep abyssal crystal basin).
+const UNDERGROUND_LAKE := {"c": Vector3(-5.0, 3.6, 178.0), "rx": 44.5, "rz": 34.5, "water_y": 6.40}
+const LAKE_ABYSS_PIT := {"c": Vector3(-14.5, 1.40, 186.5), "rx": 12.5, "rz": 9.8, "yaw": -0.32}
 
 ## Monumental Ancient Big Door at the terminus of Vault Sanctum.
 const ANCIENT_DOOR := {
-	"pos": Vector3(-188.5, 2.2, 55.0),
-	"yaw": 1.05, # Facing inward toward chamber center
+	"pos": Vector3(-190.5, 2.0, 59.5),
+	"yaw": 0.7854, # Facing inward along (+1, +1) toward chamber center (-179, 71)
 	"width": 8.6,
 	"height": 11.0,
 	"depth": 2.4,
@@ -108,10 +151,10 @@ const LEDGE_ROUTE := [
 	Vector3(-73.0, 24.0, 52.0),
 	Vector3(-88.0, 30.2, 61.5),
 	Vector3(-88.5, 36.8, 78.5),
-	Vector3(-76.5, 41.8, 88.5),
-	Vector3(-66.0, 45.0, 80.5),
-	Vector3(-58.5, 48.8, 76.5),
-	Vector3(-54.0, 52.5, 73.0),
+	Vector3(-76.5, 42.6, 88.5),
+	Vector3(-66.0, 47.4, 80.5),
+	Vector3(-58.5, 50.8, 76.5),
+	Vector3(-54.0, 53.4, 73.0),
 	Vector3(-50.0, 56.0, 68.0),
 ]
 const LEDGE_WIDTH := 8.6
@@ -139,9 +182,9 @@ const BENCHMARK_SHOTS := [
 	{
 		"file": "shot_02_entrance_exterior.png",
 		"label": "2. Exterior Overhang Mouth (30 m outside on meadow slope)",
-		"slime": Vector3(0.5, 26.0, -10.0),
-		"cam": Vector3(5.5, 29.5, -28.0),
-		"look": Vector3(-0.5, 28.5, 4.0),
+		"slime": Vector3(0.0, 27.2, -10.0),
+		"cam": Vector3(6.0, 30.8, -28.0),
+		"look": Vector3(-0.5, 29.5, 4.0),
 		"fov": 50.0,
 	},
 	{
@@ -194,19 +237,19 @@ const BENCHMARK_SHOTS := [
 	},
 	{
 		"file": "shot_09_underground_lake.png",
-		"label": "9. Big Underground Lake (Vast cavern lake & karst column)",
-		"slime": Vector3(-38.0, 7.2, 150.0),
-		"cam": Vector3(-46.0, 11.0, 142.0),
-		"look": Vector3(-12.0, 6.5, 162.0),
-		"fov": 56.0,
+		"label": "9. Big Underground Lake (Organic multi-cove lagoon, peninsula & karst islets)",
+		"slime": Vector3(10.9, 7.5, 141.3),
+		"cam": Vector3(15.5, 13.8, 134.0),
+		"look": Vector3(-8.0, 7.2, 174.0),
+		"fov": 62.0,
 	},
 	{
 		"file": "shot_10_ancient_door.png",
 		"label": "10. Ancient Big Door (Monumental carved portal & braziers)",
-		"slime": Vector3(-180.0, 2.2, 59.0),
-		"cam": Vector3(-172.0, 4.5, 64.0),
-		"look": Vector3(-188.5, 3.2, 55.0),
-		"fov": 54.0,
+		"slime": Vector3(-179.5, 2.0, 70.5),
+		"cam": Vector3(-173.0, 4.8, 77.0),
+		"look": Vector3(-190.0, 5.5, 60.0),
+		"fov": 56.0,
 	},
 ]
 
@@ -223,6 +266,24 @@ static func to_local(world: Vector3) -> Vector3:
 	var dx := world.x - ORIGIN.x
 	var dz := world.z - ORIGIN.z
 	return Vector3(dx * RIGHT_XZ.x + dz * RIGHT_XZ.y, world.y, dx * FWD_XZ.x + dz * FWD_XZ.y)
+
+
+static func lake_shore_radius_scale(theta: float) -> float:
+	var peninsula_s := 0.40 * exp(-pow(wrapf(theta - 1.48, -PI, PI) / 0.44, 2.0))
+	var spit_ne := 0.22 * exp(-pow(wrapf(theta + 0.58, -PI, PI) / 0.36, 2.0))
+	var cove_ese := 0.28 * exp(-pow(wrapf(theta - 0.32, -PI, PI) / 0.48, 2.0))
+	var cove_nnw := 0.26 * exp(-pow(wrapf(theta + 2.08, -PI, PI) / 0.50, 2.0))
+	var cove_wsw := 0.16 * exp(-pow(wrapf(theta - 2.35, -PI, PI) / 0.42, 2.0))
+	var ripple := 0.055 * sin(theta * 5.0 + 0.7) + 0.035 * cos(theta * 7.0 - 1.1)
+	return clampf(1.0 + cove_ese + cove_nnw + cove_wsw - peninsula_s - spit_ne + ripple, 0.52, 1.32)
+
+
+static func lake_shore_point(theta: float, radial_mult: float = 1.0) -> Vector2:
+	var lake_c: Vector3 = UNDERGROUND_LAKE["c"]
+	var rx: float = float(UNDERGROUND_LAKE["rx"])
+	var rz: float = float(UNDERGROUND_LAKE["rz"])
+	var sc := lake_shore_radius_scale(theta) * radial_mult
+	return Vector2(lake_c.x + cos(theta) * rx * sc, lake_c.z + sin(theta) * rz * sc)
 
 
 static func world_spawn_facing_yaw() -> float:

@@ -76,7 +76,7 @@ extends Node3D
 		water_rings = clampi(v, 4, 128)
 		_rebuild_if_ready()
 ## Angular segments in the water mesh.
-@export var water_segments: int = 96:
+@export var water_segments: int = 192:
 	set(v):
 		water_segments = clampi(v, 16, 256)
 		_rebuild_if_ready()
@@ -628,10 +628,10 @@ func _find_grid_index(val: float) -> int:
 	return lo
 
 
-const CAVE_SUBDIV_X_MIN := -255.0
-const CAVE_SUBDIV_X_MAX := -15.0
-const CAVE_SUBDIV_Z_MIN := -265.0
-const CAVE_SUBDIV_Z_MAX := -60.0
+const CAVE_SUBDIV_X_MIN := -140.0
+const CAVE_SUBDIV_X_MAX := 5.0
+const CAVE_SUBDIV_Z_MIN := -120.0
+const CAVE_SUBDIV_Z_MAX := -30.0
 
 
 func _get_cave_cell_subdiv(n: int) -> int:
@@ -1032,11 +1032,14 @@ func _find_shoreline_radius(theta: float) -> float:
 
 
 func _build_water_mesh(water_node: MeshInstance3D) -> void:
-	# Optimized contour-hugging annular ocean mesh.
-	# Pre-allocates index buffer and leaves the continent interior 100% hollow.
-	var rings := 12 if Engine.is_editor_hint() else water_rings
-	var segments := 48 if Engine.is_editor_hint() else water_segments
+	# Optimized seamless annular ocean mesh:
+	# Starts safely inland beneath solid highland terrain (r >= 1480m where h >= +20m, well outside cave)
+	# with dense coastal rings across 1480..3250m so steep peninsulas and deep coves never form cutoff chords.
+	var rings := 16 if Engine.is_editor_hint() else maxi(water_rings, 32)
+	var segments := 64 if Engine.is_editor_hint() else maxi(water_segments, 192)
 	var r_out := ocean_outer_radius
+	var r_in := maxf(1480.0, continent_radius - 1120.0)
+	var r_coast_end := maxf(r_in + 600.0, continent_radius + 650.0)
 
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -1049,8 +1052,6 @@ func _build_water_mesh(water_node: MeshInstance3D) -> void:
 	uvs.resize((rings + 1) * row_count)
 	indices.resize(rings * segments * 6)
 
-	var shore_radii := PackedFloat32Array()
-	shore_radii.resize(row_count)
 	var cos_tab := PackedFloat32Array()
 	var sin_tab := PackedFloat32Array()
 	cos_tab.resize(row_count)
@@ -1060,18 +1061,20 @@ func _build_water_mesh(water_node: MeshInstance3D) -> void:
 		var theta := (float(iseg) / float(segments)) * TAU
 		cos_tab[iseg] = cos(theta)
 		sin_tab[iseg] = sin(theta)
-		shore_radii[iseg] = _find_shoreline_radius(theta) - 6.0
 	cos_tab[segments] = cos_tab[0]
 	sin_tab[segments] = sin_tab[0]
-	shore_radii[segments] = shore_radii[0]
 
 	var up_norm := Vector3.UP
 	var idx := 0
 	for ir in range(rings + 1):
 		var t := float(ir) / float(rings)
-		var blend := t * t
+		var r: float
+		if t <= 0.55:
+			r = lerpf(r_in, r_coast_end, t / 0.55)
+		else:
+			var u := (t - 0.55) / 0.45
+			r = lerpf(r_coast_end, r_out, u * u)
 		for iseg in range(row_count):
-			var r := lerpf(shore_radii[iseg], r_out, blend)
 			var x := cos_tab[iseg] * r
 			var z := sin_tab[iseg] * r
 			verts[idx] = Vector3(x, sea_level, z)

@@ -13,7 +13,7 @@ uniform float triplanar_scale : hint_range(0.02, 0.8, 0.01) = 0.26;
 uniform float normal_bump_strength : hint_range(0.0, 2.5, 0.05) = 1.15;
 
 // Exact CaveLayout transform & overworld meadow palette for invisible cave-to-terrain seams
-uniform vec2 cave_origin_xz = vec2(-72.9, -126.9);
+uniform vec2 cave_origin_xz = vec2(-24.0, -52.0);
 uniform vec2 cave_fwd_xz = vec2(-0.425105, -0.905144);
 uniform vec2 cave_right_xz = vec2(0.905144, -0.425144);
 uniform vec2 skylight_local_xz = vec2(-62.0, 68.0);
@@ -30,7 +30,6 @@ varying vec2 v_local_us;
 varying float v_macro_pat;
 varying float v_med_pat;
 varying float v_flow_streak;
-varying float v_ext_meadow;
 
 float hash21(vec2 p) {
 	p = fract(p * vec2(123.34, 456.21));
@@ -91,6 +90,20 @@ vec3 sample_triplanar_nonrepeating(sampler2D tex, vec3 wp, vec3 wn, float sc, fl
 	return mix(col_a, col_b, blend_w);
 }
 
+// Per-pixel exterior meadow coverage so curved Skylight & Entrance collars have crisp,
+// organic transitions without 0.8 m triangle sawteeth while matching terrain.gdshader at seams.
+float eval_ext_meadow(vec3 wp, vec3 wn, vec2 lus, float sky_vis, float med_pat) {
+	float upness = clamp(normalize(wn).y, 0.0, 1.0);
+	float slope_grass = smoothstep(0.43, 0.54, upness);
+	float w = (med_pat - 0.5);
+	float ext_outside_apron = (1.0 - smoothstep(-6.2 + w * 0.6, -2.8 + w * 0.6, lus.y)) * slope_grass;
+	float ext_flanks = smoothstep(7.2 + w * 0.8, 10.4 + w * 0.8, abs(lus.x)) * smoothstep(0.32, 0.72, sky_vis) * slope_grass;
+	float ext_brow_cap = smoothstep(1.2, 5.2, lus.y) * smoothstep(37.5 + w * 0.6, 40.5 + w * 0.6, wp.y) * smoothstep(0.32, 0.72, sky_vis) * slope_grass;
+	float d_sky = length(lus - (skylight_local_xz + vec2(-0.8, 0.0))) - w * 0.45;
+	float ext_sky_rim = smoothstep(8.2, 9.6, d_sky) * smoothstep(51.5, 54.6, wp.y) * slope_grass;
+	return clamp(max(max(ext_outside_apron, ext_flanks), max(ext_brow_cap, ext_sky_rim)), 0.0, 1.0);
+}
+
 void vertex() {
 	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	v_world_nrm = normalize(MODEL_NORMAL_MATRIX * NORMAL);
@@ -102,16 +115,6 @@ void vertex() {
 	v_macro_pat = fbm2(v_world_pos.xz * 0.025);
 	v_med_pat = fbm2(v_world_pos.xz * 0.25 + vec2(5.2, -8.7));
 	v_flow_streak = fbm2(v_local_us * 0.14 + vec2(3.7, -5.1));
-
-	// Compute meadow coverage in vertex shader
-	float upness = clamp(v_world_nrm.y, 0.0, 1.0);
-	float slope_grass = smoothstep(0.55, 0.72, upness);
-	float ext_outside_apron = smoothstep(-11.0, -16.0, v_local_us.y) * slope_grass;
-	float ext_flanks = smoothstep(12.0, 18.0, abs(v_local_us.x)) * smoothstep(0.50, 0.85, v_baked.g) * slope_grass;
-	float ext_mountain_top = smoothstep(46.0, 52.0, v_world_pos.y) * slope_grass;
-	float d_sky = length(v_local_us - skylight_local_xz);
-	float ext_sky_rim = smoothstep(7.5, 12.0, d_sky) * smoothstep(51.0, 55.0, v_world_pos.y) * slope_grass;
-	v_ext_meadow = clamp(max(max(ext_outside_apron, ext_flanks), max(ext_mountain_top, ext_sky_rim)), 0.0, 1.0);
 }
 
 void fragment() {
@@ -136,9 +139,10 @@ void fragment() {
 		float upness = clamp(wn.y, 0.0, 1.0);
 		float ceiling_ness = clamp(-wn.y, 0.0, 1.0);
 		float steepness = clamp(1.0 - abs(wn.y), 0.0, 1.0);
-		float ext_meadow = v_ext_meadow;
+		float ext_meadow = eval_ext_meadow(v_world_pos, wn, v_local_us, sky_vis, v_med_pat);
 
 		vec3 cave_albedo = vec3(0.0);
+		vec3 cave_emission = vec3(0.0);
 		float h_bump = 0.0;
 
 		if (ext_meadow < 0.9999) {
@@ -182,7 +186,7 @@ void fragment() {
 
 			vec3 tint = mix(rock_cool_tint, rock_warm_tint, sky_vis);
 			vec3 strata_tint = mix(vec3(0.84, 0.86, 0.92), vec3(1.12, 1.06, 0.98), strata_sharp);
-			vec3 wall_col = rock_sample * tint * strata_tint * 2.55;
+			vec3 wall_col = rock_sample * tint * strata_tint * 1.92;
 			wall_col *= mix(0.76, 1.22, micro_luma);
 			wall_col *= mix(0.68, 1.04, fracture_crevice);
 			wall_col *= ceiling_pocket;
@@ -193,7 +197,7 @@ void fragment() {
 
 			// Cave floor: bedrock blended with noise-masked sediment gravel patches
 			vec3 floor_rock = mix(rock_sample, floor_sample, sediment_mask * 0.52);
-			vec3 floor_col = floor_rock * mix(vec3(0.56, 0.58, 0.63), vec3(0.78, 0.71, 0.61), sky_vis) * 2.15;
+			vec3 floor_col = floor_rock * mix(vec3(0.56, 0.58, 0.63), vec3(0.78, 0.71, 0.61), sky_vis) * 1.60;
 			floor_col *= mix(0.78, 1.18, micro_luma);
 			floor_col *= mix(0.84, 1.08, strata_sharp);
 
@@ -204,12 +208,45 @@ void fragment() {
 			float moss_mask = smoothstep(0.38, 0.78, sky_vis) * smoothstep(0.52, 0.84, upness) * dry_mask * smoothstep(0.30, 0.70, geo_mask);
 			col = mix(col, moss_tint * (0.75 + 0.40 * rock_sample.g), moss_mask * 0.42);
 
-			// Wetness darkening along pools, underground lake, and grotto stream
-			col *= mix(1.0, 0.52, wet);
+			// Wetness darkening along pools, underground lake shore, and grotto stream
+			col *= mix(1.0, 0.56, wet);
+
+			// Underwater Lake Bathymetry & Projected Seabed Caustics + Deep Crystal Trench Luminescence
+			float in_uw_lake = smoothstep(126.0, 132.0, v_local_us.y) * smoothstep(-70.0, -64.0, v_local_us.x) * (1.0 - smoothstep(6.25, 6.46, v_world_pos.y));
+			if (in_uw_lake > 0.001) {
+				float uw_depth = clamp((6.40 - v_world_pos.y) / 5.10, 0.0, 1.0);
+				// Bathymetric color shift: bright travertine/limestone mineral shoals -> cobalt shelves -> indigo trench walls
+				vec3 shoal_tint = vec3(1.18, 1.24, 1.16);
+				vec3 mid_tint = vec3(0.62, 0.86, 0.96);
+				vec3 abyss_tint = vec3(0.32, 0.52, 0.78);
+				vec3 bathy_tint = mix(shoal_tint, mid_tint, smoothstep(0.06, 0.48, uw_depth));
+				bathy_tint = mix(bathy_tint, abyss_tint, smoothstep(0.48, 0.96, uw_depth));
+				// Crisp contour terrace edge highlight via curvature & rock strata
+				float ledge_hi = smoothstep(0.45, 0.76, curv) * (0.42 + 0.22 * upness);
+				float ridge_band = mix(0.84, 1.18, strata_sharp * (0.45 + 0.55 * fracture_crevice));
+				col = col * bathy_tint * ridge_band * (1.06 + ledge_hi);
+
+				// Warped rotated dual-octave projected seabed caustics across shoals and rocky shelves (zero grid axes)
+				vec2 c_warp = vec2(sin(v_world_pos.z * 0.28 + TIME * 0.11), cos(v_world_pos.x * 0.26 - TIME * 0.09)) * 0.48;
+				vec2 c_p1 = rot2d(v_world_pos.xz * 0.46 + c_warp, 0.4226, 0.9063) + vec2(TIME * 0.18, -TIME * 0.14);
+				vec2 c_p2 = rot2d(v_world_pos.xz * 0.64 - c_warp * 0.8, -0.7193, 0.6947) + vec2(-TIME * 0.15, TIME * 0.19);
+				float cn1 = 1.0 - abs(value_noise(c_p1) * 2.0 - 1.0);
+				float cn2 = 1.0 - abs(value_noise(c_p2) * 2.0 - 1.0);
+				float bed_caust = pow(clamp(cn1 * cn2, 0.0, 1.0), 2.6) * (1.0 - smoothstep(0.28, 0.95, uw_depth)) * clamp(upness * 1.15 + 0.25, 0.0, 1.0) * in_uw_lake;
+				col += vec3(0.14, 0.42, 0.46) * bed_caust * 0.52;
+				cave_emission += vec3(0.05, 0.22, 0.28) * bed_caust * 0.38;
+
+				// Bioluminescent sapphire-cyan radiance from the Deep Abyssal Crystal Bundle at (-14.5, 186.5)
+				float d_pit = length((v_local_us - vec2(-14.5, 186.5)) / vec2(14.5, 11.5));
+				float pit_glow = exp(-(d_pit * d_pit) * 1.75) * smoothstep(5.4, 2.2, v_world_pos.y) * in_uw_lake;
+				cave_emission += vec3(0.06, 0.34, 0.48) * pit_glow * (0.58 + 0.42 * smoothstep(0.30, 0.72, curv));
+			}
+
 			cave_albedo = col * ridge_shade * mix(0.52, 1.0, ao);
 		}
 
 		vec3 final_albedo = cave_albedo;
+		vec3 final_emission = cave_emission * (1.0 - ext_meadow);
 		float final_ao = ao;
 		float final_ao_affect = 0.68;
 		float final_rough = mix(0.86, 0.34, wet);
@@ -226,7 +263,7 @@ void fragment() {
 			final_ao = mix(ao, 1.0, ext_meadow);
 			final_ao_affect = mix(0.68, 0.0, ext_meadow);
 			final_rough = mix(final_rough, 0.92, ext_meadow);
-			final_spec = mix(final_spec, 0.0, ext_meadow);
+			final_spec = mix(final_spec, 0.5, ext_meadow);
 		}
 
 		// Mikkelsen screen-space derivative 3D normal perturbation:
@@ -247,6 +284,7 @@ void fragment() {
 		}
 
 		ALBEDO = final_albedo;
+		EMISSION = final_emission;
 		AO = final_ao;
 		AO_LIGHT_AFFECT = final_ao_affect;
 		ROUGHNESS = final_rough;
@@ -256,23 +294,29 @@ void fragment() {
 }
 
 void light() {
+	float sky_vis_l = clamp(v_baked.g, 0.0, 1.0);
+	float ext_m = eval_ext_meadow(v_world_pos, v_world_nrm, v_local_us, sky_vis_l, v_med_pat);
+
 	// Block outdoor directional sunlight from leaking through solid underground mountain rock
 	// (even when directional shadows are disabled on the Low quality preset!)
 	float sun_gate = 1.0;
 	if (LIGHT_IS_DIRECTIONAL) {
-		float sky_open = smoothstep(0.08, 0.58, clamp(v_baked.g, 0.0, 1.0));
-		sun_gate = max(sky_open, clamp(v_ext_meadow, 0.0, 1.0));
+		float sky_open = smoothstep(0.08, 0.58, sky_vis_l);
+		sun_gate = max(sky_open, ext_m);
 	}
 
 	float ndotl = dot(NORMAL, LIGHT);
-	float diff_wrap = max(0.0, (ndotl + 0.18) / 1.18);
-	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION * diff_wrap * sun_gate / PI;
+	float diff_wrap_cave = max(0.0, (ndotl + 0.18) / 1.18);
+	float diff_wrap_meadow = clamp((ndotl + ROUGHNESS) / ((1.0 + ROUGHNESS) * (1.0 + ROUGHNESS)), 0.0, 1.0);
+	float diff_wrap = mix(diff_wrap_cave, diff_wrap_meadow, ext_m);
+	DIFFUSE_LIGHT += LIGHT_COLOR * ATTENUATION * diff_wrap * sun_gate / PI;
 
-	if (ndotl > 0.0 && sun_gate > 0.01) {
+	float spec_mask = 1.0 - ext_m;
+	if (ndotl > 0.0 && sun_gate > 0.01 && spec_mask > 0.001) {
 		vec3 half_vec = normalize(LIGHT + VIEW);
 		float ndoth = max(0.0, dot(NORMAL, half_vec));
 		float spec_pow = mix(8.0, 64.0, 1.0 - ROUGHNESS);
-		float spec_val = pow(ndoth, spec_pow) * 0.12;
+		float spec_val = pow(ndoth, spec_pow) * 0.12 * spec_mask;
 		SPECULAR_LIGHT += LIGHT_COLOR * ATTENUATION * ndotl * spec_val * sun_gate;
 	}
 }

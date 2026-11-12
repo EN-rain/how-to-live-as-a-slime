@@ -107,10 +107,12 @@ func _evaluate_and_apply(blend_rate: float) -> void:
 	var under_rim := 1.0 - smoothstep(47.5, 56.0, cl.y)
 	var target_cave := clampf(in_void * past_mouth * under_rim, 0.0, 1.0)
 
-	# Warm Collapse Hall vs Cool Grotto / Geode zone modulation
+	# Warm Collapse Hall / Sanctum vs Cool Grotto / Geode / East Descent / Lake zone modulation
 	var dist_to_grotto_x := smoothstep(-40.0, -14.0, cl.x) * smoothstep(68.0, 88.0, cl.z)
 	var in_geode := (1.0 - smoothstep(6.0, 14.0, Vector2(cl.x - 2.0, cl.z - 56.0).length())) * smoothstep(32.0, 12.0, cl.y)
-	var target_grotto := clampf(maxf(dist_to_grotto_x, in_geode) * target_cave, 0.0, 1.0)
+	var in_east_descent := smoothstep(4.0, 12.0, cl.x) * smoothstep(40.0, 52.0, cl.z) * smoothstep(26.0, 12.0, cl.y)
+	var sanctum_atten := 1.0 - smoothstep(-140.0, -175.0, cl.x) * 0.65
+	var target_grotto := clampf(maxf(maxf(dist_to_grotto_x, in_geode), in_east_descent) * target_cave * sanctum_atten, 0.0, 1.0)
 
 	# Attenuate exterior directional Sun rapidly inside the subterranean cave so unshadowed
 	# sunlight never leaks through the underground mountain roof (SkylightKeySpot provides the skylight beam!)

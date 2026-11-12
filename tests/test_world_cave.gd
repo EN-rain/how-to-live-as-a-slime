@@ -38,6 +38,9 @@ func _steer_along_waypoints(slime: Slime, local_pts: Array, max_total_steps: int
 		var dir := Vector3(dx / dist_xz, 0.0, dz / dist_xz)
 		slime.motor.velocity = dir * speed
 		slime._physics_process(1.0 / 60.0)
+	slime.motor.velocity = Vector3.ZERO
+	for _settle in 6:
+		slime._physics_process(1.0 / 60.0)
 
 
 func _run() -> void:
@@ -284,9 +287,24 @@ func _run() -> void:
 		return
 	print("PASS: Geode Heart collectible grants +8.0 m³ and marks collected!")
 
-	# 7. Test Deep Descent Route: Collapse Hall floor -> Deep Descent tunnel -> Abyssal Atrium
+	# 7. Test Deep Descent Route (relocated far from Spawn): Geode Pocket -> East Deep Descent -> Abyssal Atrium
 	var descent_nodes: Array = CaveLayout.TUNNELS["deep_descent"]
-	var descent_pts: Array = [Vector3(-66.0, 18.5, 74.0)]
+	var spawn_to_descent := Vector2(
+		(descent_nodes[0]["p"] as Vector3).x - CaveLayout.SPAWN.x,
+		(descent_nodes[0]["p"] as Vector3).z - CaveLayout.SPAWN.z
+	).length()
+	print("Distance from Spawn to Lower Cave Entrance = %.2f m (Must be >= 45.0 m)" % spawn_to_descent)
+	if spawn_to_descent < 45.0:
+		print("FAIL: Lower cave entrance is still too close to player Spawn (%.2f m < 45.0 m)!" % spawn_to_descent)
+		quit(18)
+		return
+	var old_pit_sdf := CaveSystem.get_sdf().eval_cave_void_smooth(-78.0, 15.8, 86.0)
+	if old_pit_sdf <= 0.0:
+		print("FAIL: Old SW Collapse Hall descent pit was not sealed back to solid rock (sdf=%.2f)!" % old_pit_sdf)
+		quit(18)
+		return
+
+	var descent_pts: Array = [geode_c]
 	for n: Dictionary in descent_nodes:
 		descent_pts.append(n["p"] as Vector3)
 	var atrium_dict: Dictionary = CaveLayout.CHAMBERS["abyssal_atrium"]
@@ -297,64 +315,88 @@ func _run() -> void:
 	for _i in 6:
 		slime._physics_process(1.0 / 60.0)
 
-	_steer_along_waypoints(slime, descent_pts, 1200, 10.5)
+	_steer_along_waypoints(slime, descent_pts, 1500, 10.5)
 	var atrium_local := CaveLayout.to_local(slime.global_position)
 	var dist_to_atrium := Vector2(atrium_local.x - atrium_c.x, atrium_local.z - atrium_c.z).length()
 	print("Deep Descent Traversal -> Reached local=(%.2f, y=%.2f, %.2f), dist to Atrium=%.2f m, on_ground=%s" % [
 		atrium_local.x, slime.global_position.y, atrium_local.z, dist_to_atrium, str(slime.motor.on_ground)
 	])
 	if dist_to_atrium > 6.0 or slime.global_position.y > 13.5 or not slime.motor.on_ground:
-		print("FAIL: Slime could not descend from Collapse Hall into Abyssal Atrium!")
+		print("FAIL: Slime could not descend from Geode Pocket into Abyssal Atrium!")
 		quit(18)
 		return
-	print("PASS: Deep Descent route from Collapse Hall down into Abyssal Atrium 100% navigable!")
+	print("PASS: Deep Descent route from distant Geode Pocket down into Abyssal Atrium 100% navigable!")
 
-	# 8. Test Underground Lake Route: Abyssal Atrium -> Lake Tunnel -> Underground Lake Shore
+	# 8. Test Underground Lake Route & 360° Circular Shoreline Pathway:
+	#    Abyssal Atrium -> Lake Tunnel -> Full 360° Dry Promenade Walk
 	var lake_nodes: Array = CaveLayout.TUNNELS["lake_tunnel"]
+	var shoreline_nodes: Array = CaveLayout.TUNNELS["lake_shoreline"]
 	var lake_pts: Array = [atrium_c]
 	for n: Dictionary in lake_nodes:
 		lake_pts.append(n["p"] as Vector3)
-	var lake_shore_pt := Vector3(-36.0, 7.2, 148.0)
-	lake_pts.append(lake_shore_pt)
+	for n: Dictionary in shoreline_nodes:
+		lake_pts.append(n["p"] as Vector3)
 
 	_place_slime_on_cave_floor(slime, terrain, lake_pts[0] as Vector3, 1.0)
 	for _i in 6:
 		slime._physics_process(1.0 / 60.0)
 
-	_steer_along_waypoints(slime, lake_pts, 1400, 10.5)
+	var min_shore_y := 999.0
+	var idx_l := 1
+	var after_tunnel := lake_nodes.size() + 1
+	for _s in 4200:
+		if idx_l >= lake_pts.size():
+			break
+		var target_local_l: Vector3 = lake_pts[idx_l]
+		var target_w_l := CaveLayout.to_world(target_local_l)
+		var dx_l := target_w_l.x - slime.global_position.x
+		var dz_l := target_w_l.z - slime.global_position.z
+		var dist_xz_l := sqrt(dx_l * dx_l + dz_l * dz_l)
+		if dist_xz_l < 2.6:
+			idx_l += 1
+			continue
+		slime.motor.velocity = Vector3(dx_l / dist_xz_l, 0.0, dz_l / dist_xz_l) * 11.5
+		slime._physics_process(1.0 / 60.0)
+		if idx_l >= after_tunnel:
+			min_shore_y = minf(min_shore_y, slime.global_position.y - slime.model.rest_half_height * slime.slime_scale)
+	slime.motor.velocity = Vector3.ZERO
+	for _settle_l in 6:
+		slime._physics_process(1.0 / 60.0)
+
 	var lake_end_local := CaveLayout.to_local(slime.global_position)
-	var dist_to_shore := Vector2(lake_end_local.x - lake_shore_pt.x, lake_end_local.z - lake_shore_pt.z).length()
-	print("Underground Lake Traversal -> Reached local=(%.2f, y=%.2f, %.2f), dist to shore=%.2f m, on_ground=%s" % [
-		lake_end_local.x, slime.global_position.y, lake_end_local.z, dist_to_shore, str(slime.motor.on_ground)
+	var shore_end_pt: Vector3 = shoreline_nodes[shoreline_nodes.size() - 1]["p"]
+	var dist_to_shore := Vector2(lake_end_local.x - shore_end_pt.x, lake_end_local.z - shore_end_pt.z).length()
+	print("Underground Lake + 360° Shoreline Traversal -> Reached local=(%.2f, y=%.2f, %.2f), min_foot_y=%.2f (water_y=6.40), dist to loop end=%.2f m, wp=%d/%d" % [
+		lake_end_local.x, slime.global_position.y, lake_end_local.z, min_shore_y, dist_to_shore, idx_l, lake_pts.size()
 	])
-	if dist_to_shore > 6.0 or slime.global_position.y > 12.0 or not slime.motor.on_ground:
-		print("FAIL: Slime could not reach the Underground Lake shore from Abyssal Atrium!")
+	if idx_l < lake_pts.size() or dist_to_shore > 6.5 or min_shore_y < 6.45 or not slime.motor.on_ground:
+		print("FAIL: Slime could not walk the full 360° Underground Lake circular shoreline pathway!")
 		quit(19)
 		return
-	print("PASS: Underground Lake route from Abyssal Atrium to Lake shore 100% navigable!")
+	print("PASS: Underground Lake route & full 360° dry circular shoreline pathway 100% navigable!")
 
-	# 9. Test Ancient Big Door Route & Door Obstacle Collision Block (Deeper Sanctum Descent)
+	# 9. Test Ancient Big Door Route (WNW Lake Promenade -> Curved S-Curve Door Tunnel -> Vault Sanctum -> Door Block)
 	var door_nodes: Array = CaveLayout.TUNNELS["door_tunnel"]
-	var door_pts: Array = [atrium_c]
+	var door_pts: Array = []
 	for n: Dictionary in door_nodes:
 		door_pts.append(n["p"] as Vector3)
 	var door_info: Dictionary = CaveLayout.ANCIENT_DOOR
 	var door_pos: Vector3 = door_info["pos"]
-	var door_approach_pt := Vector3(door_pos.x + 6.0, door_pos.y + 0.3, door_pos.z + 4.0)
+	var door_approach_pt := Vector3(-184.5, 2.0, 65.5)
 	door_pts.append(door_approach_pt)
 
 	_place_slime_on_cave_floor(slime, terrain, door_pts[0] as Vector3, 1.0)
 	for _i in 6:
 		slime._physics_process(1.0 / 60.0)
 
-	_steer_along_waypoints(slime, door_pts, 1800, 10.5)
+	_steer_along_waypoints(slime, door_pts, 2600, 11.0)
 	var door_end_local := CaveLayout.to_local(slime.global_position)
 	var dist_to_door_approach := Vector2(door_end_local.x - door_approach_pt.x, door_end_local.z - door_approach_pt.z).length()
-	print("Ancient Big Door Traversal -> Reached local=(%.2f, y=%.2f, %.2f), dist to approach=%.2f m" % [
-		door_end_local.x, slime.global_position.y, door_end_local.z, dist_to_door_approach
+	print("Ancient Big Door Traversal -> Reached local=(%.2f, y=%.2f, %.2f), dist to approach=%.2f m, on_ground=%s" % [
+		door_end_local.x, slime.global_position.y, door_end_local.z, dist_to_door_approach, str(slime.motor.on_ground)
 	])
-	if dist_to_door_approach > 6.0 or not slime.motor.on_ground:
-		print("FAIL: Slime could not navigate from Abyssal Atrium to Ancient Big Door approach!")
+	if dist_to_door_approach > 6.0 or slime.global_position.y > 6.0 or not slime.motor.on_ground:
+		print("FAIL: Slime could not navigate from Lake Promenade down curved S-curve tunnel to Ancient Big Door!")
 		quit(20)
 		return
 
@@ -374,6 +416,120 @@ func _run() -> void:
 		quit(21)
 		return
 	print("PASS: Ancient Big Door obstacle collider successfully blocks actor traversal!")
+
+	# 10. Passage Corner Push Test (verifies zero wall glitch / corner leak on LAYER_OBSTACLES)
+	var corner_probes := [
+		{"name": "split_crawlway_corner_L", "start": Vector3(-27.0, 23.5, 42.5), "scale": 0.68, "deg": 45.0},
+		{"name": "split_crawlway_corner_R", "start": Vector3(-27.0, 23.5, 42.5), "scale": 0.68, "deg": -135.0},
+		{"name": "twilight_bend_corner", "start": Vector3(-10.5, 24.4, 26.0), "scale": 1.0, "deg": 65.0},
+		{"name": "door_tunnel_jamb_corner", "start": Vector3(-184.5, 2.0, 65.5), "scale": 1.0, "deg": 200.0},
+	]
+	var space_state := slime.get_world_3d().direct_space_state
+	for cp: Dictionary in corner_probes:
+		_place_slime_on_cave_floor(slime, terrain, cp["start"] as Vector3, float(cp["scale"]))
+		var dir_loc := Vector3(cos(deg_to_rad(float(cp["deg"]))), 0.0, sin(deg_to_rad(float(cp["deg"]))))
+		var dir_w := (CaveLayout.to_world(dir_loc) - CaveLayout.ORIGIN)
+		dir_w.y = 0.0
+		dir_w = dir_w.normalized()
+		for step in 120:
+			var wob := sin(float(step) * 0.35) * 0.30
+			slime.motor.velocity = dir_w.rotated(Vector3.UP, wob) * slime.tuning.run_speed
+			slime._physics_process(1.0 / 60.0)
+			var cl_f := CaveLayout.to_local(slime.motor.core_sweep_origin())
+			var sdf_f := CaveSystem.get_sdf().eval_sdf_full(cl_f.x, cl_f.y, cl_f.z, CaveSystem.GEOFENCE_OVERWORLD_H)
+			if sdf_f > 0.35:
+				print("FAIL: Corner glitch in %s at step=%d, sdf_full=%.3f, local=%s" % [cp["name"], step, sdf_f, str(cl_f)])
+				quit(22)
+				return
+			var pq := PhysicsShapeQueryParameters3D.new()
+			pq.shape = slime.motor.core_sphere_shape()
+			pq.collision_mask = 4
+			pq.transform = Transform3D(Basis.IDENTITY, slime.motor.core_sweep_origin())
+			var pairs := space_state.collide_shape(pq, 8)
+			var max_pen := 0.0
+			for pi in (pairs.size() / 2):
+				max_pen = maxf(max_pen, (pairs[pi * 2 + 1] - pairs[pi * 2]).length())
+			if max_pen > 0.002:
+				print("FAIL: Core sphere penetrated LAYER_OBSTACLES in corner %s at step=%d (depth=%.4f m)" % [cp["name"], step, max_pen])
+				quit(22)
+				return
+	print("PASS: All cave passage corner wall-grinding probes stayed strictly outside solid rock!")
+
+	# 11. Organic Multi-Cove Lake Geometry Check (non-circular asymmetry + protruding rock islets)
+	var min_r_sc := 999.0
+	var max_r_sc := 0.0
+	for k in 72:
+		var th := (float(k) / 72.0) * TAU - PI
+		var sc := CaveLayout.lake_shore_radius_scale(th)
+		min_r_sc = minf(min_r_sc, sc)
+		max_r_sc = maxf(max_r_sc, sc)
+	var asym_ratio := max_r_sc / maxf(min_r_sc, 0.01)
+	print("Organic Lake Contour Radius Ratio: max/min = %.2f (min=%.2f, max=%.2f, required >= 1.80)" % [asym_ratio, min_r_sc, max_r_sc])
+	if asym_ratio < 1.80:
+		print("FAIL: Underground Lake contour is still too circular (ratio %.2f < 1.80)!" % asym_ratio)
+		quit(23)
+		return
+	var se_reef_y := terrain.sample_spawn_floor_y(CaveLayout.to_world(Vector3(10.0, 9.0, 176.0)).x, CaveLayout.to_world(Vector3(10.0, 9.0, 176.0)).z, 8.2)
+	var nw_stack_y := terrain.sample_spawn_floor_y(CaveLayout.to_world(Vector3(-17.0, 11.0, 167.5)).x, CaveLayout.to_world(Vector3(-17.0, 11.0, 167.5)).z, 10.0)
+	if se_reef_y < 6.55 or nw_stack_y < 6.80:
+		print("FAIL: Asymmetric lake islets do not stand dry above water_y=6.40 (reef=%.2f, stack=%.2f)!" % [se_reef_y, nw_stack_y])
+		quit(23)
+		return
+	print("PASS: Non-circular multi-cove lake contour & asymmetric karst islets verified!")
+
+	# 12. Water-Slime Hydrodynamic Interaction (Buoyancy, Splash, Wetness & Stream Current)
+	var deep_lagoon_w := CaveLayout.to_world(Vector3(-10.0, 7.8, 162.0))
+	slime.slime_scale = 1.0
+	slime.target_scale = 1.0
+	slime._resolve_model(0.0, 1.0, 1.0)
+	slime.global_position = Vector3(deep_lagoon_w.x, 7.8, deep_lagoon_w.z)
+	slime.motor.velocity = Vector3.ZERO
+	slime.motor.vertical_vel = -5.5
+	slime.motor.on_ground = false
+	slime.motor.in_water = false
+	slime.motor.water_wetness = 0.0
+	slime._sync_proxy()
+	var saw_splash := false
+	for _wt in 55:
+		slime._physics_process(1.0 / 60.0)
+		if slime.motor.just_splashed:
+			saw_splash = true
+	print("Lake Water Interaction -> in_water=%s submersion=%.2f wetness=%.2f y=%.2f splash_triggered=%s" % [
+		str(slime.motor.in_water), slime.motor.water_submersion, slime.motor.water_wetness, slime.global_position.y, str(saw_splash)
+	])
+	if not slime.motor.in_water or slime.motor.water_submersion < 0.20 or slime.motor.water_wetness < 0.70 or not saw_splash:
+		print("FAIL: Water-slime immersion, splash trigger, or wetness state failed in Underground Lake!")
+		quit(24)
+		return
+	var stream_w := CaveLayout.to_world(Vector3(-20.0, 17.3, 99.5))
+	var stream_info := CaveSystem.sample_water_at(stream_w, terrain.sample_spawn_floor_y(stream_w.x, stream_w.z, 17.5), true)
+	if not bool(stream_info["in_water"]) or (stream_info["flow_vel"] as Vector3).length() < 0.5:
+		print("FAIL: Stream Grotto current detection failed: %s" % str(stream_info))
+		quit(24)
+		return
+	print("PASS: Water-slime buoyancy, splash event, wet state & stream flow current verified!")
+
+	# 13. Non-Flat Lake Bathymetry, Deep Abyssal Pit & Submerged Crystal Shard Bundle Check
+	var pit_c: Vector3 = CaveLayout.LAKE_ABYSS_PIT["c"]
+	var pit_w := CaveLayout.to_world(pit_c)
+	var pit_floor_y := terrain.sample_spawn_floor_y(pit_w.x, pit_w.z, 5.5)
+	var shoal_w := CaveLayout.to_world(Vector3(16.0, 5.5, 166.0))
+	var shoal_floor_y := terrain.sample_spawn_floor_y(shoal_w.x, shoal_w.z, 6.2)
+	var bed_relief := absf(shoal_floor_y - pit_floor_y)
+	var shards_node := cave.get_node_or_null("CaveAbyssalShards") as MeshInstance3D
+	if shards_node == null or shards_node.mesh == null:
+		print("FAIL: Missing CaveAbyssalShards centerpiece bundle in Deep Abyssal Pit!")
+		quit(25)
+		return
+	var shards_top_y := shards_node.position.y + shards_node.get_aabb().position.y + shards_node.get_aabb().size.y
+	print("Lake Bathymetry & Abyssal Shards -> pit_floor=%.2f m, shoal_floor=%.2f m, relief=%.2f m, shards_top=%.2f m (water_y=6.40)" % [
+		pit_floor_y, shoal_floor_y, bed_relief, shards_top_y
+	])
+	if pit_floor_y > 2.30 or bed_relief < 1.50 or shards_top_y >= 5.50:
+		print("FAIL: Abyssal pit depth (<=2.30), bathymetric relief (>=1.50), or shard clearance (<5.50) out of spec!")
+		quit(25)
+		return
+	print("PASS: Non-flat lake bathymetry, deep crystal pit & submerged shard bundle verified!")
 
 	main.free()
 	print("--- ALL BAKED SDF CAVE TESTS PASSED 100%! ---")

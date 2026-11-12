@@ -118,6 +118,12 @@ uniform float uSplitNeckRadius = 0.0;
 // screen texture once instead of four times. Never changes the silhouette.
 uniform float uShaderLOD = 0.0;
 
+// Water-slime interaction (driven by Slime.gd every tick when in/freshly out of water)
+uniform float uWaterSubmersion = 0.0;
+uniform float uWaterY = -9999.0;
+uniform float uWetness = 0.0;
+uniform vec3 uWaterVel = vec3(0.0);
+
 uniform sampler2D tRefraction : hint_screen_texture, repeat_disable, filter_linear;
 
 varying vec3 vWorldPosition;
@@ -502,6 +508,18 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 			p += dent * solidAmt;
 		}
 	}
+	// Gentle hydrostatic waterline ripple & buoyant belly tuck (strictly bounded within uSkinLocal)
+	if (uWaterSubmersion > 0.01) {
+		float h01 = clamp((p.y / uRefRadius + 1.0) * 0.5, 0.0, 1.0);
+		float h_spd = length(uWaterVel.xz);
+		float swim_rip = sin(pos.x * 3.4 + t * 4.8) * cos(pos.z * 3.4 - t * 4.1);
+		float tuck = smoothstep(0.32, 0.0, h01) * 0.045 * uWaterSubmersion;
+		p.y += min(tuck, uSkinLocal * 0.55);
+		float d_lip = (h01 - 0.36) / 0.16;
+		float lip_band = exp(-(d_lip * d_lip));
+		float radial_wobble = min(lip_band * (0.022 + 0.014 * swim_rip * clamp(h_spd * 0.25, 0.2, 1.0)) * uWaterSubmersion, uSkinLocal * 0.45);
+		p.xz += normalize(p.xz + vec2(0.0001)) * radial_wobble;
+	}
 	p.y = max(p.y, groundFloor);
 
 	return p;
@@ -688,6 +706,35 @@ void fragment() {
 	vec2 eq = vec2((abs(eyeYaw) - uEyeSeparation) / eyeSz.x, (eyeElev - targetElev) / (eyeSz.y * uBlink));
 	float eyeMask = 1.0 - smoothstep(0.82, 1.0, length(eq));
 	color = mix(color, lin2srgb(uEyeColor), eyeMask * 0.97);
+
+	// Water-slime surface interaction: refractive submerged caustics, thin glinting meniscus lip & glossy wet sheen
+	if (uWaterSubmersion > 0.005 && uWaterY > -9000.0) {
+		float h_spd = length(uWaterVel.xz);
+		float waveY = uWaterY + sin(vWorldPosition.x * 2.4 + t * 2.8) * cos(vWorldPosition.z * 2.4 - t * 2.2) * (0.030 + clamp(h_spd * 0.008, 0.0, 0.035));
+		float distFromWater = vWorldPosition.y - waveY;
+		float underMask = 1.0 - smoothstep(-0.04, 0.03, distFromWater);
+
+		// Soft volumetric underwater refraction glow (clean translucent jelly scattering — zero curly contour lines)
+		float submergedDepth = clamp(-distFromWater, 0.0, 1.2);
+		float bokehGlow = pow(clamp(0.5 + 0.5 * snoise(vWorldPosition * 1.35 + vec3(t * 0.42, -t * 0.34, t * 0.28)), 1e-4, 1.0), 3.0);
+		color = mix(
+			color,
+			mix(vec3(0.06, 0.38, 0.62), vec3(0.38, 0.86, 0.96), bokehGlow * 0.55),
+			underMask * clamp(0.16 + submergedDepth * 0.16 + bokehGlow * 0.12, 0.0, 0.38) * clamp(uWaterSubmersion * 1.4, 0.25, 1.0)
+		);
+
+		// Razor-crisp noise-eroded waterline meniscus sheen
+		float menBreak = smoothstep(-0.15, 0.45, sin(vWorldPosition.x * 7.5 + vWorldPosition.z * 6.8 - t * 3.6) * 0.5 + n1 * 0.7);
+		float men_d = distFromWater / 0.026;
+		float menBand = exp(-(men_d * men_d)) * clamp(uWaterSubmersion * 3.5, 0.0, 1.0) * menBreak;
+		color = mix(color, vec3(0.84, 0.97, 1.0), clamp(menBand * 0.62, 0.0, 0.72));
+	}
+	if (uWetness > 0.01) {
+		float wetRim = pow(max(1.0 - ndotv, 1e-4), 1.9) * 0.58 + pow(max(worldNormal.y, 1e-4), 2.8) * 0.34;
+		float wetSpec = smoothstep(0.72, 0.97, n1 * 0.24 + 0.76 * max(0.0, dot(reflect(-viewDir, normal), normalize(vec3(0.42, 0.86, 0.34)))));
+		float droplets = smoothstep(0.78, 0.93, snoise(vLocalPos * 6.5 + vec3(0.0, t * 0.45, 0.0))) * smoothstep(-0.1, 0.7, worldNormal.y);
+		color += vec3(0.36, 0.80, 0.98) * (wetRim * 0.22 + wetSpec * 0.42 + droplets * 0.28) * uWetness;
+	}
 
 	float celOutline = smoothstep(0.84, 0.95, 1.0 - ndotv);
 	vec3 outlineColor = mix(lin2srgb(uOutlineDay), lin2srgb(uOutlineNight), uNightMode);

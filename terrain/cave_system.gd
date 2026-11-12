@@ -19,19 +19,35 @@ static var _cached_props_data: Dictionary = {}
 static var _cached_pebble_mesh: Mesh = null
 static var _cached_speleothem_mesh: Mesh = null
 static var _cached_crystal_mesh: Mesh = null
+static var _cached_abyssal_bundle_mesh: ArrayMesh = null
 static var _cached_water_meshes: Dictionary = {}
+static var _crystal_striation_tex: ImageTexture = null
+static var _crystal_interior_tex: ImageTexture = null
 
 var _cached_rock_mat: ShaderMaterial = null
 var _grass_shader_mat: ShaderMaterial = null
 var _flora_grass_node: MultiMeshInstance3D = null
 var _slime_ref: Node3D = null
+var _pool_water_mat: ShaderMaterial = null
+var _lake_water_mat: ShaderMaterial = null
+var _stream_water_mat: ShaderMaterial = null
+var _ocean_water_mat: ShaderMaterial = null
 
 var _geode_reward_node: Node3D = null
-var _geode_reward_mesh: MeshInstance3D = null
+var _geode_reward_mesh: Node3D = null
 var _geode_reward_area: Area3D = null
 var _geode_reward_collected: bool = false
 var _geode_spin_t: float = 0.0
+var _geode_orb_satellites: Array[Node3D] = []
 var _reverb_bus_idx: int = -1
+
+var _wake_points: Array[Vector4] = []
+var _wake_head: int = 0
+var _last_wake_pos := Vector3(9999.0, -9999.0, 9999.0)
+var _wake_emit_timer := 0.0
+var _water_ripple_submersion := 0.0
+var _water_ripple_pos := Vector3(9999.0, -9999.0, 9999.0)
+var _water_ripple_rad := 1.6
 
 
 static func get_sdf() -> CaveSDF:
@@ -45,10 +61,10 @@ static func get_sdf() -> CaveSDF:
 # ==============================================================================
 
 static func apply_overworld_mountain_and_plaza(x: float, z: float, base_land_h: float, _terrain_noise: FastNoiseLite) -> float:
-	if x < -320.0 or x > 45.0 or z < -350.0 or z > -60.0:
+	if x < -440.0 or x > 170.0 or z < -410.0 or z > 120.0:
 		return base_land_h
 	var cl := CaveLayout.to_local(Vector3(x, 0.0, z))
-	if cl.x < -165.0 or cl.x > 55.0 or cl.z < -62.0 or cl.z > 190.0:
+	if cl.x < -310.0 or cl.x > 175.0 or cl.z < -45.0 or cl.z > 310.0:
 		return base_land_h
 	return CaveSDF.eval_karst_hill_height(cl.x, cl.z, base_land_h)
 
@@ -58,24 +74,24 @@ static func is_quad_in_portal_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v
 
 
 static func is_in_portal_scatter_exclusion(x: float, z: float, is_grass: bool = false) -> bool:
-	if x < -240.0 or x > 15.0 or z < -275.0 or z > -80.0:
+	if x < -150.0 or x > 30.0 or z < -155.0 or z > 30.0:
 		return false
 	return CaveSDF.is_in_overworld_scatter_exclusion(x, z, is_grass)
 
 
 static func is_subterranean_or_cutout(x: float, z: float, foot_y: float, overworld_h: float) -> bool:
-	if x < -380.0 or x > 60.0 or z < -380.0 or z > 15.0:
+	if x < -350.0 or x > 85.0 or z < -330.0 or z > 105.0:
 		return false
 	var cl := CaveLayout.to_local(Vector3(x, foot_y, z))
-	if cl.x < -210.0 or cl.x > 45.0 or cl.z < -35.0 or cl.z > 214.0:
+	if cl.x < -225.0 or cl.x > 80.0 or cl.z < -38.0 or cl.z > 245.0:
 		return false
 
 	# 1. Inside either heightfield cutout (Entrance Outcrop or Skylight hole), always use SDF mesh
-	if cl.z > -16.0 and cl.z < 25.0 and cl.x > -22.0 and cl.x < 22.0:
+	if CaveSDF.eval_mouth_patch_t(cl.x, cl.z) < 0.68:
 		return true
 	var sky_c: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var d_sky: float = Vector2(cl.x - sky_c.x, cl.z - sky_c.z).length()
-	if d_sky < 11.0:
+	var d_sky: float = Vector2(cl.x - (sky_c.x - 0.8), cl.z - sky_c.z).length()
+	if d_sky < 11.2:
 		return true
 
 	# 2. If actor is up on the grassy mountain roof outside the cutouts, use overworld heightfield
@@ -108,7 +124,7 @@ static func sample_sdf_floor_below(x: float, z: float, foot_y: float, overworld_
 
 	var y_prev := y_air
 	var step := 0.85
-	var y_min := 4.5 if foot_y > 46.0 else maxf(4.5, foot_y - 9.0)
+	var y_min := 0.2 if foot_y > 46.0 else maxf(0.2, foot_y - 9.0)
 	var hit_y := foot_y
 	var found := false
 	var nudged := false
@@ -161,13 +177,107 @@ static func sample_sdf_floor_below(x: float, z: float, foot_y: float, overworld_
 		y_cur -= step
 
 	if not found:
-		hit_y = maxf(6.5, foot_y - 2.0)
+		hit_y = maxf(0.5, foot_y - 2.0)
 		ln = Vector3.UP
 
 	var wn := (CaveLayout.to_world(ln) - CaveLayout.ORIGIN)
 	wn.y = ln.y
 	wn = wn.normalized()
 	return Vector4(wn.x, wn.y, wn.z, hit_y)
+
+
+static func _local_dir_to_world_xz(du: float, ds: float) -> Vector3:
+	return Vector3(
+		CaveLayout.FWD_XZ.x * ds + CaveLayout.RIGHT_XZ.x * du,
+		0.0,
+		CaveLayout.FWD_XZ.y * ds + CaveLayout.RIGHT_XZ.y * du
+	)
+
+
+## Unified query for all water domains (Collapse Pool, Outflow Stream, Organic Underground Lake,
+## and Overworld Ocean). Returns {in_water: bool, water_y: float, flow_vel: Vector3}.
+static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean: bool) -> Dictionary:
+	var cl := CaveLayout.to_local(world_pos)
+	var in_cave_box := cl.z > -4.0 and cl.z < 245.0 and cl.x > -225.0 and cl.x < 80.0 and world_pos.y < 52.0
+
+	if is_subterranean or in_cave_box:
+		# 1. Collapse Hall Carved Pool Basin
+		var pool_c: Vector3 = CaveLayout.POOL["c"]
+		var pool_rx: float = float(CaveLayout.POOL["rx"]) + 0.42
+		var pool_rz: float = float(CaveLayout.POOL["rz"]) + 0.42
+		var p_wy: float = float(CaveLayout.POOL["water_y"])
+		var pu := (cl.x - pool_c.x) / pool_rx
+		var ps := (cl.z - pool_c.z) / pool_rz
+		if pu * pu + ps * ps <= 1.0 and ground_y < p_wy + 0.04:
+			var wf: Vector3 = CaveLayout.WATERFALL
+			var away_wf := Vector2(cl.x - wf.x, cl.z - wf.z)
+			var to_mouth := Vector2(-44.0 - cl.x, 88.5 - cl.z)
+			var flow_loc := Vector2.ZERO
+			if away_wf.length() < 4.5 and away_wf.length_squared() > 1e-4:
+				flow_loc += away_wf.normalized() * 0.55
+			if to_mouth.length_squared() > 0.25:
+				flow_loc += to_mouth.normalized() * 0.30
+			return {
+				"in_water": true,
+				"water_y": p_wy,
+				"flow_vel": _local_dir_to_world_xz(flow_loc.x, flow_loc.y),
+			}
+
+		# 2. Organic Multi-Cove Underground Lake Lagoon
+		var lake_c: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
+		var lake_rx: float = float(CaveLayout.UNDERGROUND_LAKE["rx"])
+		var lake_rz: float = float(CaveLayout.UNDERGROUND_LAKE["rz"])
+		var l_wy: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"])
+		var lu := (cl.x - lake_c.x) / lake_rx
+		var ls := (cl.z - lake_c.z) / lake_rz
+		var l_raw := sqrt(lu * lu + ls * ls)
+		if l_raw < 1.45:
+			var lr := l_raw / CaveLayout.lake_shore_radius_scale(atan2(ls, lu))
+			if lr <= 1.0 and ground_y < l_wy + 0.04:
+				return {
+					"in_water": true,
+					"water_y": l_wy,
+					"flow_vel": Vector3.ZERO,
+				}
+
+		# 3. Stream Grotto Outflow Channel
+		var ctrl := CaveLayout.STREAM_CTRL
+		var best_d2 := 1.21 # 1.10 m half-width squared matching visible water sheet
+		var best_wy := -9999.0
+		var best_dir := Vector2.ZERO
+		for i in range(ctrl.size() - 1):
+			var a := ctrl[i]
+			var b := ctrl[i + 1]
+			var abx := b.x - a.x
+			var abz := b.z - a.z
+			var l2 := abx * abx + abz * abz
+			if l2 < 1e-5:
+				continue
+			var t := clampf(((cl.x - a.x) * abx + (cl.z - a.z) * abz) / l2, 0.0, 1.0)
+			var px := a.x + abx * t
+			var pz := a.z + abz * t
+			var d2 := (cl.x - px) * (cl.x - px) + (cl.z - pz) * (cl.z - pz)
+			if d2 < best_d2:
+				best_d2 = d2
+				best_wy = lerpf(a.y, b.y, t)
+				best_dir = Vector2(abx, abz).normalized()
+		if best_wy > -9000.0 and ground_y < best_wy + 0.16:
+			var eff_wy := maxf(best_wy, ground_y + 0.06)
+			return {
+				"in_water": true,
+				"water_y": eff_wy,
+				"flow_vel": _local_dir_to_world_xz(best_dir.x * 1.45, best_dir.y * 1.45),
+			}
+
+		return {"in_water": false, "water_y": -9999.0, "flow_vel": Vector3.ZERO}
+
+	# 4. Overworld Continental Coastline & Ocean (sea_level = 0.0)
+	if not in_cave_box and world_pos.y >= -48.0 and world_pos.y < 5.0 and ground_y < 0.04:
+		var r2_ow := world_pos.x * world_pos.x + world_pos.z * world_pos.z
+		if r2_ow > 1500.0 * 1500.0:
+			return {"in_water": true, "water_y": 0.0, "flow_vel": Vector3.ZERO}
+
+	return {"in_water": false, "water_y": -9999.0, "flow_vel": Vector3.ZERO}
 
 
 # ==============================================================================
@@ -178,10 +288,28 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	_clear_generated_children()
 	_flora_grass_node = null
 	_grass_shader_mat = null
+	_pool_water_mat = null
+	_lake_water_mat = null
+	_stream_water_mat = null
+	_ocean_water_mat = null
+	if terrain_scene != null:
+		var ow_water := terrain_scene.get_node_or_null("Water") as MeshInstance3D
+		if ow_water != null and ow_water.material_override is ShaderMaterial:
+			_ocean_water_mat = ow_water.material_override as ShaderMaterial
 	_geode_reward_node = null
 	_geode_reward_mesh = null
 	_geode_reward_area = null
 	_geode_reward_collected = false
+	_geode_orb_satellites.clear()
+	_wake_points.clear()
+	for _wi in 12:
+		_wake_points.append(Vector4(0.0, -1.0, 0.0, 0.0))
+	_wake_head = 0
+	_last_wake_pos = Vector3(9999.0, -9999.0, 9999.0)
+	_wake_emit_timer = 0.0
+	_water_ripple_submersion = 0.0
+	_water_ripple_pos = Vector3(9999.0, -9999.0, 9999.0)
+	_water_ripple_rad = 1.6
 
 	if not ResourceLoader.exists(CAVE_MESH_PATH):
 		push_warning("CaveSystem: Baked mesh missing at %s (run tools/bake_cave.gd)" % CAVE_MESH_PATH)
@@ -196,7 +324,7 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	shell.mesh = cave_mesh
 	shell.material_override = _get_cave_rock_material()
 	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	shell.custom_aabb = AABB(Vector3(-350.0, 2.0, -350.0), Vector3(450.0, 80.0, 450.0))
+	shell.custom_aabb = AABB(Vector3(-345.0, -5.0, -325.0), Vector3(425.0, 85.0, 420.0))
 	add_child(shell)
 
 	if build_colliders:
@@ -249,8 +377,9 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 		add_child(atmos)
 	_build_skylight_beams_and_dust()
 
-	# P4: Radiating Geode crystal clusters + tiny Fork crawlway mouth teaser crystals
+	# P4: Radiating Geode crystal clusters + tiny Fork crawlway mouth teaser crystals + Deep Abyssal Shard Bundle
 	_build_crystals(null, props_data)
+	_build_abyssal_shard_bundle(boulder_body)
 
 	# P5: Pool basin water, drip waterfall ribbon + splash, outflow stream, river pebbles,
 	#     paired speleothems, strictly zero-collision ecological CaveFlora, and the Ancient Big Door
@@ -290,18 +419,123 @@ func _load_or_compute_props(terrain_scene: Node3D, seed_val: int = 1337) -> Dict
 func _process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
+	var parent := get_parent()
 	if _slime_ref == null or not is_instance_valid(_slime_ref):
-		var parent := get_parent()
 		if parent != null and parent.get_parent() != null:
 			_slime_ref = parent.get_parent().get_node_or_null("Slime") as Node3D
+
+	if _ocean_water_mat == null and parent != null:
+		var ow_w := parent.get_node_or_null("Water") as MeshInstance3D
+		if ow_w != null and ow_w.material_override is ShaderMaterial:
+			_ocean_water_mat = ow_w.material_override as ShaderMaterial
 
 	if _grass_shader_mat != null and _slime_ref != null:
 		_grass_shader_mat.set_shader_parameter("slime_pos", _slime_ref.global_position)
 
+	var active_water_slime: Node3D = _slime_ref
+	if active_water_slime != null:
+		var m_chk: Variant = active_water_slime.get("motor")
+		if m_chk != null and not bool(m_chk.in_water):
+			var eco: Variant = active_water_slime.get("props")
+			if eco != null and "registered_slimes" in eco:
+				for other in eco.registered_slimes:
+					if is_instance_valid(other) and other != active_water_slime and other.motor != null and other.motor.in_water:
+						active_water_slime = other
+						break
+
+	var dt_safe := clampf(delta, 0.0, 0.05)
+	if _wake_points.size() != 12:
+		_wake_points.clear()
+		for _wi in 12:
+			_wake_points.append(Vector4(0.0, -1.0, 0.0, 0.0))
+
+	var any_in_water := false
+	var s_pos := Vector3(9999.0, -9999.0, 9999.0)
+	var s_vel := Vector3.ZERO
+	var s_rad := 1.6
+	if active_water_slime != null and is_instance_valid(active_water_slime):
+		var m: Variant = active_water_slime.get("motor")
+		if m != null and bool(m.in_water) and float(m.water_submersion) > 0.01:
+			any_in_water = true
+			var mod: Variant = active_water_slime.get("model")
+			var sc_val: float = float(active_water_slime.get("slime_scale"))
+			s_rad = (mod.rest_max_radius * sc_val * mod.spread) if mod != null else 1.6
+			s_pos = active_water_slime.global_position
+			var surf_presence := 1.0
+			if mod != null:
+				var foot_y_w: float = s_pos.y - float(mod.rest_half_height) * sc_val
+				var top_y_w: float = foot_y_w + float(mod.rest_full_height) * sc_val
+				var depth_below_surf: float = maxf(float(m.water_y) - top_y_w, 0.0)
+				surf_presence = exp(-depth_below_surf * 1.35)
+				var rest_h_w: float = clampf((float(m.water_y) - foot_y_w) / maxf(sc_val, 0.01), 0.0, float(mod.rest_full_height) * 0.5)
+				s_rad = maxf(float(mod.call("rest_radius_at", rest_h_w)) * sc_val * float(mod.spread), 0.45)
+			s_vel = m.velocity
+			_water_ripple_submersion = float(m.water_submersion) * surf_presence
+			_water_ripple_pos = s_pos
+			_water_ripple_rad = s_rad
+
+			if _last_wake_pos.distance_squared_to(s_pos) > 2500.0:
+				for wi in 12:
+					_wake_points[wi] = Vector4(0.0, -1.0, 0.0, 0.0)
+				_last_wake_pos = s_pos
+
+			var spd_xz := Vector2(s_vel.x, s_vel.z).length()
+			if spd_xz > 0.30 and _water_ripple_submersion > 0.08 and surf_presence > 0.15:
+				_wake_emit_timer += dt_safe
+				var d_since := Vector2(s_pos.x - _last_wake_pos.x, s_pos.z - _last_wake_pos.z).length()
+				if d_since >= 0.68 or _wake_emit_timer >= 0.16:
+					_wake_points[_wake_head] = Vector4(s_pos.x, 0.0, s_pos.z, clampf(spd_xz / 5.5, 0.22, 0.95) * surf_presence)
+					_wake_head = (_wake_head + 1) % 12
+					_last_wake_pos = s_pos
+					_wake_emit_timer = 0.0
+
+	if not any_in_water:
+		# Dissolve water ripples quickly (~0.12s fade) in place at the last in-water spot so ripples vanish cleanly once out
+		_water_ripple_submersion *= exp(-28.0 * dt_safe)
+		if _water_ripple_submersion < 0.025:
+			_water_ripple_submersion = 0.0
+			_water_ripple_pos = Vector3(9999.0, -9999.0, 9999.0)
+		s_pos = _water_ripple_pos
+		s_rad = _water_ripple_rad
+		_wake_emit_timer = 0.0
+
+	for wi in 12:
+		var wp: Vector4 = _wake_points[wi]
+		if wp.y >= 0.0:
+			wp.y += dt_safe
+			if any_in_water:
+				if wp.y > 2.65:
+					wp = Vector4(0.0, -1.0, 0.0, 0.0)
+			else:
+				wp.w *= exp(-16.0 * dt_safe)
+				if wp.w < 0.02 or wp.y > 2.2:
+					wp = Vector4(0.0, -1.0, 0.0, 0.0)
+			_wake_points[wi] = wp
+
+	for wmat: ShaderMaterial in [_pool_water_mat, _lake_water_mat, _stream_water_mat, _ocean_water_mat]:
+		if wmat != null:
+			wmat.set_shader_parameter("slime_pos", s_pos)
+			wmat.set_shader_parameter("slime_vel", s_vel)
+			wmat.set_shader_parameter("slime_radius", s_rad)
+			wmat.set_shader_parameter("slime_submersion", _water_ripple_submersion)
+			wmat.set_shader_parameter("wake_points", _wake_points)
+
 	if not _geode_reward_collected and _geode_reward_mesh != null and is_instance_valid(_geode_reward_mesh):
 		_geode_spin_t += delta
-		_geode_reward_mesh.rotation.y = _geode_spin_t * 0.95
-		_geode_reward_mesh.position.y = sin(_geode_spin_t * 2.1) * 0.22
+		_geode_reward_mesh.rotation.y = _geode_spin_t * 0.42
+		_geode_reward_mesh.position.y = sin(_geode_spin_t * 1.9) * 0.14
+		var core_node := _geode_reward_mesh.get_node_or_null("OrbCore") as Node3D
+		if core_node != null:
+			core_node.rotation.y = -_geode_spin_t * 0.72
+			core_node.rotation.x = sin(_geode_spin_t * 1.05) * 0.08
+		for sat_i in _geode_orb_satellites.size():
+			var sat := _geode_orb_satellites[sat_i]
+			if sat != null and is_instance_valid(sat):
+				var orb_ang := _geode_spin_t * (1.08 + float(sat_i) * 0.16) + float(sat_i) * (TAU / maxf(float(_geode_orb_satellites.size()), 1.0))
+				var orb_r := 1.02 + float(sat_i % 2) * 0.22
+				var tilt := 0.34 if (sat_i % 2 == 0) else -0.30
+				sat.position = Vector3(cos(orb_ang) * orb_r, sin(orb_ang) * tilt + 0.12 * cos(orb_ang * 2.0), sin(orb_ang) * orb_r)
+				sat.rotation = Vector3(sin(orb_ang) * 0.32, -orb_ang + PI * 0.5, cos(orb_ang) * 0.28)
 
 
 func _physics_process(_delta: float) -> void:
@@ -389,6 +623,11 @@ func _get_cave_rock_material() -> ShaderMaterial:
 			_cached_rock_mat.set_shader_parameter("rock_texture", rock_tex)
 		if floor_tex != null:
 			_cached_rock_mat.set_shader_parameter("floor_texture", floor_tex)
+	_cached_rock_mat.set_shader_parameter("cave_origin_xz", Vector2(CaveLayout.ORIGIN.x, CaveLayout.ORIGIN.z))
+	_cached_rock_mat.set_shader_parameter("cave_fwd_xz", CaveLayout.FWD_XZ)
+	_cached_rock_mat.set_shader_parameter("cave_right_xz", CaveLayout.RIGHT_XZ)
+	var sky_c_mat: Vector3 = CaveLayout.SKYLIGHT["c"]
+	_cached_rock_mat.set_shader_parameter("skylight_local_xz", Vector2(sky_c_mat.x, sky_c_mat.z))
 	_cached_rock_mat.set_shader_parameter("greybox_mode", greybox_mode)
 	return _cached_rock_mat
 
@@ -409,16 +648,16 @@ func _build_interior_lighting_rig() -> void:
 	probe.box_projection = false
 	probe.update_mode = ReflectionProbe.UPDATE_ONCE
 	probe.ambient_mode = ReflectionProbe.AMBIENT_COLOR
-	probe.ambient_color = Color(0.36, 0.39, 0.46, 1.0)
-	probe.ambient_color_energy = 0.52
-	var p_center := CaveLayout.to_world(Vector3(-42.0, 31.0, 62.0))
+	probe.ambient_color = Color(0.38, 0.43, 0.52, 1.0)
+	probe.ambient_color_energy = 0.65
+	var p_center := CaveLayout.to_world(Vector3(-68.0, 24.0, 116.0))
 	probe.basis = Basis(
 		Vector3(CaveLayout.RIGHT_XZ.x, 0.0, CaveLayout.RIGHT_XZ.y),
 		Vector3.UP,
 		Vector3(-CaveLayout.FWD_XZ.x, 0.0, -CaveLayout.FWD_XZ.y)
 	)
 	probe.position = p_center
-	probe.size = Vector3(132.0, 46.0, 114.0)
+	probe.size = Vector3(286.0, 56.0, 244.0)
 	rig.add_child(probe)
 
 	# 1. KEY LIGHT (Shadowed): Sunbeam spot through the Cenote Skylight onto the Moss Mound
@@ -441,16 +680,16 @@ func _build_interior_lighting_rig() -> void:
 	rig.add_child(key_spot)
 	key_spot.look_at_from_position(sky_from, sky_aim, Vector3.UP)
 
-	# 2-9. ACCENT LIGHTS (unshadowed omnis with tight range & falloff so light never bleeds through walls):
-	# Warm mound bounce, passage landmark beacons, cool grotto aqua fill, violet geode glow, atrium ambient, lake glow, door torchlight
+	# 2-8. ACCENT LIGHTS (unshadowed omnis with tight range & falloff; total lights = 8 <= 8 budget):
+	# Warm mound bounce, passage landmark beacons, cool grotto aqua fill, violet geode glow, lake glow, door torchlight
 	var accents := [
 		["CollapseBounceOmni", Vector3(-56.0, 26.5, 67.0), Color(0.98, 0.88, 0.72), 1.15, 29.0, 1.45],
 		["TwilightArchOmni", Vector3(-34.0, 22.5, 42.0), Color(0.95, 0.78, 0.52), 1.35, 22.0, 1.50],
 		["GrottoArchOmni", Vector3(-42.0, 20.8, 86.0), Color(0.32, 0.86, 0.98), 1.65, 24.0, 1.45],
 		["SpiralLedgeStartOmni", Vector3(-73.0, 23.5, 81.0), Color(0.65, 0.55, 1.0), 1.45, 22.0, 1.45],
-		["GeodeCrystalOmni", Vector3(2.0, 21.8, 56.5), Color(0.68, 0.60, 1.0), 3.25, 26.0, 1.35],
-		["UndergroundLakeOmni", Vector3(-10.0, 12.0, 164.0), Color(0.20, 0.78, 0.92), 3.40, 48.0, 1.35],
-		["VaultDoorOmni", Vector3(-182.0, 6.5, 58.0), Color(1.0, 0.76, 0.38), 3.40, 32.0, 1.35],
+		["GeodeCrystalOmni", Vector3(5.5, 20.8, 55.0), Color(0.56, 0.72, 1.0), 4.20, 44.0, 0.85],
+		["UndergroundLakeOmni", Vector3(-6.0, 15.2, 178.0), Color(0.58, 0.92, 1.00), 5.10, 116.0, 0.60],
+		["VaultDoorOmni", Vector3(-184.0, 6.8, 66.0), Color(1.0, 0.76, 0.38), 3.40, 34.0, 1.35],
 	]
 	for a: Array in accents:
 		var omni := OmniLight3D.new()
@@ -490,18 +729,21 @@ static func _is_clear_of_all_routes(u: float, s: float, min_clear: float) -> boo
 	if pt.distance_to(Vector2(-52.0, 74.0)) < min_clear + 1.5:
 		return false
 	# Keep Abyssal Atrium center hub clear
-	if pt.distance_to(Vector2(-94.0, 106.0)) < min_clear + 2.0:
+	var aa_c: Vector3 = CaveLayout.CHAMBERS["abyssal_atrium"]["c"]
+	if pt.distance_to(Vector2(aa_c.x, aa_c.z)) < min_clear + 2.0:
 		return false
-	# Keep Underground Lake shore walkway clear
-	if pt.distance_to(Vector2(-48.0, 138.0)) < min_clear + 2.0:
+	# Keep Underground Lake promenade entrance clear
+	var lake_nodes_cl: Array = CaveLayout.TUNNELS["lake_tunnel"]
+	var lake_entry_pt: Vector3 = lake_nodes_cl[lake_nodes_cl.size() - 1]["p"]
+	if pt.distance_to(Vector2(lake_entry_pt.x, lake_entry_pt.z)) < min_clear + 2.0:
 		return false
 	# Keep Ancient Door dais and frontal approach clear
-	if pt.distance_to(Vector2(-140.0, 80.0)) < min_clear + 2.5:
+	if pt.distance_to(Vector2(-182.0, 68.0)) < min_clear + 3.0:
 		return false
 
-	for tname: String in ["twilight_passage", "hall_throat", "stream_grotto", "split_crawlway", "deep_descent", "lake_tunnel", "door_tunnel"]:
+	for tname: String in ["twilight_passage", "hall_throat", "stream_grotto", "split_crawlway", "deep_descent", "lake_tunnel", "lake_shoreline", "door_tunnel"]:
 		var nodes: Array = CaveLayout.TUNNELS[tname]
-		var req := min_clear + (2.0 if tname == "split_crawlway" else 1.6)
+		var req := min_clear + (2.0 if tname == "split_crawlway" else (4.2 if tname == "lake_shoreline" else 1.6))
 		for i in range(nodes.size() - 1):
 			var pa: Vector3 = nodes[i]["p"]
 			var pb: Vector3 = nodes[i + 1]["p"]
@@ -691,34 +933,38 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 		var loc: Vector3 = item[0]
 		var sc_base: float = float(item[1])
 		var w_xz := CaveLayout.to_world(loc)
-		var gy := _sample_exterior_sdf_y(sdf, terrain_scene, loc.x, loc.z)
-		if gy < 23.0 or gy > 32.0:
+		var sdf_y := _sample_exterior_sdf_y(sdf, terrain_scene, loc.x, loc.z)
+		var ov_y := float(terrain_scene.call("sample_height", w_xz.x, w_xz.z)) if terrain_scene != null else sdf_y
+		var gy := minf(sdf_y, ov_y)
+		if gy < 25.0 or gy > 31.0:
 			continue
 		var arch := idx % 3
 		var sx := sc_base * rng.randf_range(0.95, 1.25)
 		var sy := sc_base * rng.randf_range(0.75, 1.02)
 		var sz := sc_base * rng.randf_range(0.95, 1.25)
 		var rot := Vector3(rng.randf_range(-0.15, 0.15), rng.randf_range(0.0, TAU), rng.randf_range(-0.15, 0.15))
-		add_boulder.call(arch, Vector3(w_xz.x, gy - 0.65 * sy, w_xz.z), rot, Vector3(sx, sy, sz), bool(item[2]))
+		add_boulder.call(arch, Vector3(w_xz.x, gy - 0.78 * sy, w_xz.z), rot, Vector3(sx, sy, sz), bool(item[2]))
 
 	var sky_c: Vector3 = CaveLayout.SKYLIGHT["c"]
 	var rim_angles := [0.65, 1.35, 2.10, 2.85, 3.60, 4.35, 5.10]
 	for idx in rim_angles.size():
 		var ang: float = rim_angles[idx]
-		var r := rng.randf_range(9.2, 12.2)
-		var lu := sky_c.x + cos(ang) * r
+		var r := rng.randf_range(12.2, 15.2)
+		var lu := (sky_c.x - 0.8) + cos(ang) * r
 		var ls := sky_c.z + sin(ang) * r
-		if not _is_clear_of_all_routes(lu, ls, 2.6):
+		if not _is_clear_of_all_routes(lu, ls, 2.8):
 			continue
 		var w_xz := CaveLayout.to_world(Vector3(lu, 56.0, ls))
-		var gy := _sample_exterior_sdf_y(sdf, terrain_scene, lu, ls)
-		if gy < 52.0 or gy > 61.0:
+		var ov_y := float(terrain_scene.call("sample_height", w_xz.x, w_xz.z)) if terrain_scene != null else _sample_exterior_sdf_y(sdf, terrain_scene, lu, ls)
+		if ov_y < 52.0 or ov_y > 61.0:
 			continue
-		var sc_base := rng.randf_range(1.2, 1.9)
+		if sdf.eval_cave_void_smooth(lu, ov_y - 2.2, ls) <= 0.6:
+			continue
+		var sc_base := rng.randf_range(1.2, 1.8)
 		add_boulder.call(
 			idx % 3,
-			Vector3(w_xz.x, gy - 0.58 * sc_base, w_xz.z),
-			Vector3(rng.randf_range(-0.16, 0.16), rng.randf_range(0.0, TAU), rng.randf_range(-0.16, 0.16)),
+			Vector3(w_xz.x, ov_y - 0.70 * sc_base, w_xz.z),
+			Vector3(rng.randf_range(-0.14, 0.14), rng.randf_range(0.0, TAU), rng.randf_range(-0.14, 0.14)),
 			Vector3(sc_base * 1.15, sc_base * 0.8, sc_base),
 			true
 		)
@@ -745,11 +991,11 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 			true
 		)
 
-	var brow_loc := Vector3(-11.2, 40.0, 5.2)
+	var brow_loc := Vector3(-19.5, 38.0, 14.5)
 	var brow_w := CaveLayout.to_world(brow_loc)
-	var brow_y := _sample_exterior_sdf_y(sdf, terrain_scene, brow_loc.x, brow_loc.z)
-	var bt_basis := Basis.from_euler(Vector3(0.08, 0.55, -0.22)).scaled(Vector3(2.25, 2.35, 2.25))
-	var brow_tree_xf := Transform3D(bt_basis, Vector3(brow_w.x, brow_y - 0.85, brow_w.z))
+	var brow_ov_y := float(terrain_scene.call("sample_height", brow_w.x, brow_w.z)) if terrain_scene != null else _sample_exterior_sdf_y(sdf, terrain_scene, brow_loc.x, brow_loc.z)
+	var bt_basis := Basis.from_euler(Vector3(0.04, 0.55, -0.08)).scaled(Vector3(2.25, 2.35, 2.25))
+	var brow_tree_xf := Transform3D(bt_basis, Vector3(brow_w.x, brow_ov_y - 1.15, brow_w.z))
 
 	var log_base_u := -65.5
 	var log_base_s := 71.2
@@ -764,26 +1010,37 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 	var crystal_xforms: Array[Transform3D] = []
 	var crystal_colors: Array[Color] = []
 	var palette := [
-		Color(0.24, 0.90, 1.0),
-		Color(0.38, 0.62, 1.0),
-		Color(0.68, 0.44, 1.0),
-		Color(0.52, 0.98, 0.94),
+		Color(0.08, 0.85, 1.0),
+		Color(0.20, 0.42, 1.0),
+		Color(0.62, 0.22, 1.0),
+		Color(0.10, 0.94, 0.72),
 	]
 	var gc: Vector3 = CaveLayout.CHAMBERS["geode_pocket"]["c"]
-	var seed_pt := Vector3(gc.x, gc.y + 2.2, gc.z)
-	for _c in 28:
-		var az := rng.randf() * TAU
-		var el := rng.randf_range(-0.22, 0.14)
+	var seed_pt := Vector3(gc.x, gc.y + 1.8, gc.z)
+	for _c in 22:
+		var az := (float(_c) / 22.0) * TAU + rng.randf_range(-0.10, 0.10)
+		var el := rng.randf_range(-0.32, -0.04)
 		var d_loc := Vector3(cos(az) * cos(el), sin(el), sin(az) * cos(el)).normalized()
 		var r_hit := -1.0
-		var r_cur := 3.5
+		var r_cur := 3.6
+		var r_prev := r_cur
 		var prev_d := sdf.eval_sdf_full(seed_pt.x + d_loc.x * r_cur, seed_pt.y + d_loc.y * r_cur, seed_pt.z + d_loc.z * r_cur, GEOFENCE_OVERWORLD_H)
-		while r_cur < 11.5:
-			r_cur += 0.45
+		while r_cur < 11.2:
+			r_prev = r_cur
+			r_cur += 0.36
 			var hp := seed_pt + d_loc * r_cur
 			var cur_d := sdf.eval_sdf_full(hp.x, hp.y, hp.z, GEOFENCE_OVERWORLD_H)
 			if prev_d < 0.0 and cur_d >= 0.0:
-				r_hit = r_cur - 0.15
+				var lo := r_prev
+				var hi := r_cur
+				for _bs in 5:
+					var mid := 0.5 * (lo + hi)
+					var mp := seed_pt + d_loc * mid
+					if sdf.eval_sdf_full(mp.x, mp.y, mp.z, GEOFENCE_OVERWORLD_H) >= 0.0:
+						hi = mid
+					else:
+						lo = mid
+				r_hit = hi
 				break
 			prev_d = cur_d
 		if r_hit < 0.0:
@@ -793,7 +1050,9 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 			continue
 		if lp.x < -0.5 and lp.z > 50.5 and lp.z < 59.5:
 			continue
-		if lp.y < gc.y + 0.6 or lp.y > gc.y + 3.4:
+		if lp.x > gc.x + 2.5 and lp.z > 47.0 and lp.z < 58.5:
+			continue
+		if lp.y < gc.y + 0.1 or lp.y > gc.y + 2.6:
 			continue
 		var eps := 0.35
 		var gx := sdf.eval_sdf_full(lp.x + eps, lp.y, lp.z, GEOFENCE_OVERWORLD_H) - sdf.eval_sdf_full(lp.x - eps, lp.y, lp.z, GEOFENCE_OVERWORLD_H)
@@ -802,46 +1061,59 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 		var n_loc := Vector3(-gx, -gy, -gz).normalized()
 		if n_loc.length_squared() < 0.1:
 			n_loc = -d_loc
-		if n_loc.y < -0.05:
+		# Only spawn clusters on upward-sloped shelves/floor margins so vertical crags don't slice them in half
+		if n_loc.y < 0.20:
 			continue
 		var n_world := Vector3(
 			CaveLayout.FWD_XZ.x * n_loc.z + CaveLayout.RIGHT_XZ.x * n_loc.x,
-			maxf(n_loc.y, 0.15),
+			clampf(n_loc.y, 0.25, 0.96),
 			CaveLayout.FWD_XZ.y * n_loc.z + CaveLayout.RIGHT_XZ.y * n_loc.x
 		).normalized()
-		var w_anchor := CaveLayout.to_world(lp - n_loc * 0.72)
-		var shards := rng.randi_range(4, 6)
+		var w_anchor := CaveLayout.to_world(lp - n_loc * 0.14)
+		var shards := rng.randi_range(1, 2)
 		var cluster_col: Color = palette[rng.randi() % palette.size()]
 		for _s in shards:
-			var splay := Vector3(rng.randf_range(-0.28, 0.28), rng.randf_range(0.0, 0.24), rng.randf_range(-0.28, 0.28))
+			var splay := Vector3(rng.randf_range(-0.18, 0.18), rng.randf_range(0.10, 0.36), rng.randf_range(-0.18, 0.18))
 			var s_dir := (n_world + splay).normalized()
 			var b := _basis_align_y(s_dir, rng.randf() * TAU)
-			var sc_h := rng.randf_range(1.15, 2.35)
-			var sc_w := rng.randf_range(0.58, 1.05)
+			var sc_h := rng.randf_range(1.05, 1.72)
+			var sc_w := sc_h * rng.randf_range(1.00, 1.14)
 			b = b.scaled(Vector3(sc_w, sc_h, sc_w))
-			crystal_xforms.append(Transform3D(b, w_anchor + Vector3(rng.randf_range(-0.12, 0.12), rng.randf_range(-0.08, 0.08), rng.randf_range(-0.12, 0.12))))
+			var lat := splay * 0.45
+			crystal_xforms.append(Transform3D(b, w_anchor + Vector3(lat.x, 0.0, lat.z)))
 			crystal_colors.append(cluster_col)
 
 	# Landmark guiding crystal clusters framing Collapse Hall passage mouths & Spiral Ledge route
 	var landmark_clusters := [
 		# Stream Grotto archway left & right pillars (aqua/cyan beacons)
-		[Vector3(-46.5, 19.5, 84.5), Color(0.24, 0.92, 1.0), 1.45, 5],
-		[Vector3(-38.0, 19.5, 86.5), Color(0.32, 0.84, 1.0), 1.35, 4],
+		[Vector3(-46.5, 19.5, 84.5), Color(0.08, 0.88, 1.0), 1.35, 3],
+		[Vector3(-38.0, 19.5, 86.5), Color(0.14, 0.78, 1.0), 1.25, 2],
 		# Spiral Ledge trailhead & upper ledge waypoints (violet/amethyst beacons)
-		[Vector3(-68.5, 21.5, 82.0), Color(0.68, 0.46, 1.0), 1.40, 5],
-		[Vector3(-76.5, 25.0, 74.5), Color(0.64, 0.50, 1.0), 1.25, 4],
-		[Vector3(-74.0, 31.0, 56.5), Color(0.52, 0.72, 1.0), 1.25, 4],
-		[Vector3(-56.0, 37.5, 51.0), Color(0.38, 0.88, 1.0), 1.25, 4],
-		# Deep Descent archway flank (deep blue/cyan beacon)
-		[Vector3(-71.5, 19.5, 87.5), Color(0.30, 0.78, 1.0), 1.50, 5],
+		[Vector3(-68.5, 21.5, 82.0), Color(0.62, 0.26, 1.0), 1.30, 3],
+		[Vector3(-76.5, 25.0, 74.5), Color(0.54, 0.32, 1.0), 1.15, 2],
+		[Vector3(-74.0, 31.0, 56.5), Color(0.32, 0.56, 1.0), 1.15, 2],
+		[Vector3(-56.0, 37.5, 51.0), Color(0.16, 0.84, 1.0), 1.15, 2],
+		# Deep Descent East archway left & right pillars off Geode Pocket (cyan/blue beacons)
+		[Vector3(9.2, 14.8, 46.2), Color(0.18, 0.76, 1.0), 1.35, 3],
+		[Vector3(11.8, 14.8, 55.2), Color(0.20, 0.62, 1.0), 1.35, 3],
+		# Deep Descent sweeping bend shoulder beacon (cool aqua/blue)
+		[Vector3(30.2, 12.6, 72.8), Color(0.12, 0.78, 1.0), 1.30, 2],
+		# Abyssal Atrium East Alcove beacon (cyan/violet)
+		[Vector3(49.5, 10.6, 110.0), Color(0.10, 0.88, 0.96), 1.40, 3],
 		# Split-Slime Crawlway mouth teaser crystals (warm violet/cyan)
-		[Vector3(-29.5, 19.2, 43.2), Color(0.68, 0.44, 1.0), 0.95, 4],
-		# Abyssal Gallery to Underground Lake beacon (radiant cyan)
-		[Vector3(-42.0, 8.0, 146.0), Color(0.18, 0.88, 0.95), 1.60, 6],
-		# Sanctum Descent threshold (warm amber beacon leading to the Ancient Door)
-		[Vector3(-96.0, 10.0, 106.0), Color(1.0, 0.72, 0.32), 1.60, 6],
-		# Ancient Big Door forecourt (monumental gold beacon)
-		[Vector3(-180.0, 3.2, 59.0), Color(1.0, 0.68, 0.28), 1.80, 6],
+		[Vector3(-29.5, 19.2, 43.2), Color(0.64, 0.28, 1.0), 0.90, 2],
+		# Abyssal Atrium to Underground Lake NNE promenade archway beacon (radiant cyan)
+		[Vector3(14.5, 7.8, 134.5), Color(0.08, 0.90, 0.94), 1.45, 3],
+		# SE Rocky Reef Islet & South Peninsula glowing crystal landmarks inside Underground Lake
+		[Vector3(10.0, 8.0, 176.0), Color(0.10, 0.92, 1.0), 1.28, 3],
+		[Vector3(-2.7, 7.6, 199.2), Color(0.24, 0.68, 1.0), 1.24, 3],
+		# Door Tunnel entrance flanks off WSW Lake Promenade (warm amber beacons)
+		[Vector3(-58.2, 7.2, 190.6), Color(1.0, 0.64, 0.16), 1.32, 3],
+		[Vector3(-63.8, 7.2, 200.2), Color(1.0, 0.64, 0.16), 1.32, 2],
+		# Door Tunnel S-curve midpoint beacon (warm amber)
+		[Vector3(-120.0, 4.0, 146.0), Color(1.0, 0.62, 0.14), 1.30, 2],
+		# Ancient Big Door forecourt flank (monumental gold beacon)
+		[Vector3(-185.0, 3.0, 72.0), Color(1.0, 0.60, 0.14), 1.65, 3],
 	]
 	for lc_item: Array in landmark_clusters:
 		var lpos: Vector3 = lc_item[0]
@@ -849,18 +1121,143 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 		var lscale: float = float(lc_item[2])
 		var lcnt: int = int(lc_item[3])
 		var fy_c := _sample_floor_y(sdf, lpos.x, lpos.y + 3.0, lpos.z)
-		var w_base := CaveLayout.to_world(Vector3(lpos.x, fy_c - 0.12, lpos.z))
+		var w_base := CaveLayout.to_world(Vector3(lpos.x, fy_c - 0.08, lpos.z))
 		for s_idx in lcnt:
-			var ang_c := (float(s_idx) / float(lcnt)) * TAU + rng.randf_range(-0.25, 0.25)
-			var tilt_c := rng.randf_range(0.18, 0.48)
+			var ang_c := (float(s_idx) / float(lcnt)) * TAU + rng.randf_range(-0.18, 0.18)
+			var tilt_c := 0.08 if s_idx == 0 else rng.randf_range(0.18, 0.36)
 			var dir_c := Vector3(cos(ang_c) * sin(tilt_c), cos(tilt_c), sin(ang_c) * sin(tilt_c)).normalized()
 			var b_c := _basis_align_y(dir_c, rng.randf() * TAU)
-			var sh := lscale * rng.randf_range(0.85, 1.35)
-			var sw := sh * rng.randf_range(0.45, 0.62)
+			var sh := lscale * (1.28 if s_idx == 0 else rng.randf_range(0.84, 1.08))
+			var sw := sh * rng.randf_range(1.00, 1.12)
 			b_c = b_c.scaled(Vector3(sw, sh, sw))
-			var off_xz := Vector3(cos(ang_c) * 0.28, 0.0, sin(ang_c) * 0.28)
+			var off_xz := Vector3(0.0, 0.0, 0.0) if s_idx == 0 else Vector3(cos(ang_c) * 0.55, 0.0, sin(ang_c) * 0.55)
 			crystal_xforms.append(Transform3D(b_c, w_base + off_xz))
 			crystal_colors.append(lcol)
+
+	# Dense Underwater Crystal Reef Groves across the Deep Abyssal Trench & Sculpted Underground Lake Depths
+	var pit_c: Vector3 = CaveLayout.LAKE_ABYSS_PIT["c"]
+	var pit_rx: float = float(CaveLayout.LAKE_ABYSS_PIT["rx"])
+	var pit_rz: float = float(CaveLayout.LAKE_ABYSS_PIT["rz"])
+	var pit_yaw: float = float(CaveLayout.LAKE_ABYSS_PIT["yaw"])
+	var cy_pit := cos(pit_yaw)
+	var sy_pit := sin(pit_yaw)
+	var pit_palette := [
+		Color(0.08, 0.92, 1.0),
+		Color(0.12, 0.96, 0.80),
+		Color(0.18, 0.56, 1.0),
+		Color(0.56, 0.30, 1.0),
+	]
+	var lake_c: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
+	var placed_hubs: Array[Vector2] = [Vector2(pit_c.x, pit_c.z)]
+	var placed_pods: Array[Vector2] = []
+
+	var spawn_underwater_pod := func(lu_p: float, ls_p: float, min_pod_gap: float, min_pit_dist: float, target_sc: float, tilt_bias: Vector3, col_p: Color, sink_extra: float = 0.0) -> bool:
+		var pt := Vector2(lu_p, ls_p)
+		if pt.distance_to(Vector2(pit_c.x, pit_c.z)) < min_pit_dist:
+			return false
+		# Keep clear of dry karst islets and South Peninsula
+		if pt.distance_to(Vector2(-17.0, 167.5)) < 6.4 or pt.distance_to(Vector2(10.0, 176.0)) < 6.0 or pt.distance_to(Vector2(-2.7, 199.2)) < 5.6:
+			return false
+		for prev_pod: Vector2 in placed_pods:
+			if pt.distance_to(prev_pod) < min_pod_gap:
+				return false
+		var fy_p := _sample_floor_y(sdf, lu_p, 6.2, ls_p)
+		if fy_p < 1.05 or fy_p > 4.25:
+			return false
+		var fx1 := _sample_floor_y(sdf, lu_p + 0.65, 6.2, ls_p)
+		var fx0 := _sample_floor_y(sdf, lu_p - 0.65, 6.2, ls_p)
+		var fz1 := _sample_floor_y(sdf, lu_p, 6.2, ls_p + 0.65)
+		var fz0 := _sample_floor_y(sdf, lu_p, 6.2, ls_p - 0.65)
+		var n_loc := Vector3(-(fx1 - fx0) / 1.3, 1.0, -(fz1 - fz0) / 1.3).normalized()
+		var n_world := Vector3(
+			CaveLayout.FWD_XZ.x * n_loc.z + CaveLayout.RIGHT_XZ.x * n_loc.x,
+			clampf(n_loc.y, 0.52, 1.0),
+			CaveLayout.FWD_XZ.y * n_loc.z + CaveLayout.RIGHT_XZ.y * n_loc.x
+		).normalized()
+
+		placed_pods.append(pt)
+		var base_y := fy_p - 0.18 - sink_extra
+		var w_base_p := CaveLayout.to_world(Vector3(lu_p, base_y, ls_p))
+		# Strictly cap submerged crystal tips <= 4.95 m (1.45 m unobstructed below water_y = 6.40)
+		var max_sh := clampf((4.95 - base_y) / 1.15, 0.50, 2.30)
+		var sh_p := clampf(target_sc, 0.52, max_sh)
+		var sw_p := sh_p * rng.randf_range(1.02, 1.18)
+		var raw_dir := (Vector3(0.0, 1.0, 0.0) + tilt_bias).normalized()
+		var s_dir := raw_dir.lerp(n_world, 0.36).normalized()
+		var b_s := _basis_align_y(s_dir, rng.randf() * TAU).scaled(Vector3(sw_p, sh_p, sw_p))
+		crystal_xforms.append(Transform3D(b_s, w_base_p))
+		crystal_colors.append(col_p)
+		return true
+
+	var add_crystal_grove := func(hub_u: float, hub_s: float, hub_gap: float, pods_in_grove: int, spread_r: float, min_sc: float, max_sc: float, col_idx: int) -> void:
+		var hub_pt := Vector2(hub_u, hub_s)
+		if hub_pt.distance_to(Vector2(pit_c.x, pit_c.z)) < 3.05:
+			return
+		if hub_pt.distance_to(Vector2(-17.0, 167.5)) < 6.6 or hub_pt.distance_to(Vector2(10.0, 176.0)) < 6.2 or hub_pt.distance_to(Vector2(-2.7, 199.2)) < 5.8:
+			return
+		for prev_hub: Vector2 in placed_hubs:
+			if hub_pt.distance_to(prev_hub) < hub_gap:
+				return
+		var fy_h := _sample_floor_y(sdf, hub_u, 6.2, hub_s)
+		if fy_h < 1.08 or fy_h > 4.20:
+			return
+		placed_hubs.append(hub_pt)
+
+		# Elongate grove along an organic tectonic fissure axis with tightly interlocking sibling pods
+		var drift_ang := rng.randf() * TAU
+		var core_sc := rng.randf_range(min_sc, max_sc)
+		var core_tilt := Vector3(rng.randf_range(-0.14, 0.14), 0.0, rng.randf_range(-0.14, 0.14))
+		spawn_underwater_pod.call(hub_u, hub_s, 0.52, 2.25, core_sc, core_tilt, pit_palette[col_idx % pit_palette.size()], 0.0)
+
+		for gi in range(1, pods_in_grove):
+			var t_g := float(gi) / float(maxi(pods_in_grove - 1, 1))
+			# Bias pods into paired clusters & short fissures rather than uniform circles
+			var f_ang := drift_ang + (PI if (gi % 2 == 1) else 0.0) + rng.randf_range(-0.82, 0.82)
+			var dist_g := lerpf(0.66, spread_r, sqrt(t_g)) * rng.randf_range(0.84, 1.10)
+			var pu := hub_u + cos(f_ang) * dist_g
+			var ps := hub_s + sin(f_ang) * dist_g
+			var out_v := CaveLayout.FWD_XZ * sin(f_ang) + CaveLayout.RIGHT_XZ * cos(f_ang)
+			var tilt_mag := rng.randf_range(0.18, 0.38)
+			var tilt_v := Vector3(out_v.x * tilt_mag, 0.0, out_v.y * tilt_mag)
+			var sc_fac := lerpf(0.92, 0.56, t_g) * rng.randf_range(0.86, 1.10)
+			var c_pick: Color = pit_palette[col_idx % pit_palette.size()] if (gi % 3 != 2) else pit_palette[(col_idx + 1) % pit_palette.size()]
+			spawn_underwater_pod.call(pu, ps, 0.54, 2.15, core_sc * sc_fac, tilt_v, c_pick, 0.03)
+
+	# 2a. Asymmetric Tectonic Reef Skirt directly interlocking with CaveAbyssalShards basalt base
+	for si in 14:
+		var ang_s := (float(si) / 14.0) * TAU + 0.18 * sin(float(si) * 2.1) + rng.randf_range(-0.10, 0.10)
+		var r_skirt := 2.25 + 0.65 * (0.5 + 0.5 * cos(ang_s * 2.0 - 0.8)) + rng.randf_range(-0.22, 0.35)
+		var lu_s := pit_c.x + cos(ang_s) * r_skirt
+		var ls_s := pit_c.z + sin(ang_s) * r_skirt
+		var out_s := CaveLayout.FWD_XZ * sin(ang_s) + CaveLayout.RIGHT_XZ * cos(ang_s)
+		var tilt_s := Vector3(out_s.x * rng.randf_range(0.24, 0.44), 0.0, out_s.y * rng.randf_range(0.24, 0.44))
+		spawn_underwater_pod.call(lu_s, ls_s, 0.72, 2.02, rng.randf_range(0.82, 1.38), tilt_s, pit_palette[si % pit_palette.size()], 0.05)
+
+	# 2b. Dense Abyssal Trench Crystal Groves (18 tight multi-pod interlocking reefs filling the sculpted pit)
+	var phi := 2.3999632
+	for pi in 24:
+		var ang_p := float(pi) * phi + rng.randf_range(-0.20, 0.20)
+		var r_fac := lerpf(0.32, 0.98, sqrt((float(pi) + 0.5) / 24.0))
+		# Modulate radial density organically so reefs form sweeping ridges + dark sand swim canyons
+		var lx_e := cos(ang_p) * pit_rx * r_fac + rng.randf_range(-0.95, 0.95)
+		var lz_e := sin(ang_p) * pit_rz * r_fac + rng.randf_range(-0.85, 0.85)
+		var lu_p := pit_c.x + (lx_e * cy_pit - lz_e * sy_pit)
+		var ls_p := pit_c.z + (lx_e * sy_pit + lz_e * cy_pit)
+		var n_pods := 6 if (pi % 3 != 2) else 5
+		add_crystal_grove.call(lu_p, ls_p, 2.45, n_pods, 1.92, 1.28, 2.05, pi)
+
+	# 2c. Deep Sculpted Underground Lake Basins & ESE Channel Multi-Pod Crystal Groves
+	for li in 30:
+		var ang_l := float(li) * phi + 0.65
+		var t_l := (float(li) + 0.5) / 30.0
+		var r_l := lerpf(0.18, 0.78, sqrt(t_l))
+		var shore_pt := CaveLayout.lake_shore_point(ang_l, r_l)
+		var lu_l := shore_pt.x + rng.randf_range(-1.3, 1.3)
+		var ls_l := shore_pt.y + rng.randf_range(-1.3, 1.3)
+		if Vector2(lu_l - lake_c.x, ls_l - lake_c.z).length() > 40.0:
+			continue
+		var n_pods_l := 5 if (li % 2 == 0) else 4
+		add_crystal_grove.call(lu_l, ls_l, 3.65, n_pods_l, 1.68, 1.05, 1.72, li + 2)
 
 	# --- 3. PEBBLES ---
 	var pebble_xforms: Array[Transform3D] = []
@@ -1006,11 +1403,13 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 
 	for _i in 65:
 		var side := -1.0 if rng.randf() < 0.5 else 1.0
-		var lu := side * rng.randf_range(3.5, 8.2)
-		var ls := rng.randf_range(-9.5, -4.8)
-		var w_xz := CaveLayout.to_world(Vector3(lu, 26.0, ls))
+		var lu := side * rng.randf_range(4.2, 7.6)
+		var ls := rng.randf_range(-11.2, -6.2)
+		var w_xz := CaveLayout.to_world(Vector3(lu, 27.2, ls))
 		var fy := _sample_exterior_sdf_y(sdf, terrain_scene, lu, ls)
-		if fy < 25.0 or fy > 27.2:
+		if terrain_scene != null:
+			fy = minf(fy, float(terrain_scene.call("sample_height", w_xz.x, w_xz.z)))
+		if fy < 25.8 or fy > 30.8:
 			continue
 		var gsc := rng.randf_range(0.85, 1.30)
 		grass_xf.append(Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)).scaled(Vector3(gsc, gsc, gsc)), Vector3(w_xz.x, fy - 0.04, w_xz.z)))
@@ -1050,18 +1449,51 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 			var msc := rng.randf_range(0.85, 1.65)
 			grotto_mush_xf.append(Transform3D(Basis.from_euler(Vector3(rng.randf_range(-0.12, 0.12), rng.randf() * TAU, rng.randf_range(-0.12, 0.12))).scaled(Vector3(msc, msc * rng.randf_range(0.9, 1.25), msc)), CaveLayout.to_world(Vector3(lu, fy - 0.04, ls))))
 
-	var lake_c_mush: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
-	var lake_rx_mush: float = float(CaveLayout.UNDERGROUND_LAKE["rx"])
-	var lake_rz_mush: float = float(CaveLayout.UNDERGROUND_LAKE["rz"])
-	for _m in 32:
-		var th := rng.randf() * TAU
-		var rr := rng.randf_range(0.95, 1.22)
-		var lu := lake_c_mush.x + cos(th) * lake_rx_mush * rr
-		var ls := lake_c_mush.z + sin(th) * lake_rz_mush * rr
-		if sdf.eval_cave_void_smooth(lu, 8.5, ls) > -0.1:
+	# Hairline wet shoreline pebbles right along the organic lake water's edge
+	for _p in 76:
+		var th_p := rng.randf() * TAU
+		var rr_p := rng.randf_range(0.96, 1.05)
+		var pt_p := CaveLayout.lake_shore_point(th_p, rr_p)
+		var lu_p := pt_p.x
+		var ls_p := pt_p.y
+		var fy_p := _sample_floor_y(sdf, lu_p, 10.5, ls_p)
+		if fy_p < 6.05 or fy_p > 7.65:
 			continue
-		var fy := _sample_floor_y(sdf, lu, 10.5, ls)
-		if fy < 7.5 or fy > 11.5:
+		var wp_p := CaveLayout.to_world(Vector3(lu_p, fy_p - 0.02, ls_p))
+		var scv_p := rng.randf_range(0.90, 2.10)
+		var b_p := Basis.from_euler(Vector3(rng.randf_range(-0.15, 0.15), rng.randf() * TAU, rng.randf_range(-0.15, 0.15))).scaled(Vector3(scv_p, scv_p * 0.85, scv_p))
+		pebble_xforms.append(Transform3D(b_p, wp_p))
+
+	# Submerged limestone shoal & abyssal basin pebbles highlighting bathymetric depth across the lake floor
+	for _sp in 72:
+		var th_sp := rng.randf() * TAU
+		var rr_sp := rng.randf_range(0.18, 0.90)
+		var pt_sp := CaveLayout.lake_shore_point(th_sp, rr_sp)
+		var lu_sp := pt_sp.x
+		var ls_sp := pt_sp.y
+		if Vector2(lu_sp + 17.0, ls_sp - 167.5).length() < 6.5 or Vector2(lu_sp - 10.0, ls_sp - 176.0).length() < 6.2:
+			continue
+		var fy_sp := _sample_floor_y(sdf, lu_sp, 6.3, ls_sp)
+		if fy_sp < 1.25 or fy_sp > 6.10:
+			continue
+		var wp_sp := CaveLayout.to_world(Vector3(lu_sp, fy_sp - 0.03, ls_sp))
+		var scv_sp := rng.randf_range(0.95, 2.35)
+		var b_sp := Basis.from_euler(Vector3(rng.randf_range(-0.18, 0.18), rng.randf() * TAU, rng.randf_range(-0.18, 0.18))).scaled(Vector3(scv_sp, scv_sp * 0.78, scv_sp))
+		pebble_xforms.append(Transform3D(b_sp, wp_sp))
+
+	# Luminous cave mushrooms on the outer rocky verge outside the organic shoreline walkway
+	for _m in 46:
+		var th := rng.randf() * TAU
+		var rr := rng.randf_range(1.32, 1.48)
+		var pt_m := CaveLayout.lake_shore_point(th, rr)
+		var lu := pt_m.x
+		var ls := pt_m.y
+		if not _is_clear_of_all_routes(lu, ls, 1.0):
+			continue
+		if sdf.eval_cave_void_smooth(lu, 8.8, ls) > -0.1:
+			continue
+		var fy := _sample_floor_y(sdf, lu, 11.0, ls)
+		if fy < 7.1 or fy > 11.5:
 			continue
 		var msc := rng.randf_range(1.1, 2.0)
 		grotto_mush_xf.append(Transform3D(Basis.from_euler(Vector3(rng.randf_range(-0.12, 0.12), rng.randf() * TAU, rng.randf_range(-0.12, 0.12))).scaled(Vector3(msc, msc * rng.randf_range(0.9, 1.3), msc)), CaveLayout.to_world(Vector3(lu, fy - 0.04, ls))))
@@ -1198,7 +1630,7 @@ func _build_boulders_and_trees(
 func _build_skylight_beams_and_dust() -> void:
 	var sky_c: Vector3 = CaveLayout.SKYLIGHT["c"]
 	var mound_c: Vector3 = CaveLayout.MOUND["c"]
-	var p_top := CaveLayout.to_world(Vector3(sky_c.x + 1.5, 55.8, sky_c.z - 1.5))
+	var p_top := CaveLayout.to_world(Vector3(sky_c.x + 1.5, 50.8, sky_c.z - 1.5))
 	var p_bot := CaveLayout.to_world(Vector3(mound_c.x, 19.6, mound_c.z))
 
 	var beam_shader := load("res://terrain/cave_sunbeam.gdshader") as Shader
@@ -1257,47 +1689,306 @@ func _build_skylight_beams_and_dust() -> void:
 
 
 # ==============================================================================
-# P4: FACETED GEODE CRYSTALS
+# P4: MULTI-PART BASALT-SOCKETED QUARTZ CRYSTALS & PROCEDURAL TEXTURES
 # ==============================================================================
+
+static func _get_crystal_striation_normal_tex() -> ImageTexture:
+	if _crystal_striation_tex != null:
+		return _crystal_striation_tex
+	var size := 256
+	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	var hfield := PackedFloat32Array()
+	hfield.resize(size * size)
+	for y in size:
+		var v := float(y) / float(size)
+		# Crisp, alias-free horizontal quartz growth striations (moderate harmonics prevent Moire)
+		var band := sin(v * TAU * 9.0) * 0.36 + sin(v * TAU * 21.0 + 1.1) * 0.22 + sin(v * TAU * 37.0 + 2.4) * 0.11
+		var step_notch := sin(v * TAU * 4.0 + sin(v * TAU * 2.0) * 0.35) * 0.28
+		var h_row := band + step_notch
+		for x in size:
+			var u := float(x) / float(size)
+			var diag_shear := sin((u * 3.0 + v * 7.0) * TAU) * 0.08
+			var micro := sin((u * 11.0 - v * 5.0) * TAU) * 0.04
+			var n := sin(float(x * 127 + y * 311)) * 43758.5453
+			var grain := (n - floorf(n)) * 0.03
+			hfield[y * size + x] = h_row + diag_shear + micro + grain
+	for y in size:
+		var ym := (y - 1 + size) % size
+		var yp := (y + 1) % size
+		for x in size:
+			var xm := (x - 1 + size) % size
+			var xp := (x + 1) % size
+			var dx := (hfield[y * size + xp] - hfield[y * size + xm]) * 0.55
+			var dy := (hfield[yp * size + x] - hfield[ym * size + x]) * 1.15
+			var nrm := Vector3(-dx, -dy, 1.0).normalized()
+			img.set_pixel(x, y, Color(nrm.x * 0.5 + 0.5, nrm.y * 0.5 + 0.5, nrm.z * 0.5 + 0.5, 1.0))
+	img.generate_mipmaps()
+	_crystal_striation_tex = ImageTexture.create_from_image(img)
+	return _crystal_striation_tex
+
+
+static func _get_crystal_interior_tex() -> ImageTexture:
+	if _crystal_interior_tex != null:
+		return _crystal_interior_tex
+	var size := 128
+	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42069
+
+	# Two-layer seamless periodic toroidal Voronoi grids (6x6 coarse cleavage + 9x9 secondary crystal panes)
+	var n1 := 6
+	var pts1: Array[Vector2] = []
+	var hash1: Array[float] = []
+	for cy in n1:
+		for cx in n1:
+			pts1.append(Vector2((float(cx) + rng.randf_range(0.14, 0.86)) / float(n1), (float(cy) + rng.randf_range(0.14, 0.86)) / float(n1)))
+			hash1.append(rng.randf_range(0.22, 1.0))
+
+	var n2 := 9
+	var pts2: Array[Vector2] = []
+	var hash2: Array[float] = []
+	for cy in n2:
+		for cx in n2:
+			pts2.append(Vector2((float(cx) + rng.randf_range(0.12, 0.88)) / float(n2), (float(cy) + rng.randf_range(0.12, 0.88)) / float(n2)))
+			hash2.append(rng.randf_range(0.20, 1.0))
+
+	var eval_vor := func(u: float, v: float, n: int, pts: Array[Vector2], hashes: Array[float]) -> Vector3:
+		var gx := int(floorf(u * float(n))) % n
+		var gy := int(floorf(v * float(n))) % n
+		var f1 := 9.0
+		var f2 := 9.0
+		var id_val := 0.5
+		for oy in range(-1, 2):
+			var ny := (gy + oy + n) % n
+			for ox in range(-1, 2):
+				var nx := (gx + ox + n) % n
+				var idx := ny * n + nx
+				var p: Vector2 = pts[idx]
+				var dx := u - p.x
+				if dx > 0.5: dx -= 1.0
+				elif dx < -0.5: dx += 1.0
+				var dy := v - p.y
+				if dy > 0.5: dy -= 1.0
+				elif dy < -0.5: dy += 1.0
+				var d := sqrt(dx * dx + dy * dy) * float(n)
+				if d < f1:
+					f2 = f1
+					f1 = d
+					id_val = hashes[idx]
+				elif d < f2:
+					f2 = d
+		return Vector3(f1, f2, id_val)
+
+	for y in size:
+		var v := float(y) / float(size)
+		for x in size:
+			var u := float(x) / float(size)
+			var v1: Vector3 = eval_vor.call(u, v, n1, pts1, hash1)
+			var v2: Vector3 = eval_vor.call(u, v, n2, pts2, hash2)
+			var ridge1 := clampf(1.0 - clampf((v1.y - v1.x) / 0.14, 0.0, 1.0), 0.0, 1.0)
+			var ridge2 := clampf(1.0 - clampf((v2.y - v2.x) / 0.16, 0.0, 1.0), 0.0, 1.0)
+			var cleave := clampf(pow(ridge1, 1.45) * 0.82 + pow(ridge2, 1.8) * 0.55, 0.0, 1.0)
+			var cell_bright := clampf(v1.z * 0.65 + v2.z * 0.35, 0.0, 1.0)
+			var diag_veil := clampf(0.45 + 0.32 * sin((u * 2.0 + v * 3.0) * TAU + v1.x * 2.2) + 0.23 * (v2.z - 0.5), 0.0, 1.0)
+			var h := sin(float(x * 73 + y * 197) + 1.9) * 9183.41
+			var basalt_grain := clampf(0.28 + 0.44 * v1.z + 0.18 * v2.z + 0.14 * (h - floorf(h)), 0.0, 1.0)
+			img.set_pixel(x, y, Color(cleave, cell_bright, diag_veil, basalt_grain))
+	img.generate_mipmaps()
+	_crystal_interior_tex = ImageTexture.create_from_image(img)
+	return _crystal_interior_tex
+
+
+## Adds one triangle with guaranteed Godot clockwise (CW) outward winding and flat face normal.
+static func _add_tri_outward(st: SurfaceTool, p0: Vector3, p1: Vector3, p2: Vector3, uv0: Vector2, uv1: Vector2, uv2_v: Vector2, ref_center: Vector3, part_u: float = 1.0, col: Color = Color.WHITE, use_col: bool = false, part_v: float = 0.0) -> void:
+	var n := (p2 - p0).cross(p1 - p0)
+	if n.length_squared() < 1e-10:
+		return
+	var centroid := (p0 + p1 + p2) * 0.3333333 - ref_center
+	var a0 := p0; var a1 := p1; var a2 := p2
+	var u0 := uv0; var u1 := uv1; var u2 := uv2_v
+	if n.dot(centroid) < 0.0:
+		a1 = p2; a2 = p1
+		u1 = uv2_v; u2 = uv1
+		n = -n
+	n = n.normalized()
+	if use_col:
+		st.set_color(col)
+	st.set_uv2(Vector2(part_u, part_v))
+	st.set_normal(n); st.set_uv(u0); st.add_vertex(a0)
+	if use_col:
+		st.set_color(col)
+	st.set_uv2(Vector2(part_u, part_v))
+	st.set_normal(n); st.set_uv(u1); st.add_vertex(a1)
+	if use_col:
+		st.set_color(col)
+	st.set_uv2(Vector2(part_u, part_v))
+	st.set_normal(n); st.set_uv(u2); st.add_vertex(a2)
+
+
+## Builds a strictly planar-walled asymmetric chunky 6-sided quartz crystal prism (zero barrel bulge, zero needle point).
+static func _add_chisel_crystal_to_st(
+		st_t: SurfaceTool,
+		base_pos: Vector3,
+		dir_axis: Vector3,
+		r_base: float,
+		_r_waist_unused: float,
+		r_shoulder: float,
+		shaft_h: float,
+		tip_h: float,
+		twist: float,
+		asym_x: float = 1.0,
+		asym_z: float = 1.0,
+		col: Color = Color.WHITE,
+		use_col: bool = false,
+		dbl_ended: bool = false,
+		bot_tip_h: float = 0.35,
+		part_u: float = 1.0,
+		sharp_apex: bool = false
+) -> void:
+	var up_d := dir_axis.normalized()
+	var ref := Vector3.FORWARD if absf(up_d.dot(Vector3.FORWARD)) < 0.9 else Vector3.RIGHT
+	var rx_ax := up_d.cross(ref).normalized()
+	var rz_ax := rx_ax.cross(up_d).normalized()
+	var xf := Basis(rx_ax, up_d, rz_ax).rotated(up_d, twist)
+
+	var sides := 6
+	# Angles CCW from +X with bold mineral facet variety (wide main slabs + crisp bevel flanks)
+	var angs := [0.00, 0.88, 2.04, 3.12, 4.02, 5.18]
+	var fmods := [1.10, 0.88, 1.08, 0.90, 1.12, 0.86]
+
+	var sink_y := -0.10 if not dbl_ended else 0.0
+	var taper := clampf(r_shoulder / maxf(r_base, 1e-4), 0.36, 0.96)
+	var span_y := maxf(shaft_h - sink_y, 0.12)
+	var h_cone := sink_y + span_y / (1.0 - taper)
+	var cone_apex := Vector3(0.0, h_cone, 0.0)
+
+	var base_loc: Array[Vector3] = []
+	var ring_b: Array[Vector3] = []
+	var ring_u: Array[Vector3] = []
+	var max_sh_y := sink_y
+
+	for i in sides:
+		var ang: float = angs[i]
+		var fm: float = fmods[i]
+		var cx := cos(ang) * fm * asym_x
+		var cz := sin(ang) * fm * asym_z
+		var pb := Vector3(cx * r_base, sink_y, cz * r_base)
+		base_loc.append(pb)
+		ring_b.append(base_pos + xf * pb)
+		# Coplanar edge lerp along pb -> cone_apex guarantees ALL 6 shaft quads remain strictly flat planes
+		var base_t := 1.0 - taper
+		var obl := 0.16 * cos(ang - 0.18)
+		var rhomb := 0.045 if (i % 2 == 0) else -0.045
+		var frac := clampf(base_t * (1.0 + obl + rhomb), base_t * 0.78, minf(0.72, base_t * 1.24))
+		var pu := pb.lerp(cone_apex, frac)
+		max_sh_y = maxf(max_sh_y, pu.y)
+		ring_u.append(base_pos + xf * pu)
+
+	var prism_ref := base_pos + up_d * (shaft_h * 0.45)
+	var v_bot_uv := 0.28 if dbl_ended else 0.06
+	var v_top_uv := 0.76
+	for i in sides:
+		var nxt := (i + 1) % sides
+		var u0 := float(i) / float(sides)
+		var u1 := float(i + 1) / float(sides)
+		# Single coplanar planar quad per crystal prism wall (part_v = 0.0 for shaft walls)
+		_add_tri_outward(st_t, ring_b[i], ring_u[nxt], ring_b[nxt], Vector2(u0, v_bot_uv), Vector2(u1, v_top_uv), Vector2(u1, v_bot_uv), prism_ref, part_u, col, use_col, 0.0)
+		_add_tri_outward(st_t, ring_b[i], ring_u[i], ring_u[nxt], Vector2(u0, v_bot_uv), Vector2(u0, v_top_uv), Vector2(u1, v_top_uv), prism_ref, part_u, col, use_col, 0.0)
+
+	var top_y := maxf(tip_h, max_sh_y + r_shoulder * 0.30)
+	if sharp_apex:
+		var apex_pt := base_pos + xf * Vector3(r_shoulder * 0.20 * asym_x, top_y, -r_shoulder * 0.06 * asym_z)
+		for i in sides:
+			var nxt := (i + 1) % sides
+			var u0 := float(i) / float(sides)
+			var u1 := float(i + 1) / float(sides)
+			_add_tri_outward(st_t, ring_u[i], apex_pt, ring_u[nxt], Vector2(u0, v_top_uv), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, v_top_uv), prism_ref, part_u, col, use_col, 1.0)
+	else:
+		# Broad convex oblique chisel termination: +X ridge_hi connects {5, 0, 1}, -X ridge_lo connects {2, 3, 4}
+		var lo_y := maxf(max_sh_y + 0.05, top_y - r_shoulder * 0.42)
+		var ridge_hi := base_pos + xf * Vector3(r_shoulder * 0.30 * asym_x, top_y, -r_shoulder * 0.04 * asym_z)
+		var ridge_lo := base_pos + xf * Vector3(-r_shoulder * 0.28 * asym_x, lo_y, r_shoulder * 0.05 * asym_z)
+		_add_tri_outward(st_t, ring_u[5], ridge_hi, ring_u[0], Vector2(0.83, v_top_uv), Vector2(0.92, 1.0), Vector2(1.00, v_top_uv), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[0], ridge_hi, ring_u[1], Vector2(0.00, v_top_uv), Vector2(0.10, 1.0), Vector2(0.17, v_top_uv), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[1], ridge_lo, ridge_hi, Vector2(0.17, v_top_uv), Vector2(0.28, 0.96), Vector2(0.18, 1.0), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[1], ring_u[2], ridge_lo, Vector2(0.17, v_top_uv), Vector2(0.33, v_top_uv), Vector2(0.28, 0.96), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[2], ring_u[3], ridge_lo, Vector2(0.33, v_top_uv), Vector2(0.50, v_top_uv), Vector2(0.42, 0.96), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[3], ring_u[4], ridge_lo, Vector2(0.50, v_top_uv), Vector2(0.67, v_top_uv), Vector2(0.58, 0.96), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[4], ring_u[5], ridge_hi, Vector2(0.67, v_top_uv), Vector2(0.83, v_top_uv), Vector2(0.80, 1.0), prism_ref, part_u, col, use_col, 1.0)
+		_add_tri_outward(st_t, ring_u[4], ridge_hi, ridge_lo, Vector2(0.67, v_top_uv), Vector2(0.80, 1.0), Vector2(0.64, 0.96), prism_ref, part_u, col, use_col, 1.0)
+
+	if dbl_ended:
+		# Stout faceted lower keel with crisp coplanar bevel skirt + chisel/point bottom
+		var bot_cone := Vector3(-r_base * 0.08 * asym_x, -bot_tip_h * 1.18, 0.04 * r_base * asym_z)
+		var ring_l: Array[Vector3] = []
+		var min_kl_y := 0.0
+		for i in sides:
+			var ang_b: float = angs[i]
+			var kl_frac := 0.44 + 0.08 * cos(ang_b + 0.3) + (0.04 if (i % 2 == 1) else -0.04)
+			var pl := base_loc[i].lerp(bot_cone, kl_frac)
+			min_kl_y = minf(min_kl_y, pl.y)
+			ring_l.append(base_pos + xf * pl)
+		for i in sides:
+			var nxt := (i + 1) % sides
+			var u0 := float(i) / float(sides)
+			var u1 := float(i + 1) / float(sides)
+			_add_tri_outward(st_t, ring_l[i], ring_b[nxt], ring_b[i], Vector2(u0, 0.14), Vector2(u1, v_bot_uv), Vector2(u0, v_bot_uv), prism_ref, part_u, col, use_col, 1.0)
+			_add_tri_outward(st_t, ring_l[i], ring_l[nxt], ring_b[nxt], Vector2(u0, 0.14), Vector2(u1, 0.14), Vector2(u1, v_bot_uv), prism_ref, part_u, col, use_col, 1.0)
+		var bot_pt := base_pos + xf * Vector3(-r_base * 0.10 * asym_x, minf(-bot_tip_h, min_kl_y - 0.14), 0.04 * r_base * asym_z)
+		for i in sides:
+			var nxt := (i + 1) % sides
+			var u0 := float(i) / float(sides)
+			var u1 := float(i + 1) / float(sides)
+			_add_tri_outward(st_t, ring_l[nxt], bot_pt, ring_l[i], Vector2(u1, 0.14), Vector2(0.5 * (u0 + u1), 0.0), Vector2(u0, 0.14), prism_ref, part_u, col, use_col, 1.0)
+
 
 func _build_crystal_mesh() -> ArrayMesh:
 	if _cached_crystal_mesh != null:
 		return _cached_crystal_mesh
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var sides := 6
-	var r0 := 0.24
-	var r1 := 0.17
-	var h_shaft := 0.85
-	var h_tip := 1.22
-	var apex := Vector3(0.0, h_tip, 0.0)
 
-	for i in sides:
-		var a0 := (float(i) / float(sides)) * TAU
-		var a1 := (float(i + 1) / float(sides)) * TAU
-		var amid := 0.5 * (a0 + a1)
-		var b0 := Vector3(cos(a0) * r0, 0.0, sin(a0) * r0)
-		var b1 := Vector3(cos(a1) * r0, 0.0, sin(a1) * r0)
-		var u0 := Vector3(cos(a0) * r1, h_shaft, sin(a0) * r1)
-		var u1 := Vector3(cos(a1) * r1, h_shaft, sin(a1) * r1)
-		var n_side := Vector3(cos(amid), 0.10, sin(amid)).normalized()
-		var n_pyr := Vector3(cos(amid), 0.72, sin(amid)).normalized()
+	# 1. Craggy Obsidian-Basalt Matrix Cradle (UV2.x = 0.0, grounded flush around chunky crystal chunks with deep skirt)
+	var rock_sides := 8
+	var rock_bot: Array[Vector3] = []
+	var rock_mid: Array[Vector3] = []
+	var rock_top: Array[Vector3] = []
+	var rock_peak := Vector3(0.0, 0.38, 0.0)
+	var rock_ref := Vector3(0.0, -0.26, 0.0)
+	for i in rock_sides:
+		var a := (float(i) / float(rock_sides)) * TAU + 0.14 * sin(float(i) * 2.3)
+		var rb := 0.94 + 0.12 * cos(float(i) * 2.9)
+		var rm := 0.72 + 0.09 * sin(float(i) * 3.1)
+		var rt := 0.46 + 0.06 * cos(float(i) * 2.1)
+		var hm := 0.10 + 0.06 * sin(float(i) * 1.9)
+		var ht := 0.30 + 0.07 * cos(float(i) * 2.4 + 0.7)
+		rock_bot.append(Vector3(cos(a) * rb, -0.68, sin(a) * rb))
+		rock_mid.append(Vector3(cos(a) * rm, hm, sin(a) * rm))
+		rock_top.append(Vector3(cos(a) * rt, ht, sin(a) * rt))
+	for i in rock_sides:
+		var nxt := (i + 1) % rock_sides
+		var u0 := float(i) / float(rock_sides)
+		var u1 := float(i + 1) / float(rock_sides)
+		_add_tri_outward(st, rock_bot[i], rock_mid[nxt], rock_bot[nxt], Vector2(u0, 0.0), Vector2(u1, 0.45), Vector2(u1, 0.0), rock_ref, 0.0)
+		_add_tri_outward(st, rock_bot[i], rock_mid[i], rock_mid[nxt], Vector2(u0, 0.0), Vector2(u0, 0.45), Vector2(u1, 0.45), rock_ref, 0.0)
+		_add_tri_outward(st, rock_mid[i], rock_top[nxt], rock_mid[nxt], Vector2(u0, 0.45), Vector2(u1, 0.85), Vector2(u1, 0.45), rock_ref, 0.0)
+		_add_tri_outward(st, rock_mid[i], rock_top[i], rock_top[nxt], Vector2(u0, 0.45), Vector2(u0, 0.85), Vector2(u1, 0.85), rock_ref, 0.0)
+		_add_tri_outward(st, rock_top[i], rock_peak, rock_top[nxt], Vector2(u0, 0.85), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, 0.85), rock_ref, 0.0)
 
-		st.set_normal(n_side); st.set_uv(Vector2(0.0, 0.0)); st.add_vertex(b0)
-		st.set_normal(n_side); st.set_uv(Vector2(1.0, 0.0)); st.add_vertex(b1)
-		st.set_normal(n_side); st.set_uv(Vector2(1.0, 0.72)); st.add_vertex(u1)
+	# 2. Chunky Sculptural Interlocking Mineral Quartz Cluster (~1.4:1 to 1.6:1 stout bold proportions, locked tightly in rock cradle)
+	_add_chisel_crystal_to_st(st, Vector3(0.00, 0.08, 0.00), Vector3(0.06, 1.00, -0.04), 0.320, 0.320, 0.290, 0.78, 1.04, 0.24, 1.24, 0.84, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(-0.14, 0.08, 0.12), Vector3(-0.18, 0.97, 0.15), 0.255, 0.255, 0.230, 0.56, 0.76, 1.45, 0.86, 1.18, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(0.18, 0.07, 0.05), Vector3(0.36, 0.92, 0.12), 0.240, 0.240, 0.214, 0.52, 0.70, 1.05, 0.88, 1.16, Color.WHITE, false, false, 0.35, 1.0, true)
+	_add_chisel_crystal_to_st(st, Vector3(-0.18, 0.07, -0.08), Vector3(-0.38, 0.91, -0.16), 0.220, 0.220, 0.194, 0.45, 0.61, -0.78, 1.16, 0.86, Color.WHITE, false, false, 0.35, 1.0, true)
+	_add_chisel_crystal_to_st(st, Vector3(0.04, 0.07, -0.17), Vector3(0.12, 0.89, -0.44), 0.200, 0.200, 0.174, 0.40, 0.54, 2.35, 0.90, 1.14, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(0.09, 0.07, 0.17), Vector3(0.20, 0.89, 0.42), 0.190, 0.190, 0.164, 0.36, 0.50, 0.62, 1.14, 0.88, Color.WHITE, false, false, 0.35, 1.0, true)
 
-		st.set_normal(n_side); st.set_uv(Vector2(0.0, 0.0)); st.add_vertex(b0)
-		st.set_normal(n_side); st.set_uv(Vector2(1.0, 0.72)); st.add_vertex(u1)
-		st.set_normal(n_side); st.set_uv(Vector2(0.0, 0.72)); st.add_vertex(u0)
-
-		st.set_normal(n_pyr); st.set_uv(Vector2(0.0, 0.72)); st.add_vertex(u0)
-		st.set_normal(n_pyr); st.set_uv(Vector2(1.0, 0.72)); st.add_vertex(u1)
-		st.set_normal(n_pyr); st.set_uv(Vector2(0.5, 1.0)); st.add_vertex(apex)
-
+	st.generate_tangents()
 	_cached_crystal_mesh = st.commit()
 	var cmat := ShaderMaterial.new()
 	cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
+	cmat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
+	cmat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
 	_cached_crystal_mesh.surface_set_material(0, cmat)
 	return _cached_crystal_mesh
 
@@ -1335,6 +2026,133 @@ func _build_crystals(_rng: RandomNumberGenerator = null, props_data: Dictionary 
 	add_child(mmi)
 
 
+func _build_abyssal_shard_bundle(boulder_body: StaticBody3D) -> void:
+	var sdf := get_sdf()
+	var pit_c: Vector3 = CaveLayout.LAKE_ABYSS_PIT["c"]
+	var fy_pit := clampf(_sample_floor_y(sdf, pit_c.x, 5.5, pit_c.z), 1.15, 2.25)
+	var bundle_pos := CaveLayout.to_world(Vector3(pit_c.x, fy_pit - 0.12, pit_c.z))
+
+	if _cached_abyssal_bundle_mesh == null:
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+		# 1. Tectonic Angular Basalt Fissure Pedestal (10-sided craggy bedrock cradle, embedded deeply in pit floor)
+		var r_sides := 10
+		var rock_bot: Array[Vector3] = []
+		var rock_mid: Array[Vector3] = []
+		var rock_top: Array[Vector3] = []
+		var rock_peak := Vector3(0.0, 0.90, 0.0)
+		var rock_ref := Vector3(0.0, -0.45, 0.0)
+		var basalt_col := Color(0.06, 0.09, 0.14)
+		for i in r_sides:
+			var a := (float(i) / float(r_sides)) * TAU + 0.13 * sin(float(i) * 2.3)
+			var rb := 3.15 + 0.38 * cos(float(i) * 2.9)
+			var rm := 2.34 + 0.28 * sin(float(i) * 3.1)
+			var rt := 1.48 + 0.18 * cos(float(i) * 2.1)
+			var hm := 0.28 + 0.12 * sin(float(i) * 1.9)
+			var ht := 0.70 + 0.16 * cos(float(i) * 2.4 + 0.7)
+			rock_bot.append(Vector3(cos(a) * rb, -1.05, sin(a) * rb))
+			rock_mid.append(Vector3(cos(a) * rm, hm, sin(a) * rm))
+			rock_top.append(Vector3(cos(a) * rt, ht, sin(a) * rt))
+		for i in r_sides:
+			var nxt := (i + 1) % r_sides
+			var u0 := float(i) / float(r_sides)
+			var u1 := float(i + 1) / float(r_sides)
+			_add_tri_outward(st, rock_bot[i], rock_mid[nxt], rock_bot[nxt], Vector2(u0, 0.0), Vector2(u1, 0.45), Vector2(u1, 0.0), rock_ref, 0.0, basalt_col, true)
+			_add_tri_outward(st, rock_bot[i], rock_mid[i], rock_mid[nxt], Vector2(u0, 0.0), Vector2(u0, 0.45), Vector2(u1, 0.45), rock_ref, 0.0, basalt_col, true)
+			_add_tri_outward(st, rock_mid[i], rock_top[nxt], rock_mid[nxt], Vector2(u0, 0.45), Vector2(u1, 0.85), Vector2(u1, 0.45), rock_ref, 0.0, basalt_col, true)
+			_add_tri_outward(st, rock_mid[i], rock_top[i], rock_top[nxt], Vector2(u0, 0.45), Vector2(u0, 0.85), Vector2(u1, 0.85), rock_ref, 0.0, basalt_col, true)
+			_add_tri_outward(st, rock_top[i], rock_peak, rock_top[nxt], Vector2(u0, 0.85), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, 0.85), rock_ref, 0.0, basalt_col, true)
+
+		# 2. Dense Monumental Cluster of 20 Massive Chunky Crystal Columns & Interlocking Blocks (safe beneath swimming depth <= 5.10 m)
+		var brng := RandomNumberGenerator.new()
+		brng.seed = 7734
+		var shard_palette := [
+			Color(0.08, 0.92, 1.0),
+			Color(0.14, 0.62, 1.0),
+			Color(0.10, 0.96, 0.80),
+			Color(0.54, 0.30, 1.0),
+		]
+		var max_tip_reach := clampf(4.65 - (fy_pit - 0.12), 2.20, 3.25)
+
+		# Tier 0: 3 Colossal Central Heart Crystal Monoliths (1.04m - 1.32m wide chunky columns, ~2.1:1 ratio)
+		var hero_specs := [
+			[Vector3(0.0, 0.34, 0.0), Vector3(0.08, 0.99, -0.05), 0.66, 0.59, 0.96, false, 1.18, 0.86],
+			[Vector3(-0.62, 0.28, 0.40), Vector3(-0.22, 0.96, 0.16), 0.56, 0.50, 0.82, false, 0.88, 1.16],
+			[Vector3(0.64, 0.30, -0.34), Vector3(0.24, 0.95, -0.18), 0.52, 0.46, 0.74, true, 1.15, 0.88],
+		]
+		for hi in hero_specs.size():
+			var hs: Array = hero_specs[hi]
+			var th_tot: float = max_tip_reach * float(hs[4])
+			_add_chisel_crystal_to_st(
+				st, hs[0] as Vector3, hs[1] as Vector3,
+				float(hs[2]), float(hs[2]), float(hs[3]),
+				th_tot * 0.74, th_tot, brng.randf() * TAU,
+				float(hs[6]), float(hs[7]), shard_palette[hi % shard_palette.size()], true, false, 0.35, 1.0, bool(hs[5])
+			)
+
+		# Tier 1: 7 Heavy Buttress Crystal Blocks tightly ringing the hero monoliths (~1.8:1 chunky ratio)
+		for mi in 7:
+			var ang_m := (float(mi) / 7.0) * TAU + brng.randf_range(-0.14, 0.14)
+			var rad_m := brng.randf_range(0.76, 1.18)
+			var tilt_m := brng.randf_range(0.26, 0.46)
+			var dir_m := Vector3(cos(ang_m) * sin(tilt_m), cos(tilt_m), sin(ang_m) * sin(tilt_m)).normalized()
+			var base_m := Vector3(cos(ang_m) * rad_m, brng.randf_range(0.34, 0.52), sin(ang_m) * rad_m)
+			var tot_m := max_tip_reach * brng.randf_range(0.46, 0.68)
+			var rb_m := brng.randf_range(0.36, 0.46)
+			var rs_m := rb_m * brng.randf_range(0.86, 0.92)
+			_add_chisel_crystal_to_st(
+				st, base_m, dir_m, rb_m, rb_m, rs_m,
+				tot_m * 0.74, tot_m, brng.randf() * TAU,
+				1.18 if (mi % 2 == 0) else 0.86, 0.86 if (mi % 2 == 0) else 1.18,
+				shard_palette[(mi + 1) % shard_palette.size()], true, false, 0.35, 1.0, (mi % 2 == 1)
+			)
+
+		# Tier 2: 10 Stout Basal Crystal Chunks forming a dense crystal skirt atop the basalt pedestal (~1.6:1 ratio)
+		for oi in 10:
+			var ang_o := (float(oi) / 10.0) * TAU + 0.31 + brng.randf_range(-0.12, 0.12)
+			var rad_o := brng.randf_range(0.96, 1.42)
+			var tilt_o := brng.randf_range(0.38, 0.58)
+			var dir_o := Vector3(cos(ang_o) * sin(tilt_o), cos(tilt_o), sin(ang_o) * sin(tilt_o)).normalized()
+			var base_o := Vector3(cos(ang_o) * rad_o, brng.randf_range(0.42, 0.60), sin(ang_o) * rad_o)
+			var tot_o := max_tip_reach * brng.randf_range(0.34, 0.50)
+			var rb_o := brng.randf_range(0.28, 0.38)
+			var rs_o := rb_o * brng.randf_range(0.86, 0.92)
+			_add_chisel_crystal_to_st(
+				st, base_o, dir_o, rb_o, rb_o, rs_o,
+				tot_o * 0.74, tot_o, brng.randf() * TAU,
+				1.16 if (oi % 2 == 0) else 0.88, 0.88 if (oi % 2 == 0) else 1.16,
+				shard_palette[(oi + 2) % shard_palette.size()], true, false, 0.35, 1.0, (oi % 2 == 0)
+			)
+
+		st.generate_tangents()
+		_cached_abyssal_bundle_mesh = st.commit()
+		var cmat := ShaderMaterial.new()
+		cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
+		cmat.set_shader_parameter("emission_strength", 1.38)
+		cmat.set_shader_parameter("fresnel_power", 2.9)
+		cmat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
+		cmat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
+		_cached_abyssal_bundle_mesh.surface_set_material(0, cmat)
+
+	var mi := MeshInstance3D.new()
+	mi.name = "CaveAbyssalShards"
+	mi.mesh = _cached_abyssal_bundle_mesh
+	mi.position = bundle_pos
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+
+	# Basal basalt core collision cylinder cleanly well below swimming slime buoyancy depth (top ~ 3.2 m vs water_y 6.40)
+	if boulder_body != null:
+		var cs := CollisionShape3D.new()
+		var cyl := CylinderShape3D.new()
+		cyl.radius = 1.75
+		cyl.height = 2.0
+		cs.shape = cyl
+		cs.position = bundle_pos + Vector3(0.0, 0.85, 0.0)
+		boulder_body.add_child(cs)
+
+
 # ==============================================================================
 # P5: WATER BASIN POOL, DRIP WATERFALL + SPLASH, OUTFLOW STREAM, PEBBLES,
 #     SPELEOTHEMS & STRICTLY ZERO-COLLISION ECOLOGICAL CAVE FLORA
@@ -1364,6 +2182,11 @@ func _build_water_features() -> void:
 	lake_mat.set_shader_parameter("deep_color", Vector3(0.02, 0.08, 0.18))
 	lake_mat.set_shader_parameter("foam_color", Vector3(0.72, 0.92, 1.0))
 
+	var stream_mat := pool_mat.duplicate() as ShaderMaterial
+	_pool_water_mat = pool_mat
+	_lake_water_mat = lake_mat
+	_stream_water_mat = stream_mat
+
 	if _cached_water_meshes.has("pool"):
 		var p_mi := MeshInstance3D.new()
 		p_mi.name = "PoolWater"
@@ -1382,7 +2205,7 @@ func _build_water_features() -> void:
 		var s_mi := MeshInstance3D.new()
 		s_mi.name = "StreamWater"
 		s_mi.mesh = _cached_water_meshes["stream"]
-		s_mi.material_override = pool_mat
+		s_mi.material_override = stream_mat
 		s_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		holder.add_child(s_mi)
 
@@ -1394,11 +2217,14 @@ func _build_water_features() -> void:
 		holder.add_child(w_mi)
 		return
 
-	# 1. Carved Pool Water Surface
+	# Build fast spatial hash of actual baked floor + rim triangles across Pool & Stream Grotto
+	var bed_bins := _build_pool_stream_bed_bins()
+
+	# 1. Carved Pool Water Surface (contoured tightly into stone banks + smooth East/NE spillway weir)
 	var pool_c: Vector3 = CaveLayout.POOL["c"]
 	var pool_y: float = float(CaveLayout.POOL["water_y"])
-	var rx: float = float(CaveLayout.POOL["rx"]) + 0.35
-	var rz: float = float(CaveLayout.POOL["rz"]) + 0.35
+	var rx: float = float(CaveLayout.POOL["rx"]) + 1.45
+	var rz: float = float(CaveLayout.POOL["rz"]) + 1.35
 	var rings := 22
 	var segs := 64
 
@@ -1410,9 +2236,22 @@ func _build_water_features() -> void:
 		var arr_row: Array = []
 		for iseg in range(segs + 1):
 			var th := (float(iseg) / float(segs)) * TAU
+			var d_ang := absf(wrapf(th - 0.73, -PI, PI))
+			var spill_w := 1.0 - smoothstep(0.16, 0.50, d_ang)
 			var lp := Vector3(pool_c.x + cos(th) * rx * rt, pool_y, pool_c.z + sin(th) * rz * rt)
 			var wp := CaveLayout.to_world(lp)
-			var r_col := clampf(1.0 - rt, 0.0, 1.0)
+			var bed_y := _sample_bed_tri_y(bed_bins, wp.x, wp.z, 21.2, -9999.0)
+			if spill_w > 0.005 and rt > 0.72:
+				var rt_s := smoothstep(0.72, 1.00, rt)
+				var spill_target := maxf(bed_y + 0.065, 16.95) if bed_y > 14.0 else 16.95
+				wp.y = lerpf(wp.y, minf(pool_y, spill_target), spill_w * rt_s)
+			if ir >= rings - 1 and bed_y > 14.0:
+				var wall_embed := bed_y - (0.14 if ir == rings else 0.02)
+				if wp.y > wall_embed:
+					wp.y = lerpf(wall_embed, wp.y, spill_w * (1.0 if ir == rings - 1 else 0.85))
+			var r_col := clampf((1.0 - rt) * 3.8, 0.0, 1.0)
+			if ir == rings:
+				r_col = 0.0
 			arr_row.append({"pos": wp, "uv": Vector2(rt * cos(th) * 0.5 + 0.5, rt * sin(th) * 0.5 + 0.5), "col": Color(r_col, 0.0, 0.0, 1.0)})
 		ring_verts.append(arr_row)
 
@@ -1437,18 +2276,11 @@ func _build_water_features() -> void:
 	pool_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(pool_mi)
 
-	# 1b. Big Subterranean Lake Water Surface
+	# 1b. Non-Circular Multi-Cove Organic Underground Lake Water Surface
 	var lake_c: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
 	var lake_y: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"])
-	var l_rx: float = float(CaveLayout.UNDERGROUND_LAKE["rx"]) + 0.5
-	var l_rz: float = float(CaveLayout.UNDERGROUND_LAKE["rz"]) + 0.5
-	var l_rings := 24
-	var l_segs := 64
-
-	lake_mat = pool_mat.duplicate() as ShaderMaterial
-	lake_mat.set_shader_parameter("shallow_color", Vector3(0.10, 0.48, 0.55))
-	lake_mat.set_shader_parameter("deep_color", Vector3(0.02, 0.08, 0.18))
-	lake_mat.set_shader_parameter("foam_color", Vector3(0.72, 0.92, 1.0))
+	var l_rings := 36
+	var l_segs := 112
 
 	var st_lake := SurfaceTool.new()
 	st_lake.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -1458,10 +2290,13 @@ func _build_water_features() -> void:
 		var arr_row: Array = []
 		for iseg in range(l_segs + 1):
 			var th := (float(iseg) / float(l_segs)) * TAU
-			var lp := Vector3(lake_c.x + cos(th) * l_rx * rt, lake_y, lake_c.z + sin(th) * l_rz * rt)
+			var shore_p := CaveLayout.lake_shore_point(th, rt * 1.03)
+			var lp := Vector3(shore_p.x, lake_y, shore_p.y)
 			var wp := CaveLayout.to_world(lp)
 			var r_col := clampf(1.0 - rt, 0.0, 1.0)
-			arr_row.append({"pos": wp, "uv": Vector2(rt * cos(th) * 0.5 + 0.5, rt * sin(th) * 0.5 + 0.5), "col": Color(r_col, 0.0, 0.0, 1.0)})
+			var u_norm := 0.5 + (lp.x - lake_c.x) / 120.0
+			var v_norm := 0.5 + (lp.z - lake_c.z) / 120.0
+			arr_row.append({"pos": wp, "uv": Vector2(u_norm, v_norm), "col": Color(r_col, 0.0, 0.0, 1.0)})
 		lake_ring_verts.append(arr_row)
 
 	for ir in l_rings:
@@ -1485,56 +2320,93 @@ func _build_water_features() -> void:
 	lake_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(lake_mi)
 
-	# 2. Outflow Stream Ribbon following actual baked SDF Stream Grotto riverbed (smooth Catmull-Rom curve)
+	# 2. Outflow Stream Ribbon clinging cleanly onto baked CaveFloorBody riverbed + feathered ends
 	var sdf := get_sdf()
-	var s_ctrl: Array[Vector3] = [
-		Vector3(-44.0, 17.85, 88.5),
-		Vector3(-39.5, 17.65, 92.2),
-		Vector3(-35.0, 17.35, 95.0),
-		Vector3(-27.5, 17.08, 98.2),
-		Vector3(-20.0, 16.82, 99.5),
-		Vector3(-13.0, 16.52, 96.2),
-		Vector3(-7.0, 16.25, 92.5),
-		Vector3(-2.8, 15.92, 85.2),
-		Vector3(0.5, 15.62, 78.0),
-		Vector3(1.5, 15.32, 70.0),
-		Vector3(1.8, 15.12, 63.5),
-	]
+	var s_ctrl := CaveLayout.STREAM_CTRL
 	var s_pts: Array[Vector3] = []
 	for seg_i in range(s_ctrl.size() - 1):
 		var p0 := s_ctrl[maxi(seg_i - 1, 0)]
 		var p1 := s_ctrl[seg_i]
 		var p2 := s_ctrl[seg_i + 1]
 		var p3 := s_ctrl[mini(seg_i + 2, s_ctrl.size() - 1)]
-		for sub in 3:
-			var st_t := float(sub) / 3.0
+		for sub in 6:
+			var st_t := float(sub) / 6.0
 			s_pts.append(p1.cubic_interpolate(p2, p0, p3, st_t))
 	s_pts.append(s_ctrl[s_ctrl.size() - 1])
 
-	var st_s := SurfaceTool.new()
-	st_s.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var half_w := 1.28
-	var rows_s: Array[Array] = []
-	for i in s_pts.size():
+	var n_st := s_pts.size()
+	var dirs: Array[Vector2] = []
+	var rights: Array[Vector2] = []
+	var center_beds := PackedFloat32Array()
+	center_beds.resize(n_st)
+	for i in n_st:
 		var p := s_pts[i]
 		var dir2: Vector2
 		if i == 0:
 			dir2 = Vector2(s_pts[1].x - p.x, s_pts[1].z - p.z)
-		elif i == s_pts.size() - 1:
+		elif i == n_st - 1:
 			dir2 = Vector2(p.x - s_pts[i - 1].x, p.z - s_pts[i - 1].z)
 		else:
 			dir2 = Vector2(s_pts[i + 1].x - s_pts[i - 1].x, s_pts[i + 1].z - s_pts[i - 1].z)
 		dir2 = dir2.normalized()
-		var right2 := Vector2(-dir2.y, dir2.x)
-		var vfrac := float(i) / float(s_pts.size() - 1)
-		var center_fy := _sample_floor_y(sdf, p.x, p.y + 3.0, p.z)
-		var water_center_y := center_fy + 0.22 if i > 0 else minf(p.y, center_fy + 0.35)
+		dirs.append(dir2)
+		rights.append(Vector2(-dir2.y, dir2.x))
+		var cw := CaveLayout.to_world(p)
+		var fallback_c := _sample_floor_y(sdf, p.x, p.y + 3.0, p.z)
+		center_beds[i] = _sample_bed_tri_y(bed_bins, cw.x, cw.z, 20.5, fallback_c)
+
+	var st_s := SurfaceTool.new()
+	st_s.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var rows_s: Array[Array] = []
+	for i in n_st:
+		var p := s_pts[i]
+		var right2 := rights[i]
+		var vfrac := float(i) / float(n_st - 1)
+		var bed_c := center_beds[i]
+		# Local smoothed riverbed elevation so shallow basins pool deeper (up to 13 cm) while crests stay grounded (+5 cm)
+		var bed_avg := 0.0
+		var w_sum := 0.0
+		for k in range(maxi(0, i - 3), mini(n_st, i + 4)):
+			var w_k := 1.0 - absf(float(k - i)) * 0.22
+			bed_avg += center_beds[k] * w_k
+			w_sum += w_k
+		bed_avg /= maxf(w_sum, 1e-4)
+		var water_center_y := clampf(bed_avg + 0.068, bed_c + 0.048, bed_c + 0.135)
+		# Upstream start sits flatly submerged below PoolWater (-0.10 m) and fades in smoothly at the spillway crest (no tent seam inside Pool)
+		var start_tuck := 1.0 - smoothstep(0.025, 0.115, vfrac)
+		var r_start := 1.0 - start_tuck
+		# Sink gracefully into stone floor at Geode Pocket downstream terminus
+		var end_fade := smoothstep(0.86, 1.0, vfrac)
+		var r_end := (1.0 - end_fade) * r_start
+		if start_tuck > 0.001:
+			var sill_y := lerpf(water_center_y, minf(pool_y - 0.10, maxf(bed_c + 0.04, 16.92)), start_tuck)
+			water_center_y = sill_y
+		if end_fade > 0.001:
+			water_center_y = lerpf(water_center_y, bed_c - 0.14, end_fade)
+		var hw_cur := lerpf(1.30, 1.48, start_tuck)
+		hw_cur = lerpf(hw_cur, 0.58, end_fade)
+
 		var row: Array = []
-		for side: float in [-1.0, -0.45, 0.0, 0.45, 1.0]:
-			var off := right2 * (half_w * side)
-			var y_wing := -0.40 * smoothstep(0.45, 1.0, absf(side))
-			var wp := CaveLayout.to_world(Vector3(p.x + off.x, water_center_y + y_wing, p.z + off.y))
-			row.append({"pos": wp, "uv": Vector2(side * 0.5 + 0.5, vfrac * 6.0), "col": Color(1.0 - absf(side), 1.0, 0.0, 1.0)})
+		for side: float in [-1.0, -0.46, 0.0, 0.46, 1.0]:
+			var off := right2 * (hw_cur * side)
+			var w_xz := CaveLayout.to_world(Vector3(p.x + off.x, 0.0, p.z + off.y))
+			var side_bed := _sample_bed_tri_y(bed_bins, w_xz.x, w_xz.z, 20.5, bed_c)
+			var vy: float
+			var r_val: float
+			if absf(side) < 0.05:
+				vy = water_center_y
+				r_val = r_end
+			elif absf(side) < 0.80:
+				var sheet_y := minf(water_center_y - 0.008, side_bed + 0.032)
+				vy = lerpf(sheet_y, water_center_y - 0.02, start_tuck)
+				vy = lerpf(vy, side_bed - 0.12, end_fade)
+				r_val = 0.62 * r_end
+			else:
+				var outer_y := minf(side_bed, water_center_y) - 0.18
+				vy = lerpf(outer_y, water_center_y - 0.06, start_tuck)
+				r_val = 0.0
+			var wp := CaveLayout.to_world(Vector3(p.x + off.x, vy, p.z + off.y))
+			row.append({"pos": wp, "uv": Vector2(side * 0.5 + 0.5, vfrac * 6.0), "col": Color(r_val, 1.0, 0.0, 1.0)})
 		rows_s.append(row)
 
 	for r_i in range(rows_s.size() - 1):
@@ -1554,7 +2426,7 @@ func _build_water_features() -> void:
 	stream_mi.name = "StreamWater"
 	stream_mi.mesh = st_s.commit()
 	_cached_water_meshes["stream"] = stream_mi.mesh
-	stream_mi.material_override = pool_mat
+	stream_mi.material_override = stream_mat
 	stream_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(stream_mi)
 
@@ -1614,6 +2486,81 @@ func _build_water_features() -> void:
 	wf_mi.material_override = wf_mat
 	wf_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(wf_mi)
+
+
+func _build_pool_stream_bed_bins() -> Dictionary:
+	var bins := {}
+	var floor_shape := load(CAVE_FLOOR_SHAPE_PATH) as ConcavePolygonShape3D
+	if floor_shape == null:
+		return bins
+	var faces := floor_shape.get_faces()
+	var min_w := CaveLayout.to_world(Vector3(-68.0, 0.0, 52.0))
+	var max_w := CaveLayout.to_world(Vector3(14.0, 0.0, 110.0))
+	var bx0 := minf(min_w.x, max_w.x) - 22.0
+	var bx1 := maxf(min_w.x, max_w.x) + 22.0
+	var bz0 := minf(min_w.z, max_w.z) - 22.0
+	var bz1 := maxf(min_w.z, max_w.z) + 22.0
+
+	for i in range(0, faces.size(), 3):
+		var a := faces[i]
+		var b := faces[i + 1]
+		var c := faces[i + 2]
+		var minx := minf(a.x, minf(b.x, c.x))
+		var maxx := maxf(a.x, maxf(b.x, c.x))
+		var minz := minf(a.z, minf(b.z, c.z))
+		var maxz := maxf(a.z, maxf(b.z, c.z))
+		if maxx < bx0 or minx > bx1 or maxz < bz0 or minz > bz1:
+			continue
+		if absf((b - a).cross(c - a).y) < 0.04:
+			continue
+		var tri := [a, b, c]
+		var cx0 := int(floor(minx * 0.5))
+		var cx1 := int(floor(maxx * 0.5))
+		var cz0 := int(floor(minz * 0.5))
+		var cz1 := int(floor(maxz * 0.5))
+		for cz in range(cz0, cz1 + 1):
+			for cx in range(cx0, cx1 + 1):
+				var key := Vector2i(cx, cz)
+				if not bins.has(key):
+					bins[key] = []
+				(bins[key] as Array).append(tri)
+	return bins
+
+
+static func _sample_bed_tri_y(bins: Dictionary, wx: float, wz: float, y_max: float, fallback_y: float) -> float:
+	if bins.is_empty():
+		return fallback_y
+	var key := Vector2i(int(floor(wx * 0.5)), int(floor(wz * 0.5)))
+	if not bins.has(key):
+		return fallback_y
+	var tris: Array = bins[key]
+	var best_y := -9999.0
+	for tri: Array in tris:
+		var a: Vector3 = tri[0]
+		var b: Vector3 = tri[1]
+		var c: Vector3 = tri[2]
+		var v0x := c.x - a.x
+		var v0z := c.z - a.z
+		var v1x := b.x - a.x
+		var v1z := b.z - a.z
+		var v2x := wx - a.x
+		var v2z := wz - a.z
+		var dot00 := v0x * v0x + v0z * v0z
+		var dot01 := v0x * v1x + v0z * v1z
+		var dot02 := v0x * v2x + v0z * v2z
+		var dot11 := v1x * v1x + v1z * v1z
+		var dot12 := v1x * v2x + v1z * v2z
+		var denom := dot00 * dot11 - dot01 * dot01
+		if absf(denom) < 1e-8:
+			continue
+		var inv := 1.0 / denom
+		var u := (dot11 * dot02 - dot01 * dot12) * inv
+		var v := (dot00 * dot12 - dot01 * dot02) * inv
+		if u >= -0.002 and v >= -0.002 and (u + v) <= 1.004:
+			var hy := a.y + u * (c.y - a.y) + v * (b.y - a.y)
+			if hy <= y_max and hy > best_y:
+				best_y = hy
+	return best_y if best_y > -9000.0 else fallback_y
 
 
 func _get_pebble_mesh() -> Mesh:
@@ -1869,53 +2816,330 @@ func _build_flora(terrain_scene: Node3D, fallen_log_xf: Transform3D, _rng: Rando
 # P6: GEODE PRISMATIC CRYSTAL CORE COLLECTIBLE & ACOUSTIC REVERB ZONES
 # ==============================================================================
 
-func _build_geode_reward() -> void:
-	var gc: Vector3 = CaveLayout.CHAMBERS["geode_pocket"]["c"]
-	var reward_world := CaveLayout.to_world(Vector3(gc.x, gc.y + 2.25, gc.z - 0.4))
+func _build_faceted_icosahedron(radius: float, subdivisions: int = 2) -> ArrayMesh:
+	var t_gold := (1.0 + sqrt(5.0)) * 0.5
+	var base_v: Array[Vector3] = [
+		Vector3(-1,  t_gold,  0).normalized(),
+		Vector3( 1,  t_gold,  0).normalized(),
+		Vector3(-1, -t_gold,  0).normalized(),
+		Vector3( 1, -t_gold,  0).normalized(),
+		Vector3( 0, -1,  t_gold).normalized(),
+		Vector3( 0,  1,  t_gold).normalized(),
+		Vector3( 0, -1, -t_gold).normalized(),
+		Vector3( 0,  1, -t_gold).normalized(),
+		Vector3( t_gold,  0, -1).normalized(),
+		Vector3( t_gold,  0,  1).normalized(),
+		Vector3(-t_gold,  0, -1).normalized(),
+		Vector3(-t_gold,  0,  1).normalized(),
+	]
+	var tris: Array[Vector3i] = [
+		Vector3i(0, 11, 5), Vector3i(0, 5, 1), Vector3i(0, 1, 7), Vector3i(0, 7, 10), Vector3i(0, 10, 11),
+		Vector3i(1, 5, 9), Vector3i(5, 11, 4), Vector3i(11, 10, 2), Vector3i(10, 7, 6), Vector3i(7, 1, 8),
+		Vector3i(3, 9, 4), Vector3i(3, 4, 2), Vector3i(3, 2, 6), Vector3i(3, 6, 8), Vector3i(3, 8, 9),
+		Vector3i(4, 9, 5), Vector3i(2, 4, 11), Vector3i(6, 2, 10), Vector3i(8, 6, 7), Vector3i(9, 8, 1),
+	]
+	for _s in subdivisions:
+		var mid_cache: Dictionary = {}
+		var new_tris: Array[Vector3i] = []
+		var get_mid := func(i0: int, i1: int) -> int:
+			var a := mini(i0, i1)
+			var b := maxi(i0, i1)
+			var key := (a << 16) | b
+			if mid_cache.has(key):
+				return int(mid_cache[key])
+			var vm := (base_v[i0] + base_v[i1]).normalized()
+			var nid := base_v.size()
+			base_v.append(vm)
+			mid_cache[key] = nid
+			return nid
+		for tri: Vector3i in tris:
+			var a: int = get_mid.call(tri.x, tri.y)
+			var b: int = get_mid.call(tri.y, tri.z)
+			var c: int = get_mid.call(tri.z, tri.x)
+			new_tris.append(Vector3i(tri.x, a, c))
+			new_tris.append(Vector3i(tri.y, b, a))
+			new_tris.append(Vector3i(tri.z, c, b))
+			new_tris.append(Vector3i(a, b, c))
+		tris = new_tris
 
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for tri: Vector3i in tris:
+		var p0: Vector3 = base_v[tri.x] * radius
+		var p1: Vector3 = base_v[tri.y] * radius
+		var p2: Vector3 = base_v[tri.z] * radius
+		var uv0 := Vector2(atan2(p0.z, p0.x) / TAU + 0.5, asin(clampf(base_v[tri.x].y, -1.0, 1.0)) / PI + 0.5)
+		var uv1 := Vector2(atan2(p1.z, p1.x) / TAU + 0.5, asin(clampf(base_v[tri.y].y, -1.0, 1.0)) / PI + 0.5)
+		var uv2_v := Vector2(atan2(p2.z, p2.x) / TAU + 0.5, asin(clampf(base_v[tri.z].y, -1.0, 1.0)) / PI + 0.5)
+		_add_tri_outward(st, p0, p1, p2, uv0, uv1, uv2_v, Vector3.ZERO, 1.0)
+	return st.commit()
+
+
+## Sculpted Multi-Blade Sovereign Geode Heart Shard Cluster (chunky interlocking double-terminated crystal blocks).
+static func _build_octa_heart_crystal_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# 1. Primary Sovereign Core Chunk (bold chunky oblique chisel crystal block + faceted lower keel)
+	_add_chisel_crystal_to_st(
+		st,
+		Vector3(0.0, -0.02, 0.0),
+		Vector3(0.08, 1.00, -0.05),
+		0.43,
+		0.43,
+		0.38,
+		0.54,
+		0.84,
+		0.28,
+		1.20,
+		0.84,
+		Color(0.18, 0.90, 1.0),
+		true,
+		true,
+		0.62,
+		1.0,
+		false
+	)
+	# 2. Secondary Royal Amethyst Chunk blooming out at +32 deg
+	_add_chisel_crystal_to_st(
+		st,
+		Vector3(0.22, -0.06, 0.14),
+		Vector3(0.50, 0.85, 0.22),
+		0.295,
+		0.295,
+		0.255,
+		0.38,
+		0.62,
+		1.15,
+		1.16,
+		0.86,
+		Color(0.76, 0.22, 1.0),
+		true,
+		true,
+		0.44,
+		1.0,
+		true
+	)
+	# 3. Counter Turquoise Left-Back Crystal Block
+	_add_chisel_crystal_to_st(
+		st,
+		Vector3(-0.23, -0.02, -0.12),
+		Vector3(-0.54, 0.83, -0.20),
+		0.275,
+		0.275,
+		0.235,
+		0.34,
+		0.56,
+		-0.90,
+		0.88,
+		1.16,
+		Color(0.08, 0.98, 0.86),
+		true,
+		true,
+		0.40,
+		1.0,
+		false
+	)
+	# 4. Crisp Lower Cobalt-Sapphire Spur Chunk
+	_add_chisel_crystal_to_st(
+		st,
+		Vector3(0.03, -0.14, -0.20),
+		Vector3(0.16, 0.76, -0.62),
+		0.225,
+		0.225,
+		0.188,
+		0.26,
+		0.44,
+		2.20,
+		1.12,
+		0.88,
+		Color(0.24, 0.56, 1.0),
+		true,
+		true,
+		0.32,
+		1.0,
+		true
+	)
+
+	st.generate_tangents()
+	return st.commit()
+
+
+func _build_geode_reward() -> void:
+	var sdf := get_sdf()
+	var gc: Vector3 = CaveLayout.CHAMBERS["geode_pocket"]["c"]
+	var altar_fy := _sample_floor_y(sdf, gc.x, gc.y + 3.0, gc.z - 0.4)
+	var altar_world := CaveLayout.to_world(Vector3(gc.x, altar_fy - 0.08, gc.z - 0.4))
+	var reward_world := CaveLayout.to_world(Vector3(gc.x, altar_fy + 2.02, gc.z - 0.4))
+
+	var crystal_shader := load("res://terrain/cave_crystal.gdshader") as Shader
+	var crown_mat := ShaderMaterial.new()
+	crown_mat.shader = crystal_shader
+	crown_mat.set_shader_parameter("emission_strength", 1.15)
+	crown_mat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
+	crown_mat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
+
+	# 1. Elevated 2-Tier Obsidian Caldera Shrine Plinth + Sleek Radial Quartz Calyx (height ~ 0.98m cradling the floating shard!)
+	var st_altar := SurfaceTool.new()
+	st_altar.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var altar_sides := 10
+	var b0: Array[Vector3] = []
+	var b1: Array[Vector3] = []
+	var b2: Array[Vector3] = []
+	var b_rim: Array[Vector3] = []
+	for i in altar_sides:
+		var a := (float(i) / float(altar_sides)) * TAU + 0.14 * sin(float(i) * 2.7)
+		var r0 := 1.48 + 0.16 * cos(float(i) * 3.1)
+		var r1 := 1.12 + 0.12 * sin(float(i) * 2.3)
+		var r2 := 0.84 + 0.09 * cos(float(i) * 3.7)
+		var r3 := 0.56 + 0.05 * sin(float(i) * 2.9)
+		var h1 := 0.42 + 0.08 * sin(float(i) * 2.5)
+		var h2 := 0.94 + 0.10 * cos(float(i) * 2.0 + 0.5)
+		var h3 := 0.72 + 0.05 * cos(float(i) * 3.3)
+		b0.append(Vector3(cos(a) * r0, -0.40, sin(a) * r0))
+		b1.append(Vector3(cos(a) * r1, h1, sin(a) * r1))
+		b2.append(Vector3(cos(a) * r2, h2, sin(a) * r2))
+		b_rim.append(Vector3(cos(a) * r3, h3, sin(a) * r3))
+	var bowl_center := Vector3(0.0, 0.52, 0.0)
+	var plinth_ref := Vector3(0.0, 0.18, 0.0)
+	var plinth_col := Color(0.06, 0.09, 0.14)
+	for i in altar_sides:
+		var nxt := (i + 1) % altar_sides
+		var u0 := float(i) / float(altar_sides)
+		var u1 := float(i + 1) / float(altar_sides)
+		_add_tri_outward(st_altar, b0[i], b1[nxt], b0[nxt], Vector2(u0, 0.0), Vector2(u1, 0.35), Vector2(u1, 0.0), plinth_ref, 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b0[i], b1[i], b1[nxt], Vector2(u0, 0.0), Vector2(u0, 0.35), Vector2(u1, 0.35), plinth_ref, 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b1[i], b2[nxt], b1[nxt], Vector2(u0, 0.35), Vector2(u1, 0.72), Vector2(u1, 0.35), plinth_ref, 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b1[i], b2[i], b2[nxt], Vector2(u0, 0.35), Vector2(u0, 0.72), Vector2(u1, 0.72), plinth_ref, 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b2[i], b_rim[nxt], b2[nxt], Vector2(u0, 0.72), Vector2(u1, 0.88), Vector2(u1, 0.72), Vector3(0.0, 0.25, 0.0), 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b2[i], b_rim[i], b_rim[nxt], Vector2(u0, 0.72), Vector2(u0, 0.88), Vector2(u1, 0.88), Vector3(0.0, 0.25, 0.0), 0.0, plinth_col, true)
+		_add_tri_outward(st_altar, b_rim[i], bowl_center, b_rim[nxt], Vector2(u0, 0.88), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, 0.88), Vector3(0.0, -0.25, 0.0), 0.0, plinth_col, true)
+
+	# 6 Bold Chunky Quartz Frame Blocks rising around the obsidian plinth shoulder (~1.7:1 mineral proportions)
+	var jaw_cols := [
+		Color(0.10, 0.86, 1.0),
+		Color(0.58, 0.26, 1.0),
+		Color(0.16, 0.94, 0.84),
+		Color(0.24, 0.58, 1.0),
+		Color(0.10, 0.88, 1.0),
+		Color(0.64, 0.28, 1.0),
+	]
+	for ji in 6:
+		var th := (float(ji) / 6.0) * TAU + 0.18 * sin(float(ji) * 1.9)
+		var r_ring := 0.82 + 0.08 * cos(float(ji) * 2.3)
+		var j_pos := Vector3(cos(th) * r_ring, 0.66, sin(th) * r_ring)
+		var out_lean := 0.40 + 0.12 * float(ji % 2)
+		var tang_lean := 0.10 * (1.0 if ji % 2 == 0 else -1.0)
+		var j_dir := Vector3(cos(th) * out_lean - sin(th) * tang_lean, 0.90, sin(th) * out_lean + cos(th) * tang_lean).normalized()
+		var h_sc := 0.86 if (ji % 3 == 1) else (1.18 if (ji % 3 == 0) else 1.02)
+		_add_chisel_crystal_to_st(
+			st_altar,
+			j_pos,
+			j_dir,
+			0.225 * (0.90 + 0.12 * h_sc),
+			0.225,
+			0.195 * (0.90 + 0.12 * h_sc),
+			0.54 * h_sc,
+			0.74 * h_sc,
+			th * 1.4,
+			1.18 if (ji % 2 == 0) else 0.88,
+			0.86 if (ji % 2 == 0) else 1.16,
+			jaw_cols[ji],
+			true,
+			false,
+			0.35,
+			1.0,
+			(ji % 2 == 1)
+		)
+	# Glowing inner crucible chunky crystal seed cluster beneath levitating heart
+	for ci in 3:
+		var ca := float(ci) * (TAU / 3.0) + 0.40
+		_add_chisel_crystal_to_st(
+			st_altar,
+			Vector3(cos(ca) * 0.20, 0.48, sin(ca) * 0.20),
+			Vector3(cos(ca) * 0.24, 0.97, sin(ca) * 0.24),
+			0.15,
+			0.15,
+			0.128,
+			0.25,
+			0.36,
+			ca,
+			1.14,
+			0.88,
+			Color(0.12, 0.94, 1.0),
+			true,
+			false,
+			0.35,
+			1.0,
+			true
+		)
+
+	st_altar.generate_tangents()
+	var altar_mesh := st_altar.commit()
+	altar_mesh.surface_set_material(0, crown_mat)
+	var altar_mi := MeshInstance3D.new()
+	altar_mi.name = "GeodeAltarPedestal"
+	altar_mi.mesh = altar_mesh
+	altar_mi.position = altar_world
+	altar_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	add_child(altar_mi)
+
+	# 2. Floating Levitating GeodeReward Hero Cluster Centerpiece (clean silhouette, zero black pancake/wire antennae)
 	var root_r := Node3D.new()
 	root_r.name = "GeodeReward"
 	root_r.position = reward_world
 	add_child(root_r)
 	_geode_reward_node = root_r
 
-	# Prismatic double-terminated octahedron crystal core
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var eq := [Vector3(0.65, 0, 0), Vector3(0, 0, 0.65), Vector3(-0.65, 0, 0), Vector3(0, 0, -0.65)]
-	var top := Vector3(0, 1.05, 0)
-	var bot := Vector3(0, -0.85, 0)
-	for i in 4:
-		var a: Vector3 = eq[i]
-		var b: Vector3 = eq[(i + 1) % 4]
-		var nt := (top - a).cross(b - a).normalized()
-		var nb := (b - a).cross(bot - a).normalized()
-		st.set_normal(nt); st.set_uv(Vector2(0.0, 0.35)); st.add_vertex(a)
-		st.set_normal(nt); st.set_uv(Vector2(1.0, 0.35)); st.add_vertex(b)
-		st.set_normal(nt); st.set_uv(Vector2(0.5, 1.0)); st.add_vertex(top)
-		st.set_normal(nb); st.set_uv(Vector2(0.0, 0.35)); st.add_vertex(a)
-		st.set_normal(nb); st.set_uv(Vector2(0.5, 0.0)); st.add_vertex(bot)
-		st.set_normal(nb); st.set_uv(Vector2(1.0, 0.35)); st.add_vertex(b)
+	var orb_pivot := Node3D.new()
+	orb_pivot.name = "GeodeHeartMesh"
+	root_r.add_child(orb_pivot)
+	_geode_reward_mesh = orb_pivot
 
-	var r_mesh := st.commit()
-	var cmat := ShaderMaterial.new()
-	cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
-	cmat.set_shader_parameter("emission_strength", 1.35)
-	r_mesh.surface_set_material(0, cmat)
+	# 2A. Hero Multi-Blade Sovereign Geode Shard Cluster (`OrbCore`)
+	var orb_mat := ShaderMaterial.new()
+	orb_mat.shader = load("res://terrain/cave_orb.gdshader") as Shader
+	orb_mat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
+	orb_mat.set_shader_parameter("emission_strength", 1.38)
+	var orb_mi := MeshInstance3D.new()
+	orb_mi.name = "OrbCore"
+	orb_mi.mesh = _build_octa_heart_crystal_mesh()
+	orb_mi.scale = Vector3(1.10, 1.10, 1.10)
+	orb_mi.material_override = orb_mat
+	orb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	orb_pivot.add_child(orb_mi)
 
-	var mi := MeshInstance3D.new()
-	mi.name = "GeodeHeartMesh"
-	mi.mesh = r_mesh
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	root_r.add_child(mi)
-	_geode_reward_mesh = mi
+	# 2B. Five Orbiting Radiant Double-Terminated Chunky Gem Shards (part_u = 2.0 -> glowing tips at BOTH ends, zero black bottom AO)
+	var sat_cols := [
+		Color(0.14, 0.94, 1.0),
+		Color(0.68, 0.30, 1.0),
+		Color(0.18, 0.96, 0.84),
+		Color(0.28, 0.64, 1.0),
+		Color(0.56, 0.34, 1.0),
+	]
+	for si in 5:
+		var st_sat := SurfaceTool.new()
+		st_sat.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var s_sc := 0.86 + 0.24 * float(si % 2)
+		_add_chisel_crystal_to_st(st_sat, Vector3.ZERO, Vector3.UP, 0.135 * s_sc, 0.135 * s_sc, 0.112 * s_sc, 0.16 * s_sc, 0.27 * s_sc, float(si) * 0.9, 1.20, 0.82, sat_cols[si], true, true, 0.20 * s_sc, 2.0, (si % 2 == 1))
+		st_sat.generate_tangents()
+		var sat_mesh := st_sat.commit()
+		sat_mesh.surface_set_material(0, crown_mat)
+		var sat_mi := MeshInstance3D.new()
+		sat_mi.name = "OrbSat%d" % si
+		sat_mi.mesh = sat_mesh
+		sat_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var a0_s := float(si) * (TAU / 5.0)
+		sat_mi.position = Vector3(cos(a0_s) * 1.08, sin(a0_s) * 0.28, sin(a0_s) * 1.08)
+		orb_pivot.add_child(sat_mi)
+		_geode_orb_satellites.append(sat_mi)
 
 	var area := Area3D.new()
 	area.name = "GeodeRewardArea"
 	area.monitoring = true
 	area.monitorable = false
 	area.collision_layer = 0
-	area.collision_mask = 1 | SlimeMotor.LAYER_SLIMES
+	area.collision_mask = 1 | 2
 	var cs := CollisionShape3D.new()
 	var sph := SphereShape3D.new()
 	sph.radius = 2.6
@@ -2096,8 +3320,9 @@ func _build_reverb_zones() -> void:
 	var zones := [
 		["HallReverbZone", Vector3(-60.0, 28.0, 72.0), Vector3(72.0, 34.0, 48.0), 0.45],
 		["GrottoReverbZone", Vector3(-16.0, 19.0, 82.0), Vector3(44.0, 16.0, 44.0), 0.32],
-		["LakeReverbZone", Vector3(-34.0, 15.0, 146.0), Vector3(58.0, 24.0, 50.0), 0.58],
-		["VaultSanctumReverbZone", Vector3(-135.0, 14.0, 84.0), Vector3(32.0, 18.0, 28.0), 0.40],
+		["AtriumReverbZone", Vector3(38.0, 13.0, 112.0), Vector3(36.0, 18.0, 42.0), 0.42],
+		["LakeReverbZone", Vector3(-5.0, 14.0, 178.0), Vector3(132.0, 26.0, 114.0), 0.58],
+		["VaultSanctumReverbZone", Vector3(-179.0, 10.0, 71.0), Vector3(44.0, 22.0, 40.0), 0.44],
 	]
 	var rz_parent := Node3D.new()
 	rz_parent.name = "CaveReverbZones"

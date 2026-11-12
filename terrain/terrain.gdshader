@@ -104,15 +104,20 @@ void fragment() {
 		ground_col = mix(ground_col, snow_color, snow_mask);
 	}
 
-	// 4. Coastal Golden Beach Sand (only evaluated near sea level y < 7.5m)
+	// 4. Coastal Golden Beach Sand (only evaluated near sea level y < 7.5m; zero fragment noise per invariant!)
+	float wet_gloss = 0.0;
 	if (v_world_y < beach_height + beach_blend) {
 		vec3 s_col = mix(sand_dark_color, sand_light_color, smoothstep(0.30, 0.75, v_med_pat));
-		s_col = mix(wet_sand_color, s_col, smoothstep(sea_level - 2.5, sea_level + 0.6, v_world_y));
+		float wet_jitter = (v_med_pat - 0.5) * 0.95 + (v_macro_pat - 0.5) * 0.45;
+		float wet_t = smoothstep(sea_level - 1.4, sea_level + 1.55 + wet_jitter, v_world_y);
+		s_col = mix(wet_sand_color * 0.82, s_col, wet_t);
 		float beach_mask = 1.0 - smoothstep(beach_height - beach_blend, beach_height + beach_blend, v_world_y);
-		ground_col = mix(ground_col, s_col, beach_mask * (1.0 - v_rock_mask * 0.85));
+		float eff_beach = beach_mask * (1.0 - v_rock_mask * 0.85);
+		ground_col = mix(ground_col, s_col, eff_beach);
+		wet_gloss = (1.0 - wet_t) * eff_beach;
 	}
 
 	ALBEDO = ground_col * v_height_shade;
-	ROUGHNESS = mix(surface_roughness, 0.80, snow_mask);
+	ROUGHNESS = mix(mix(surface_roughness, 0.80, snow_mask), 0.34, wet_gloss);
 	METALLIC = 0.0;
 }

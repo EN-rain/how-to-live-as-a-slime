@@ -118,13 +118,13 @@ transform = Transform3D(0.7809, -0.4877, 0.3904, 0, 0.625, 0.7807, -0.6247, -0.6
 light_energy = 0.9
 
 [node name="Slime" parent="." instance=ExtResource("8_slime_scene") node_paths=PackedStringArray("camera", "floor_mesh", "props")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -150.61, 22.85, -159.45)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -101.71, 22.85, -84.55)
 camera = NodePath("../CameraRig/Camera3D")
 floor_mesh = NodePath("../Floor")
 props = NodePath("../Ecosystem")
 
 [node name="CameraRig" type="Node3D" parent="." unique_id=870445326 node_paths=PackedStringArray("camera", "follow")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -150.61, 22.85, -159.45)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -101.71, 22.85, -84.55)
 script = ExtResource("4_orbit_script")
 camera = NodePath("Camera3D")
 follow = NodePath("../Slime")

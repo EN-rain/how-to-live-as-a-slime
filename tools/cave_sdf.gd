@@ -62,9 +62,9 @@ func _compile_primitives() -> void:
 		"lake_tunnel": 0.14,
 		"door_tunnel": -0.12,
 	}
-	for tname: String in ["twilight_passage", "hall_throat", "stream_grotto", "deep_descent", "lake_tunnel", "door_tunnel"]:
+	for tname: String in ["twilight_passage", "hall_throat", "stream_grotto", "deep_descent", "lake_tunnel", "lake_shoreline", "door_tunnel"]:
 		var nodes: Array = CaveLayout.TUNNELS[tname]
-		var lean: float = float(leans.get(tname, 0.0))
+		var lean: float = float(leans.get(tname, 0.04))
 		for i in range(nodes.size() - 1):
 			var a: Dictionary = nodes[i]
 			var b: Dictionary = nodes[i + 1]
@@ -104,8 +104,8 @@ func _compile_primitives() -> void:
 
 	# 4. Asymmetric Undercut Alcoves, Overhangs & Ceiling Pockets (kills "pipe/dome" uniformity)
 	var alcoves := [
-		# Entrance mouth overhang pocket (tucked gently inside brow without puncturing exterior cheek boulders)
-		[-3.2, 27.5, 0.0, 5.2, 4.0, 5.5],
+		# Entrance mouth overhang pocket (tucked deeper inside twilight bend away from front arch wall)
+		[-3.8, 26.5, 8.5, 4.2, 3.0, 4.2],
 		# Twilight passage side dissolution pockets
 		[4.5, 26.8, 16.0, 4.8, 3.6, 5.5],
 		[-16.5, 25.5, 29.0, 5.5, 4.4, 6.2],
@@ -118,20 +118,19 @@ func _compile_primitives() -> void:
 		[-28.0, 18.8, 102.0, 5.5, 3.2, 4.8],
 		[-2.0, 17.8, 86.0, 5.0, 3.4, 5.8],
 		# Abyssal Atrium & Deep Chambers side dissolution bays
-		[-90.0, 12.0, 124.0, 7.5, 5.5, 7.0],  # Abyssal Gallery north-west alcove
-		[-2.0, 10.0, 172.0, 12.0, 8.0, 10.5],  # Underground Lake east cove
-		[-180.0, 4.5, 72.0, 7.0, 5.0, 6.5],  # Vault Sanctum north alcove
+		[49.5, 11.8, 110.0, 7.5, 5.5, 7.0],  # Abyssal Atrium east alcove
+		[50.0, 10.8, 184.0, 9.5, 5.4, 8.2],  # Expanded Underground Lake ESE lagoon bay overhang
+		[-31.0, 10.5, 139.0, 8.2, 5.2, 7.2],  # Expanded Underground Lake NNW grotto cove pocket
+		[-182.0, 5.2, 82.0, 9.0, 6.5, 8.5],  # Vault Sanctum north alcove
 	]
 	for alc: Array in alcoves:
 		_alcove_data.append_array([float(alc[0]), float(alc[1]), float(alc[2]), float(alc[3]), float(alc[4]), float(alc[5])])
 		_alcove_count += 1
 
-	# 5. Solid Structural Buttresses & Fluted Rock Columns framing the Collapse Hall nave & Lake
+	# 5. Solid Structural Buttresses framing the Collapse Hall nave
 	var pillars := [
 		[-35.0, 74.0, 17.0, 52.0, 4.4, 6.2], # East hall buttress framing Pool bay
 		[-36.5, 59.5, 17.0, 50.0, 4.2, 5.8], # South-east hall shoulder flanking throat (keeps west spiral ledge clear)
-		[-8.0, 168.0, 4.0, 30.0, 4.8, 6.4],  # Grand Karst Column in Underground Lake
-		[-152.0, 78.0, 1.8, 14.0, 2.4, 3.2], # Sanctum Colonnade Pillar
 	]
 	for pl: Array in pillars:
 		_pillar_data.append_array([float(pl[0]), float(pl[1]), float(pl[2]), float(pl[3]), float(pl[4]), float(pl[5])])
@@ -164,37 +163,35 @@ static func smax(a: float, b: float, k: float) -> float:
 static func eval_karst_hill_height(u: float, s: float, base_h: float) -> float:
 	var h := base_h
 
-	# 1. Gently graded meadow approach valley leading up to the Entrance Overhang (s = -58..+3)
-	if s > -58.0 and s < 5.0 and absf(u) < 38.0:
-		var ws := smoothstep(-58.0, -18.0, s) * (1.0 - smoothstep(-6.0, 3.5, s))
-		var wu := 1.0 - smoothstep(14.0, 38.0, absf(u))
+	# 1. Gently graded approach meadow leading smoothly up to Entrance Threshold (s in [-18, +3], |u| < 16)
+	if s > -18.0 and s < 3.0 and absf(u) < 16.0:
+		var ws := smoothstep(-18.0, -4.5, s) * (1.0 - smoothstep(-1.0, 3.0, s))
+		var wu := 1.0 - smoothstep(6.0, 16.0, absf(u))
 		h = lerpf(h, CaveLayout.ORIGIN.y, ws * wu)
 
-	# 2. Broad, thick limestone karst hill rising over the Twilight Passage, Collapse Hall, Geode,
-	#    and deeper subterranean Atrium, Underground Lake & Vault Sanctum chambers.
-	#    Sustains full >= 56.5 m roof cap over the entire cave network.
-	var du_hill := (u + 55.0) / 96.0
-	var ds_hill := (s - 75.0) / 92.0
+	# 2. Broad, natural limestone karst hill rising gradually behind the entrance over
+	#    Twilight Passage, Collapse Hall, Geode Pocket, Abyssal Atrium, Underground Lake & Vault Sanctum.
+	var du_hill := (u + 68.0) / 172.0
+	var ds_hill := (s - 108.0) / 145.0
 	var r2_hill := du_hill * du_hill + ds_hill * ds_hill
-	if r2_hill < 1.55:
-		var dome_w := 1.0 - smoothstep(0.42, 1.45, r2_hill)
-		var cliff_front := smoothstep(-3.0, 12.0, s)
-		var target_hill := CaveLayout.MOUNTAIN_SURFACE_OVER_HALL + 4.5 * sin(u * 0.045) * cos(s * 0.04)
+	if r2_hill < 1.85:
+		var dome_w := 1.0 - smoothstep(0.92, 1.80, r2_hill)
+		var shoulder_delay := smoothstep(8.0, 48.0, absf(u)) * 12.0
+		var cliff_front := smoothstep(-2.0 + shoulder_delay, 34.0 + shoulder_delay, s)
+		var target_hill := clampf(CaveLayout.MOUNTAIN_SURFACE_OVER_HALL + 4.5 * sin(u * 0.045) * cos(s * 0.04), 52.0, 62.5)
 		h = lerpf(h, maxf(h, target_hill), dome_w * cliff_front)
 
-	# 3. Wide Asymmetric Craggy Outcrop Brow & Cliff Shoulders around the Entrance Mouth
-	#    Spans u in [-27..+23], s in [-7..+26] so left/right cavern walls stay thickly buried
-	#    without ever exceeding the 66.0m bake grid ceiling.
-	var du_brow := (u + 2.0) / 25.0
-	var ds_brow := (s - 9.5) / 16.0
+	# 3. Natural limestone portal brow above Entrance Mouth (thick solid overburden over s = 0..14
+	#    Twilight Passage ceiling before the hillside rises behind it).
+	var du_brow := u / 22.0
+	var ds_brow := (s - 8.5) / 14.0
 	var d2_brow := du_brow * du_brow + ds_brow * ds_brow
 	if d2_brow < 1.0:
-		var brow_w := (1.0 - smoothstep(0.20, 1.0, d2_brow)) * smoothstep(-7.5, 6.0, s)
-		# Keep direct entrance corridor mouth (absf(u) < 5.5, s < 0.8) open at origin floor height
-		var mouth_opening := (1.0 - smoothstep(4.0, 6.2, absf(u))) * (1.0 - smoothstep(-2.5, 0.8, s))
+		var brow_w := (1.0 - smoothstep(0.28, 1.0, d2_brow)) * smoothstep(-2.5, 2.5, s)
+		var mouth_opening := (1.0 - smoothstep(4.2, 6.8, absf(u))) * (1.0 - smoothstep(-3.5, 0.2, s))
 		brow_w *= (1.0 - mouth_opening)
-		var asym := 12.0 - u * 0.18 + 1.5 * sin(u * 0.30) * cos(s * 0.25)
-		var target_brow := 44.0 + clampf(asym, 6.0, 14.5)
+		var asym := 0.8 * sin(u * 0.25) * cos(s * 0.20)
+		var target_brow := clampf(41.8 + asym, 40.5, 43.2)
 		h = lerpf(h, maxf(h, target_brow), brow_w)
 
 	# 4. Gentle karst basin right at the Skylight Rim (-62, 68) so ledge route exits flush at y ~ 56 m
@@ -213,17 +210,17 @@ static func is_quad_in_cave_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v11
 	var cx := 0.25 * (v00.x + v10.x + v01.x + v11.x)
 	var cz := 0.25 * (v00.z + v10.z + v01.z + v11.z)
 	var cl := CaveLayout.to_local(Vector3(cx, 0.0, cz))
-	if cl.x < -160.0 or cl.x > 45.0 or cl.z < -35.0 or cl.z > 185.0:
+	if cl.x < -235.0 or cl.x > 85.0 or cl.z < -45.0 or cl.z > 245.0:
 		return false
 
-	var sky_c_cut: Vector3 = CaveLayout.SKYLIGHT["c"]
-	# A. Entrance Mouth Arch cutout: remove heightfield quads where the entrance tunnel passes through the cliff
-	if cl.z > -1.5 and cl.z < 6.5 and cl.x > -5.2 and cl.x < 5.2:
+	# A. Entrance Mouth Arch cutout: matched to mouth surface patch boundary
+	if eval_mouth_patch_t(cl.x, cl.z) < 0.66:
 		return true
 
-	# B. Skylight Rim cutout (radius < 8.6 m around (-62.8, 68.0))
+	# B. Skylight Rim cutout (radius < 10.7 m around (-62.8, 68.0) removes overhanging terrain sawteeth)
+	var sky_c_cut: Vector3 = CaveLayout.SKYLIGHT["c"]
 	var ds: float = Vector2(cl.x - (sky_c_cut.x - 0.8), cl.z - sky_c_cut.z).length()
-	if ds < 8.6:
+	if ds < 10.7:
 		return true
 
 	return false
@@ -235,8 +232,8 @@ static func is_in_overworld_scatter_exclusion(wx: float, wz: float, is_grass: bo
 	if p.z > -18.0 and p.z < 28.0 and absf(p.x) < 22.0:
 		return true
 	# Clear a tapered rocky trail & camera sightline corridor in front of the mouth so grass frames the path cleanly
-	if p.z >= -34.0 and p.z <= -18.0:
-		var t_trail := clampf((-18.0 - p.z) / 16.0, 0.0, 1.0)
+	if p.z >= -38.0 and p.z <= -18.0:
+		var t_trail := clampf((-18.0 - p.z) / 20.0, 0.0, 1.0)
 		var half_w := lerpf(13.5, 8.5, t_trail) if is_grass else 9.0
 		if absf(p.x) < half_w:
 			return true
@@ -472,19 +469,97 @@ func eval_cave_void_smooth(u: float, y: float, s: float) -> float:
 		var d_pool := maxf((pr - 1.0) * pool_rz, dy_pool)
 		d = smin(d, d_pool, 1.4)
 
-	# 5b. Carved Big Subterranean Lake Basin
+	# 5b. Carved Expanded Multi-Cove Subterranean Lake Basin: Multi-Tier Karst Bathymetry + Deep Abyssal Shard Trench
 	var lake_c: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
 	var lake_rx: float = float(CaveLayout.UNDERGROUND_LAKE["rx"])
 	var lake_rz: float = float(CaveLayout.UNDERGROUND_LAKE["rz"])
 	var lu: float = (u - lake_c.x) / lake_rx
 	var ls: float = (s - lake_c.z) / lake_rz
-	var lr := sqrt(lu * lu + ls * ls)
-	if lr < 1.35:
-		var lake_bot: float = lake_c.y
-		var lake_top: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"]) + 2.6
-		var dy_lake := maxf(lake_bot - y, y - lake_top)
-		var d_lake := maxf((lr - 1.0) * minf(lake_rx, lake_rz), dy_lake)
-		d = smin(d, d_lake, 1.8)
+	var lr_raw := sqrt(lu * lu + ls * ls)
+	if lr_raw < 1.78:
+		var lake_theta := atan2(ls, lu)
+		var shore_scale := CaveLayout.lake_shore_radius_scale(lake_theta)
+		var lr := lr_raw / shore_scale
+		if lr < 1.38:
+			var water_y: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"])
+			var lake_top: float = water_y + 2.8
+			var shore_floor_y: float = 7.50 # Walkable 360-deg organic shoreline pathway flush with lake_shoreline (y=7.5)
+			var pen_w := smoothstep(0.95, 0.55, shore_scale)
+			var shelf_in := lerpf(0.84, 0.68, pen_w)
+			var shelf_warp := 0.045 * sin(u * 0.24 + s * 0.19) + 0.032 * cos(u * 0.17 - s * 0.29)
+			var t_shore := smoothstep(shelf_in, 1.01, lr + shelf_warp * (1.0 - smoothstep(0.88, 1.01, lr)))
+
+			# Non-flat sculpted karst lake floor: diagonal limestone ridges, channels & stepped strata terraces
+			var ridge_nw_se := 0.85 * sin(u * 0.145 + s * 0.095 + 0.6 * cos(s * 0.07))
+			var ridge_cross := 0.58 * cos(u * 0.115 - s * 0.165 + 0.5 * sin(u * 0.09))
+			var shoal_ripple := 0.34 * sin(u * 0.31 - s * 0.24) * cos(u * 0.19 + s * 0.27)
+			var raw_bed := 3.95 + ridge_nw_se + ridge_cross + shoal_ripple
+			# Carved stepped travertine/limestone terrace bands + submerged shoal shoulders
+			raw_bed += 0.24 * sin(raw_bed * 3.8 + 0.8 * sin(u * 0.12 - s * 0.10))
+			var d_ese := Vector2((u - 25.5) / 15.0, (s - 180.0) / 11.8).length()
+			raw_bed -= 1.15 * (1.0 - smoothstep(0.32, 1.05, d_ese))
+			# Two subtle submerged stone shoal outcrops (stay <= 5.45m safely under water_y=6.40)
+			var sh1 := exp(-Vector2((u + 27.5) / 5.5, (s - 160.5) / 4.8).length_squared()) * 0.95
+			var sh2 := exp(-Vector2((u - 28.0) / 5.2, (s - 164.0) / 4.6).length_squared()) * 0.85
+			raw_bed += sh1 + sh2
+
+			# Deep Abyssal Crystal Trench ("Abyssal Pit") dropping steeply through rock terraces down to y ~ 1.40m
+			var pit_c: Vector3 = CaveLayout.LAKE_ABYSS_PIT["c"]
+			var pit_rx: float = float(CaveLayout.LAKE_ABYSS_PIT["rx"])
+			var pit_rz: float = float(CaveLayout.LAKE_ABYSS_PIT["rz"])
+			var pit_yaw: float = float(CaveLayout.LAKE_ABYSS_PIT["yaw"])
+			var cy_p := cos(pit_yaw)
+			var sy_p := sin(pit_yaw)
+			var pu_raw := u - pit_c.x
+			var ps_raw := s - pit_c.z
+			var pu_rot := (pu_raw * cy_p + ps_raw * sy_p) / pit_rx
+			var ps_rot := (-pu_raw * sy_p + ps_raw * cy_p) / pit_rz
+			var pit_ang := atan2(ps_rot, pu_rot)
+			var pit_warp := 1.0 + 0.14 * sin(pit_ang * 3.0 + 0.9) + 0.08 * cos(pit_ang * 5.0 - 1.4)
+			var dp_pit := sqrt(pu_rot * pu_rot + ps_rot * ps_rot) / pit_warp
+			var pit_w := (1.0 - smoothstep(0.45, 1.14, dp_pit)) * (1.0 - smoothstep(0.55, 0.85, t_shore))
+			var pit_floor := pit_c.y + 0.28 * sin(u * 0.34 - s * 0.27) + 0.16 * cos(u * 0.52 + s * 0.41)
+			var lake_bot := lerpf(raw_bed, pit_floor, pit_w)
+			# Subtle fractured karst rim lip bracketing the deep sinkhole edge
+			lake_bot += 0.24 * exp(-pow((dp_pit - 0.90) / 0.15, 2.0)) * (1.0 - t_shore)
+			lake_bot = clampf(lake_bot, 1.25, 5.70)
+
+			var basin_floor := lerpf(lake_bot, shore_floor_y, t_shore)
+			var dy_lake := maxf(basin_floor - y, y - lake_top)
+			var d_lake := maxf((lr - 1.22) * minf(lake_rx, lake_rz) * shore_scale, dy_lake)
+			d = smin(d, d_lake, 1.4)
+			# Prevent chained smin blends at shoreline junctions from scooping submerged trenches < 7.35 m
+			var clamp_fade := 1.0 - smoothstep(1.20, 1.34, lr)
+			if clamp_fade > 0.001:
+				var d_shore_bedrock := (basin_floor - 0.12) - y
+				d = lerpf(d, smax(d, d_shore_bedrock, 0.45), clamp_fade)
+
+	# 5c. Asymmetric Karst Lagoon Features: off-center fluted sea-stack islet & low rocky reef shoal
+	var stack_u := -17.0
+	var stack_s := 167.5
+	var st_du := u - stack_u
+	var st_ds := s - stack_s
+	var st_r2 := st_du * st_du + st_ds * st_ds
+	if st_r2 < 120.0:
+		var st_tv := clampf((y - 2.0) / 27.5, 0.0, 1.0)
+		var st_ang := atan2(st_ds, st_du)
+		var st_flute := 1.0 + 0.16 * sin(st_ang * 3.0 + 1.8 + y * 0.08) + 0.09 * cos(st_ang * 5.0 - y * 0.05)
+		var st_waist := lerpf(4.4, 5.4, st_tv) * (0.80 + 0.34 * pow(st_tv - 0.38, 2.0)) * st_flute
+		var d_stack := sqrt(st_r2) - st_waist
+		d = smax(d, -d_stack, 2.0)
+
+	var reef_u := 10.0
+	var reef_s := 176.0
+	var rf_du := u - reef_u
+	var rf_ds := s - reef_s
+	var rf_r2 := rf_du * rf_du + rf_ds * rf_ds
+	if rf_r2 < 90.0:
+		var rf_ang := atan2(rf_ds, rf_du)
+		var rf_rad := 5.2 * (1.0 + 0.18 * sin(rf_ang * 3.0 - 0.7) + 0.10 * cos(rf_ang * 4.0 + 1.2))
+		var rf_r := sqrt(rf_r2)
+		var rf_top := 8.15 - 2.2 * smoothstep(2.2, rf_rad, rf_r) + 0.25 * sin(u * 0.45 + s * 0.35)
+		var d_reef_solid := maxf(y - rf_top, rf_r - rf_rad)
+		d = smax(d, -d_reef_solid, 1.15)
 
 	# 6. Flared Cenote Skylight Chimney (punches from Collapse Hall dome straight through karst roof)
 	if y > 36.0:
@@ -501,8 +576,9 @@ func eval_cave_void_smooth(u: float, y: float, s: float) -> float:
 		d_crawl = minf(d_crawl, _sd_crawl_segment(u, y, s, i * 8))
 	d = smin(d, d_crawl, 0.45)
 
-	# 8. Solid limestone bedrock safety floor: prevents any pocket blend from punching below y = 4.8 m
-	d = smax(d, 4.8 - y, 0.8)
+	# 8. Solid limestone bedrock safety floor safely below deepest Vault Sanctum dish (y=1.55m) and Y_MIN=-1.0m
+	var min_bedrock := 0.6
+	d = smax(d, min_bedrock - y, 0.8)
 
 	return d
 
@@ -550,16 +626,21 @@ func dist_to_ledge_air(u: float, y: float, s: float) -> float:
 	return smax(dl_arch, -dy_l, 0.35)
 
 
+static func eval_mouth_patch_t(u: float, s: float) -> float:
+	var du := absf(u) / 16.5
+	var ds := absf(s - 3.5) / 13.5
+	var warp := 0.025 * sin(u * 0.23 + s * 0.17) + 0.015 * cos(u * 0.37 - s * 0.29)
+	return pow(du * du * du + ds * ds * ds, 1.0 / 3.0) + warp
+
+
+static func eval_sky_patch_t(u: float, s: float) -> float:
+	var sky_c_pt: Vector3 = CaveLayout.SKYLIGHT["c"]
+	return Vector2(u - (sky_c_pt.x - 0.8), s - sky_c_pt.z).length() / 18.0
+
+
 ## Normalized distance (< 1.0 inside the Entrance Outcrop or Skylight Rim surface patches).
 static func eval_surface_patch_t(u: float, s: float) -> float:
-	# Organic warped superellipse (p=3) around mouth: covers widened cutout u in [-17..+17], s in [-2.5..+13] cleanly
-	var du := absf(u - 0.5) / 35.0
-	var ds := absf(s - 5.0) / 31.0
-	var warp := 0.035 * sin(u * 0.23 + s * 0.17) + 0.020 * cos(u * 0.37 - s * 0.29)
-	var d_mouth_patch := pow(du * du * du + ds * ds * ds, 1.0 / 3.0) + warp
-	var sky_c_pt: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var d_sky_patch: float = Vector2(u - sky_c_pt.x, s - sky_c_pt.z).length() / 27.5
-	return minf(d_mouth_patch, d_sky_patch)
+	return minf(eval_mouth_patch_t(u, s), eval_sky_patch_t(u, s))
 
 
 ## Full SDF including exterior Outcrop / Skylight surface blend and geological fracture/scallop relief.
@@ -567,13 +648,12 @@ static func eval_surface_patch_t(u: float, s: float) -> float:
 func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 	var d_cave := eval_cave_void_smooth(u, y, s)
 
-	# Continuous union of subterranean cave air and open sky air above the karst hill!
-	# Stays 100% flush with karst_h past all cutout quad boundaries (patch_t <= 0.84),
-	# then steps beneath uncut Terrain triangles (0.84..0.92) and tucks -2.5m underground (0.92..1.0).
+	# Continuous union of subterranean cave air and open sky air at Entrance & Skylight surface patches.
+	# Stays 100% flush past cutout quad boundaries (patch_t <= 0.68), then tucks smoothly
+	# beneath uncut Terrain triangles (0.68..0.88). Zero discontinuous sky_off spikes!
 	var patch_t := eval_surface_patch_t(u, s)
-	var skirt_drop := smoothstep(0.84, 0.92, patch_t) * 0.65 + smoothstep(0.92, 1.00, patch_t) * 2.55
-	var ext_brow := smoothstep(-2.0, 4.0, s) * (1.0 - smoothstep(0.42, 0.62, patch_t)) * smoothstep(28.0, 34.0, y)
-	var d_sky_air := (karst_h + 0.95 * ext_brow - skirt_drop) - y # < 0 above ground (air), > 0 underground (rock)
+	var skirt_drop := smoothstep(0.68, 0.88, patch_t) * 3.80
+	var d_sky_air := (karst_h - skirt_drop) - y # < 0 above ground (air), > 0 underground (rock)
 	var d := smin(d_cave, d_sky_air, 2.0)
 
 	# Skip expensive 3D noise far from the zero-isosurface
@@ -592,18 +672,23 @@ func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 
 	# Calm noise on flat walkable floors AND outer overlap skirt (so seams stay razor-flush)
 	var d_cave_up := eval_cave_void_smooth(u, y + 0.8, s)
-	var d_sky_up := (karst_h + 0.95 * ext_brow - skirt_drop) - (y + 0.8)
+	var d_sky_up := (karst_h - skirt_drop) - (y + 0.8)
 	var d_up := smin(d_cave_up, d_sky_up, 2.0)
 	var up_grad := clampf((d - d_up) / 0.8, -1.0, 1.0) # > 0 when normal points +Y (walkable floor)
-	var wall_ceil_weight := (1.0 - 0.88 * smoothstep(0.30, 0.80, up_grad)) * (1.0 - smoothstep(0.68, 0.84, patch_t) * smoothstep(0.0, 0.6, up_grad))
+	# Keep dry walkable trails smooth, while preserving rich 3D rock fractures & limestone relief on the submerged lakebed
+	var sub_lake := smoothstep(6.05, 5.05, y) * smoothstep(128.0, 138.0, s) * smoothstep(-58.0, -48.0, u)
+	var floor_atten := lerpf(0.88, 0.42, sub_lake)
+	# Calm high vaulted lake dome noise (> 10.0m) to avoid wasting thousands of hidden ceiling triangles
+	var lake_ceil_calm := 1.0 - 0.85 * smoothstep(10.0, 13.8, y) * smoothstep(128.0, 138.0, s) * smoothstep(-62.0, -52.0, u)
+	var wall_ceil_weight := (1.0 - floor_atten * smoothstep(0.30, 0.80, up_grad)) * (1.0 - smoothstep(0.50, 0.64, patch_t) * smoothstep(0.0, 0.55, up_grad)) * lake_ceil_calm
 
 	# 1. Broad water-worn phreatic scallops & dissolution pockets
 	var n_mac := _noise_macro.get_noise_3d(u * 1.1, y * 1.35, s * 1.1)
 	# 2. Smooth ridged limestone relief & subtle warped bedding (zero Voronoi singularities)
 	var n_frac := _noise_fracture.get_noise_3d(u * 0.9, y * 1.15, s * 0.9)
-	var strata := sin(y * 0.85 + n_mac * 2.2 + u * 0.10 - s * 0.08) * 0.12
+	var strata := sin(y * 0.85 + n_mac * 2.2 + u * 0.10 - s * 0.08) * (0.12 + 0.12 * sub_lake)
 
-	var disp := (n_mac * 1.15 + (n_frac - 0.5) * 0.55 + strata) * wall_ceil_weight * crawl_calm * ledge_calm
-	if ext_brow > 0.05:
-		disp = maxf(disp, -0.05)
+	var disp := (n_mac * 1.15 + (n_frac - 0.5) * (0.55 + 0.30 * sub_lake) + strata) * wall_ceil_weight * crawl_calm * ledge_calm
+	if up_grad > 0.15 and patch_t > 0.50 and sub_lake < 0.05:
+		disp = minf(disp, -0.02 * smoothstep(0.52, 0.68, patch_t))
 	return d + disp

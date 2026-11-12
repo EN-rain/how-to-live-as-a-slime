@@ -213,6 +213,7 @@ static var _core_material: StandardMaterial3D
 var _verified_key := -1
 var fission_clone: Slime = null
 var _dev_speed_idx := 2
+var _swim_ripple_timer := 0.0
 
 var time: float:
 	get:
@@ -813,6 +814,14 @@ static func _same_param(a: Variant, b: Variant) -> bool:
 # Physics tick
 # ------------------------------------------------------------------------------------------------
 
+func get_visual_position() -> Vector3:
+	if not is_inside_tree():
+		return position
+	if _prev_global_pos.distance_squared_to(global_position) > 400.0:
+		return global_position
+	return _prev_global_pos.lerp(global_position, Engine.get_physics_interpolation_fraction())
+
+
 ## Visual-only smoothing between physics ticks. `Body` carries the mesh and shadow;
 ## the node itself keeps the physics transform that gameplay and picking use. The
 ## engine's built-in interpolation is off, so this is the single interpolator.
@@ -820,13 +829,41 @@ func _process(_delta: float) -> void:
 	if body == null:
 		return
 	var f := Engine.get_physics_interpolation_fraction()
-	var interp_pos := _prev_global_pos.lerp(global_position, f)
+	var interp_pos := get_visual_position()
 	var s := lerpf(_prev_scale, slime_scale, f)
+	var dt_vis := clampf(_delta, 0.0, 0.1)
+	if _visual_up.length_squared() < 1e-6 or not _visual_up.is_finite():
+		_visual_up = Vector3.UP
+	else:
+		_visual_up = _visual_up.normalized()
 	var target_up := Vector3.UP
-	if motor != null and motor.on_ground and motor.ground_normal.y > 0.3:
+	if motor != null and motor.in_water and motor.water_submersion > 0.08:
+		var spd_xz := Vector2(motor.velocity.x, motor.velocity.z)
+		var spd_len := spd_xz.length()
+		var bob_tilt := Vector3(
+			sin(_time * 2.35 + interp_pos.z * 0.55) * 0.042,
+			0.0,
+			cos(_time * 2.05 + interp_pos.x * 0.50) * 0.042
+		) * motor.water_submersion
+		var pitch_back := Vector3(-spd_xz.x, 0.0, -spd_xz.y).normalized() * clampf(spd_len * 0.015, 0.0, 0.085) if spd_len > 0.25 else Vector3.ZERO
+		var cand := Vector3.UP + bob_tilt + pitch_back
+		target_up = cand.normalized() if cand.length_squared() > 1e-6 else Vector3.UP
+	elif motor != null and motor.on_ground and motor.ground_normal.is_finite() and motor.ground_normal.y > 0.3:
 		target_up = motor.ground_normal.normalized()
-	_visual_up = _visual_up.slerp(target_up, 1.0 - exp(-14.0 * _delta)).normalized()
-	var rot_q := Quaternion(Vector3.UP, _visual_up).normalized()
+	var blended_up := _visual_up.lerp(target_up, 1.0 - exp(-14.0 * dt_vis))
+	_visual_up = blended_up.normalized() if blended_up.length_squared() > 1e-6 else target_up
+	var d_up := clampf(Vector3.UP.dot(_visual_up), -1.0, 1.0)
+	var rot_q := Quaternion.IDENTITY
+	if d_up > 0.9999:
+		rot_q = Quaternion.IDENTITY
+	elif d_up < -0.9999:
+		rot_q = Quaternion(Vector3.RIGHT, PI)
+	else:
+		var raw_axis := Vector3.UP.cross(_visual_up)
+		if raw_axis.length_squared() > 1e-8:
+			var axis := raw_axis.normalized()
+			if axis.is_normalized():
+				rot_q = Quaternion(axis, acos(d_up)).normalized()
 
 	# Foot-anchored slope alignment:
 	# In body local coordinates, foot is at (0, -model.rest_half_height * s, 0).
@@ -900,16 +937,25 @@ func _physics_process(delta: float) -> void:
 	if role == Role.PLAYER and dev_mode:
 		_tick_dev_movement(dt)
 		return
+	motor.want_run_swim = (role == Role.PLAYER and Input.is_action_pressed("run") and desired.length_squared() > 0.01)
+	motor.update_water_state(dt, _is_subterranean_for_water())
+	if motor.water_submersion > 0.02:
+		desired *= lerpf(1.0, 0.78, motor.water_submersion)
+		desired += motor.water_flow_vel * clampf(motor.water_submersion * 1.4, 0.25, 1.0)
 	var v_resp := tuning.velocity_response
+	if motor.in_water:
+		v_resp = lerpf(v_resp, 5.2, motor.water_submersion)
 	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
 	pre_move_velocity = motor.velocity
 	_update_scale(dt)
 	_resolve_posture(dt)
 	_resolve_model()
 
+	motor.recover_overlap()
 	motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
 	motor.update_support()
 	motor.move_vertical(dt, target_scale)
+	motor.recover_overlap()
 	_clamp_arena()
 	_apply_transform()
 	_verify_posture_after_move()
@@ -918,6 +964,11 @@ func _physics_process(delta: float) -> void:
 	_update_presentation(dt)
 	_update_engulf(dt)
 	_tick_props(dt)
+
+
+func _is_subterranean_for_water() -> bool:
+	var cl := CaveLayout.to_local(global_position)
+	return cl.z > -4.0 and cl.z < 245.0 and cl.x > -225.0 and cl.x < 80.0 and global_position.y < 52.0
 
 
 func _tick_props(dt: float) -> void:
@@ -929,6 +980,8 @@ func _tick_props(dt: float) -> void:
 ## cannot change this tick: skip exclusions, posture probes, sweeps and presentation.
 func _can_sleep(desired: Vector3) -> bool:
 	if role == Role.PLAYER or props == null:
+		return false
+	if motor.in_water:
 		return false
 	if motor.velocity.length_squared() > 1e-4 or desired.length_squared() > 1e-4:
 		return false
@@ -1206,6 +1259,7 @@ func _tick_dev_movement(dt: float) -> void:
 			motor.move_vertical(dt, target_scale)
 	else:
 		# Clip-enabled Dev Fly / Dev Sprint: collides solidly with cave walls and terrain.
+		motor.recover_overlap()
 		if dev_fly:
 			motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
 			var dy := motor.velocity.y * dt
@@ -1222,13 +1276,26 @@ func _tick_dev_movement(dt: float) -> void:
 			motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
 			motor.update_support()
 			motor.move_vertical(dt, target_scale)
+		motor.recover_overlap()
+
+	if dev_noclip:
+		motor.in_water = false
+		motor.water_y = -9999.0
+		motor.water_depth = 0.0
+		motor.water_submersion = 0.0
+		motor.water_flow_vel = Vector3.ZERO
+		motor.water_wetness = maxf(0.0, motor.water_wetness - dt * 0.5)
+		motor.just_splashed = false
+	else:
+		motor.update_water_state(dt, _is_subterranean_for_water())
+	if _mat:
+		set_shader_param("uWaterSubmersion", motor.water_submersion)
+		set_shader_param("uWaterY", motor.water_y if motor.in_water else -9999.0)
+		set_shader_param("uWetness", motor.water_wetness)
+		set_shader_param("uWaterVel", Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
 
 	_apply_transform()
 	_verify_posture_after_move()
-	_sync_proxy()
-	_update_presentation(dt)
-	_update_engulf(dt)
-	_tick_props(dt)
 
 
 func _process_follower_ai(dt: float) -> Vector3:
@@ -1381,6 +1448,20 @@ func _update_presentation(dt: float) -> void:
 		trigger_poke(Vector3(0.0, 0.85 * tuning.reference_radius, 0.0), Vector3(0.0, -imp * 1.4, 0.0))
 		trigger_poke2(Vector3(0.0, -0.45 * tuning.reference_radius, 0.0), Vector3(0.0, imp * 0.85, 0.0))
 
+	if motor.just_splashed:
+		var simp := clampf(absf(motor.vertical_vel) * 0.12 + speed * 0.08, 0.24, 1.15)
+		splat_v += simp * 4.4
+		spread_v += simp * 4.8
+		trigger_poke(Vector3(0.0, -0.55 * tuning.reference_radius, 0.0), Vector3(0.0, simp * 1.15, 0.0))
+	elif motor.in_water and speed > 1.6:
+		_swim_ripple_timer += dt
+		if _swim_ripple_timer >= 0.34:
+			_swim_ripple_timer = 0.0
+			var fdir := Vector3(_crawl_dir.x, 0.0, _crawl_dir.z).normalized()
+			trigger_poke2(fdir * 1.1 * tuning.reference_radius, -fdir * 0.32 + Vector3(0.0, 0.18, 0.0))
+	else:
+		_swim_ripple_timer = 0.34
+
 	var splat_target := -clampf((-motor.vertical_vel - 1.2) / 20.0, 0.0, 0.26) if not motor.on_ground else 0.0
 	splat_v += (splat_target - splat_x) * 44.0 * sdt - splat_v * 9.0 * sdt
 	splat_x = clampf(splat_x + splat_v * sdt, -0.28, 0.62)
@@ -1415,6 +1496,10 @@ func _update_presentation(dt: float) -> void:
 		set_shader_param("uSqueezeHeight", 1.0)
 		set_shader_param("uSkinLocal", tuning.skin / maxf(slime_scale * model.spread, 1e-3))
 		set_shader_param("uGapLocal", Vector3.ZERO)
+		set_shader_param("uWaterSubmersion", motor.water_submersion)
+		set_shader_param("uWaterY", motor.water_y if motor.in_water else -9999.0)
+		set_shader_param("uWetness", motor.water_wetness)
+		set_shader_param("uWaterVel", Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
 
 	if role == Role.PLAYER:
 		_breadcrumb_timer += dt

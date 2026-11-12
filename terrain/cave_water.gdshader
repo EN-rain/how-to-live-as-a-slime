@@ -2,11 +2,17 @@ shader_type spatial;
 render_mode blend_mix, depth_draw_never, cull_disabled, diffuse_lambert_wrap, specular_schlick_ggx;
 
 uniform bool is_waterfall = false;
-uniform vec3 shallow_color : source_color = vec3(0.16, 0.58, 0.62);
-uniform vec3 deep_color : source_color = vec3(0.03, 0.16, 0.28);
-uniform vec3 foam_color : source_color = vec3(0.84, 0.95, 1.0);
+uniform vec3 shallow_color : source_color = vec3(0.14, 0.56, 0.64);
+uniform vec3 deep_color : source_color = vec3(0.02, 0.13, 0.24);
+uniform vec3 foam_color : source_color = vec3(0.84, 0.96, 1.0);
 uniform vec3 waterfall_impact_world = vec3(0.0);
 uniform float flow_speed : hint_range(0.0, 4.0, 0.05) = 0.75;
+
+uniform vec3 slime_pos = vec3(9999.0, -9999.0, 9999.0);
+uniform vec3 slime_vel = vec3(0.0);
+uniform float slime_radius = 1.6;
+uniform float slime_submersion = 0.0;
+uniform vec4 wake_points[12]; // .xz = world position, .y = age (<0 unused), .w = initial energy
 
 uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
 
@@ -14,10 +20,16 @@ varying vec3 v_world_pos;
 varying vec2 v_uv;
 varying vec4 v_col;
 
+vec2 hash22(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.xx + p3.yz) * p3.zy);
+}
+
 float hash21(vec2 p) {
-	p = fract(p * vec2(127.1, 311.7));
-	p += dot(p, p + 41.3);
-	return fract(p.x * p.y);
+	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.x + p3.y) * p3.z);
 }
 
 float value_noise(vec2 p) {
@@ -31,13 +43,126 @@ float value_noise(vec2 p) {
 	);
 }
 
+float voronoi_ridge(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	float d1 = 8.0;
+	float d2 = 8.0;
+	for (int oy = -1; oy <= 1; oy++) {
+		for (int ox = -1; ox <= 1; ox++) {
+			vec2 g = vec2(float(ox), float(oy));
+			vec2 o = hash22(i + g);
+			vec2 r = g + o - f;
+			float d = dot(r, r);
+			if (d < d1) {
+				d2 = d1;
+				d1 = d;
+			} else if (d < d2) {
+				d2 = d;
+			}
+		}
+	}
+	float border = sqrt(max(d2, 0.0)) - sqrt(max(d1, 0.0));
+	float filament = clamp(1.0 - border * 3.1, 1e-4, 1.0);
+	return filament * filament * filament;
+}
+
+float caustic_web(vec2 p, float t_val) {
+	mat2 rot37 = mat2(vec2(0.7986, -0.6018), vec2(0.6018, 0.7986));
+	float c1 = voronoi_ridge(p + vec2(t_val * 0.11, -t_val * 0.08));
+	float c2 = voronoi_ridge((rot37 * p) * 1.24 + vec2(-t_val * 0.09 + 7.3, t_val * 0.12 - 4.1));
+	return clamp(max(c1, c2) * 0.56 + (c1 * c2) * 0.82, 0.0, 1.0);
+}
+
+// Returns vec3(height_delta, dH_dx, dH_dz) for both vertex displacement and crisp normal-mapped surface waves.
+vec3 sample_cave_waves(vec2 world_xz, float time_val, float feather) {
+	float h = 0.0;
+	vec2 grad = vec2(0.0);
+
+	// 1. Ambient cross-capillary wavelets (non-axis-aligned vectors avoid Cartesian stripes)
+	vec2 wv1 = vec2(1.18, 0.74);
+	vec2 wv2 = vec2(-0.88, 1.52);
+	float p1 = dot(world_xz, wv1) + time_val * 1.55 + sin(dot(world_xz, vec2(-0.42, 0.55))) * 0.55;
+	float p2 = dot(world_xz, wv2) - time_val * 1.25 + cos(dot(world_xz, vec2(0.52, 0.44))) * 0.55;
+	h += (sin(p1) * 0.011 + cos(p2) * 0.008) * feather;
+	grad += wv1 * (cos(p1) * 0.011 * feather) + wv2 * (-sin(p2) * 0.008 * feather);
+
+	// 2. Waterfall radial wave train
+	vec2 d_wf_v = world_xz - waterfall_impact_world.xz;
+	float d_wf = length(d_wf_v);
+	if (d_wf > 0.05 && d_wf < 11.0) {
+		vec2 dir_wf = d_wf_v / d_wf;
+		float wf_env = (1.0 - smoothstep(1.2, 10.5, d_wf)) * feather;
+		float ph_wf = d_wf * 3.8 - time_val * 4.8;
+		h += sin(ph_wf) * 0.028 * wf_env;
+		grad += dir_wf * (cos(ph_wf) * 3.8 * 0.028 * wf_env);
+	}
+
+	float rad_s = max(slime_radius, 0.45);
+	float sub_mask = smoothstep(0.025, 0.25, slime_submersion) * feather;
+
+	// 3. Active Slime Meniscus & Isotropic Capillary Rim Waves (velocity-angle invariant)
+	if (sub_mask > 0.001) {
+		vec2 rel = world_xz - slime_pos.xz;
+		float d_s = length(rel);
+		if (d_s < 13.5) {
+			vec2 r_dir = d_s > 1e-4 ? rel / d_s : vec2(1.0, 0.0);
+			float sig_dimple = max(rad_s * 0.94, 0.45);
+			float d_dimp = d_s / sig_dimple;
+			float dimple = -0.065 * slime_submersion * exp(-(d_dimp * d_dimp));
+			float sig_lip = max(rad_s * 0.46, 0.36);
+			float r_diff = d_s - rad_s * 1.04;
+			float r_norm = r_diff / sig_lip;
+			float lip = 0.022 * slime_submersion * exp(-(r_norm * r_norm));
+			h += (dimple + lip) * feather;
+			float d_dimple_dr = (-2.0 * d_s / (sig_dimple * sig_dimple)) * dimple;
+			float d_lip_dr = (-2.0 * r_diff / (sig_lip * sig_lip)) * lip;
+			grad += r_dir * ((d_dimple_dr + d_lip_dr) * feather);
+
+			// Tight propagating concentric ripple wavelets around swimming slime
+			float rip_env = (1.0 - smoothstep(rad_s * 0.72, rad_s + 7.2, d_s)) * exp(-max(d_s - rad_s * 0.65, 0.0) * 0.38) * sub_mask;
+			float k_rip = 3.8;
+			float ph_rip = d_s * k_rip - time_val * 5.2;
+			h += sin(ph_rip) * 0.013 * rip_env;
+			grad += r_dir * (cos(ph_rip) * k_rip * 0.013 * rip_env);
+		}
+	}
+
+	// 4. Pooled 12-Slot Trailing Wake Packets
+	for (int i = 0; i < 12; i++) {
+		vec4 wp = wake_points[i];
+		float age = wp.y;
+		if (age >= 0.0 && age < 2.6 && wp.w > 0.01) {
+			vec2 rel_w = world_xz - wp.xz;
+			float dw = length(rel_w);
+			if (dw < 10.5 && dw > 0.04) {
+				float r_cur = rad_s * 0.46 + age * 2.05;
+				float band_w = 0.42 + age * 0.32;
+				float dist_w = dw - r_cur;
+				float dw_n = dist_w / band_w;
+				float w_env = exp(-(dw_n * dw_n)) * exp(-age * 1.22) * wp.w * feather;
+				if (w_env > 0.004) {
+					float k_w = 4.4;
+					float ph_w = dist_w * k_w - age * 2.2;
+					h += sin(ph_w) * 0.018 * w_env;
+					grad += (rel_w / dw) * (cos(ph_w) * k_w * 0.018 * w_env);
+				}
+			}
+		}
+	}
+
+	return vec3(h, grad.x, grad.y);
+}
+
 void vertex() {
 	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	v_uv = UV;
 	v_col = COLOR;
 	if (!is_waterfall) {
-		float ripple = sin(v_world_pos.x * 1.3 + TIME * 1.4) * cos(v_world_pos.z * 1.3 - TIME * 1.1) * 0.018;
-		VERTEX.y += ripple * clamp(v_col.r, 0.0, 1.0);
+		float feather = clamp(v_col.r, 0.0, 1.0);
+		float is_stream_v = clamp(v_col.g, 0.0, 1.0);
+		vec3 wv = sample_cave_waves(v_world_pos.xz, TIME, feather);
+		VERTEX.y += wv.x * (1.0 - 0.62 * is_stream_v);
 	}
 }
 
@@ -65,28 +190,105 @@ void fragment() {
 
 		float t = TIME * flow_speed;
 		float is_stream = clamp(v_col.g, 0.0, 1.0);
-		float mesh_feather = smoothstep(0.08, 0.46, clamp(v_col.r, 0.0, 1.0));
-		float depth_t = smoothstep(0.0, 2.4, water_depth);
+		float mesh_feather = smoothstep(0.08, 0.44, clamp(v_col.r, 0.0, 1.0));
+		float depth_t = smoothstep(0.0, 2.35, water_depth);
+		float shallow_t = smoothstep(0.0, 2.05, water_depth);
+		float deep_t = smoothstep(1.15, 5.35, water_depth);
 
-		// Gently flowing ripples (UV.y scrolls downstream for stream, concentric rings from waterfall for pool)
-		float stream_drift = is_stream * t * 0.85;
-		float n_rip = value_noise(v_world_pos.xz * 1.15 + vec2(t * 0.18, -t * 0.15 - stream_drift));
+		// 1. High-Frequency Perturbed Surface Normals + Micro-Ripples -> Specular Glinting Waves
+		float stream_drift = is_stream * t * 0.95;
+		vec3 wave_info = sample_cave_waves(v_world_pos.xz, TIME, mesh_feather);
+		// Rotated noise capillary slopes for organic water sparkle even at rest
+		mat2 cap_rot = mat2(vec2(0.866, -0.5), vec2(0.5, 0.866));
+		vec2 cap_p = (cap_rot * v_world_pos.xz) * 2.4 + vec2(t * 0.34, -t * 0.27 - stream_drift);
+		float n_ax = value_noise(cap_p);
+		float n_bx = value_noise(cap_p + vec2(0.18, 0.0));
+		float n_bz = value_noise(cap_p + vec2(0.0, 0.18));
+		float micro_dx = (n_bx - n_ax) * 1.35;
+		float micro_dz = (n_bz - n_ax) * 1.35;
+
+		vec2 wave_grad = vec2(wave_info.y, wave_info.z);
+		float wave_glen = length(wave_grad);
+		if (wave_glen > 0.14) {
+			wave_grad *= (0.14 / wave_glen);
+		}
+		vec2 total_slope = wave_grad * 0.40 + vec2(micro_dx, micro_dz) * 0.11;
+		vec3 world_norm = normalize(vec3(-total_slope.x, 1.0, -total_slope.y));
+		vec3 view_up = normalize(mat3(VIEW_MATRIX) * vec3(0.0, 1.0, 0.0));
+		vec3 view_dir = normalize(VIEW);
+		vec3 n_view = normalize(mat3(VIEW_MATRIX) * world_norm);
+		float ndv_raw = dot(n_view, view_dir);
+		if (ndv_raw < 0.06) {
+			n_view = normalize(mix(n_view, view_up, clamp((0.06 - ndv_raw) / 0.14, 0.0, 1.0)));
+		}
+		NORMAL = n_view;
+
+		float ndv = clamp(dot(NORMAL, view_dir), 0.0, 1.0);
+		float fresnel = pow(max(1.0 - ndv, 1e-4), 3.3);
+		vec3 cave_key_v = normalize(mat3(VIEW_MATRIX) * normalize(vec3(0.32, 0.88, 0.36)));
+		vec3 half_v = normalize(cave_key_v + normalize(VIEW));
+		float water_glint = pow(max(dot(NORMAL, half_v), 1e-4), 48.0);
+		float ripple_crest = smoothstep(0.004, 0.032, wave_info.x) * mesh_feather;
+		float ripple_trough = smoothstep(0.004, 0.036, -wave_info.x) * mesh_feather;
+
+		// 2. Crisp Dual-Octave Voronoi Filament Caustics (zero axis-aligned grid artifacts)
+		vec2 caust_uv = v_world_pos.xz * 0.42 + vec2(t * 0.12, -t * 0.09 - stream_drift * 0.5) + total_slope * 0.28;
+		float caust = caustic_web(caust_uv, TIME) * (1.0 - smoothstep(0.35, 0.98, depth_t) * 0.65) * mesh_feather;
+
+		// 3. Organic Broken Lace Foam (plunge burst + warped shore lap)
+		float lace_lo = value_noise(v_world_pos.xz * 2.5 - vec2(t * 0.40, t * 0.34 + stream_drift));
+		float lace_hi = value_noise(v_world_pos.xz * 6.8 + vec2(t * 0.58, -t * 0.48));
+		float foam_lace = smoothstep(0.32, 0.76, lace_lo * 0.62 + lace_hi * 0.38);
+
 		float d_wf = length(v_world_pos.xz - waterfall_impact_world.xz);
-		float wf_ring = (0.5 + 0.5 * sin(d_wf * 3.8 - TIME * 4.6)) * (1.0 - smoothstep(1.0, 7.6, d_wf)) * (1.0 - is_stream) * smoothstep(0.24, 0.55, v_col.r);
+		float wf_froth = (1.0 - smoothstep(0.6, 4.2, d_wf)) * (0.45 + 0.55 * sin(d_wf * 5.2 - TIME * 5.5)) * (1.0 - is_stream) * mesh_feather * foam_lace;
 
-		vec3 stream_shallow = vec3(0.06, 0.30, 0.36);
-		vec3 water_col = mix(mix(shallow_color, stream_shallow, is_stream), deep_color, depth_t * (1.0 - 0.35 * is_stream));
-		float glint = smoothstep(0.58, 0.85, n_rip) * 0.14 + wf_ring * 0.22;
-		float shore_foam = (1.0 - smoothstep(0.05, 0.22, water_depth)) * (0.35 + 0.55 * n_rip) * smoothstep(0.18, 0.50, v_col.r) * 0.28;
-		water_col = mix(water_col + vec3(0.10, 0.18, 0.20) * glint, foam_color, clamp(shore_foam * 0.38 + wf_ring * 0.38, 0.0, 0.65));
+		float slime_shadow = 0.0;
+		float slime_meniscus = 0.0;
+		float rad_s = max(slime_radius, 0.45);
+		if (slime_submersion > 0.025) {
+			vec2 rel_xz = v_world_pos.xz - slime_pos.xz;
+			float d_s = length(rel_xz);
+			if (d_s < 13.5) {
+				slime_shadow = exp(-(d_s * d_s) / max(rad_s * rad_s * 0.72, 0.25)) * smoothstep(0.025, 0.35, slime_submersion) * 0.32;
+				float m_n = (d_s - rad_s * 0.98) / 0.065;
+				slime_meniscus = exp(-(m_n * m_n)) * smoothstep(0.025, 0.28, slime_submersion) * foam_lace * mesh_feather;
+			}
+		}
 
-		float edge_fade = smoothstep(0.05, 0.42, water_depth) * mesh_feather;
-		float base_alpha = mix(mix(0.40, 0.82, depth_t), mix(0.22, 0.46, depth_t), is_stream);
+		float depth_warp = max(water_depth + (lace_lo - 0.5) * mix(0.18, 0.05, is_stream), 0.0);
+		float shore_lace = smoothstep(0.06, 0.16, depth_warp) * (1.0 - smoothstep(0.18, 0.36, depth_warp)) * foam_lace * 0.24 * smoothstep(0.20, 0.55, v_col.r) * (1.0 - 0.72 * is_stream);
+		float total_foam = clamp(shore_lace + wf_froth * 0.55, 0.0, 0.88);
+
+		// 4. Multi-Depth Water Albedo, Clear Downward Bathymetry Sightlines & Crisp Aqua Ripple Rings
+		vec3 stream_shallow = vec3(0.05, 0.30, 0.38);
+		vec3 lake_mid = mix(shallow_color, deep_color, 0.56);
+		vec3 lake_base = mix(shallow_color, lake_mid, shallow_t);
+		lake_base = mix(lake_base, deep_color * vec3(0.76, 0.90, 1.15), deep_t * 0.88);
+		vec3 stream_base = mix(stream_shallow, shallow_color * 0.65, smoothstep(0.02, 0.14, water_depth));
+		vec3 base_water = mix(lake_base, stream_base, is_stream);
+		base_water *= (1.0 - slime_shadow) * (1.0 - ripple_trough * 0.16);
+		base_water += vec3(0.16, 0.48, 0.56) * (caust * 0.18) + vec3(0.28, 0.78, 0.90) * (ripple_crest * 0.48 + slime_meniscus * 0.18);
+		base_water = mix(base_water, vec3(0.32, 0.76, 0.88), fresnel * 0.34 * mesh_feather);
+		vec3 water_col = mix(base_water, foam_color, total_foam);
+
+		float edge_fade_dist = mix(0.38, 0.048, is_stream);
+		float edge_fade = smoothstep(0.0, edge_fade_dist, water_depth) * mesh_feather;
+		float optical_depth = shallow_t * 0.52 + deep_t * 0.48;
+		float lake_alpha = mix(0.17, 0.48, optical_depth) + fresnel * 0.16 + ripple_crest * 0.16;
+		float stream_alpha = mix(0.24, 0.46, smoothstep(0.02, 0.12, water_depth)) + fresnel * 0.14 + ripple_crest * 0.14;
+		float base_alpha = mix(lake_alpha, stream_alpha, is_stream);
+
 		ALBEDO = water_col;
-		EMISSION = (vec3(0.012, 0.042, 0.058) * (1.0 - 0.65 * is_stream) + foam_color * (wf_ring * 0.08)) * mesh_feather;
-		ROUGHNESS = mix(0.22, 0.42, clamp(wf_ring + shore_foam * 0.4, 0.0, 1.0));
-		SPECULAR = 0.36;
-		ALPHA = clamp(edge_fade * base_alpha + wf_ring * 0.10 * mesh_feather, 0.0, 0.86);
+		EMISSION = (
+			mix(vec3(0.011, 0.044, 0.064), vec3(0.004, 0.016, 0.034), deep_t) * (1.0 - 0.55 * is_stream) * (1.0 - slime_shadow * 0.7)
+			+ shallow_color * (caust * 0.16 + ripple_crest * 0.30 + slime_meniscus * 0.12 + fresnel * 0.17)
+			+ vec3(0.56, 0.90, 0.98) * (water_glint * 0.22)
+			+ foam_color * (total_foam * 0.16)
+		) * mesh_feather;
+		float ripple_rough = clamp(wave_glen * 1.4, 0.0, 0.28);
+		ROUGHNESS = mix(clamp(0.24 + ripple_rough, 0.24, 0.54), 0.48, clamp(total_foam * 0.8 + wf_froth * 0.3, 0.0, 1.0));
+		SPECULAR = mix(0.28, 0.16, total_foam);
+		ALPHA = clamp(edge_fade * base_alpha + total_foam * 0.30 * mesh_feather, 0.0, 0.88);
 	}
 }
-
