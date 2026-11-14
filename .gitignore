@@ -12,3 +12,5 @@ dogwatcher.bat
 watchdog.log
 *.png
 *.png.import
+!assets/**/*.png
+!assets/**/*.png.import

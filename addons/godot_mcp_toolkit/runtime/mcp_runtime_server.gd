@@ -200,12 +200,24 @@ func _on_bound(port: int) -> void:
 	RegistryClient.set_runtime(port)
 
 
-func _process(_delta: float) -> void:
+var _idle_poll_accum: float = 0.0
+const _IDLE_POLL_INTERVAL: float = 0.10
+
+
+func _process(delta: float) -> void:
 	# A config-error start leaves no transport (set_process(false) already stops
 	# this loop); the guard keeps a stray tick a no-op instead of a null deref —
 	# the twin of the editor's null guard in _poll_connections.
 	if _transport == null:
 		return
+	var idle := _transport._peers.is_empty() and (_transport._tcp_server == null or not _transport._tcp_server.is_connection_available())
+	if idle:
+		_idle_poll_accum += delta
+		if _idle_poll_accum < _IDLE_POLL_INTERVAL:
+			return
+		_idle_poll_accum = 0.0
+	else:
+		_idle_poll_accum = 0.0
 	LogBuffer.poll()
 	# Keep the listener up across transient socket loss. Editor / release
 	# gating from _ready prevents _process from running where it shouldn't

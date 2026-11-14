@@ -12,6 +12,7 @@ uniform vec3 slime_pos = vec3(9999.0, -9999.0, 9999.0);
 uniform vec3 slime_vel = vec3(0.0);
 uniform float slime_radius = 1.6;
 uniform float slime_submersion = 0.0;
+uniform int active_wake_count = 0;
 uniform vec4 wake_points[12]; // .xz = world position, .y = age (<0 unused), .w = initial energy
 
 uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
@@ -19,12 +20,6 @@ uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
 varying vec3 v_world_pos;
 varying vec2 v_uv;
 varying vec4 v_col;
-
-vec2 hash22(vec2 p) {
-	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-	p3 += dot(p3, p3.yzx + 33.33);
-	return fract((p3.xx + p3.yz) * p3.zy);
-}
 
 float hash21(vec2 p) {
 	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -43,35 +38,34 @@ float value_noise(vec2 p) {
 	);
 }
 
-float voronoi_ridge(vec2 p) {
+// Value noise + analytic derivative vec3(val, d/dx, d/dy) using 1 hash block instead of 3 finite diffs
+vec3 value_noise_grad(vec2 p) {
 	vec2 i = floor(p);
 	vec2 f = fract(p);
-	float d1 = 8.0;
-	float d2 = 8.0;
-	for (int oy = -1; oy <= 1; oy++) {
-		for (int ox = -1; ox <= 1; ox++) {
-			vec2 g = vec2(float(ox), float(oy));
-			vec2 o = hash22(i + g);
-			vec2 r = g + o - f;
-			float d = dot(r, r);
-			if (d < d1) {
-				d2 = d1;
-				d1 = d;
-			} else if (d < d2) {
-				d2 = d;
-			}
-		}
-	}
-	float border = sqrt(max(d2, 0.0)) - sqrt(max(d1, 0.0));
-	float filament = clamp(1.0 - border * 3.1, 1e-4, 1.0);
-	return filament * filament * filament;
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	vec2 du = 6.0 * f * (1.0 - f);
+	float a = hash21(i);
+	float b = hash21(i + vec2(1.0, 0.0));
+	float c = hash21(i + vec2(0.0, 1.0));
+	float d = hash21(i + vec2(1.0, 1.0));
+	float k1 = b - a;
+	float k2 = c - a;
+	float k3 = a - b - c + d;
+	return vec3(
+		a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
+		du.x * (k1 + k3 * u.y),
+		du.y * (k2 + k3 * u.x)
+	);
 }
 
 float caustic_web(vec2 p, float t_val) {
 	mat2 rot37 = mat2(vec2(0.7986, -0.6018), vec2(0.6018, 0.7986));
-	float c1 = voronoi_ridge(p + vec2(t_val * 0.11, -t_val * 0.08));
-	float c2 = voronoi_ridge((rot37 * p) * 1.24 + vec2(-t_val * 0.09 + 7.3, t_val * 0.12 - 4.1));
-	return clamp(max(c1, c2) * 0.56 + (c1 * c2) * 0.82, 0.0, 1.0);
+	vec2 p1 = p * 1.45 + vec2(t_val * 0.14, -t_val * 0.11);
+	vec2 p2 = (rot37 * p) * 1.85 + vec2(-t_val * 0.12 + 7.3, t_val * 0.15 - 4.1);
+	float n1 = 1.0 - abs(value_noise(p1) * 2.0 - 1.0);
+	float n2 = 1.0 - abs(value_noise(p2) * 2.0 - 1.0);
+	float ridge = n1 * n1 * (0.45 + 0.55 * n2);
+	return pow(clamp(max(n1 * n2, ridge * 0.92), 1e-4, 1.0), 2.4);
 }
 
 // Returns vec3(height_delta, dH_dx, dH_dz) for both vertex displacement and crisp normal-mapped surface waves.
@@ -129,23 +123,25 @@ vec3 sample_cave_waves(vec2 world_xz, float time_val, float feather) {
 	}
 
 	// 4. Pooled 12-Slot Trailing Wake Packets
-	for (int i = 0; i < 12; i++) {
-		vec4 wp = wake_points[i];
-		float age = wp.y;
-		if (age >= 0.0 && age < 2.6 && wp.w > 0.01) {
-			vec2 rel_w = world_xz - wp.xz;
-			float dw = length(rel_w);
-			if (dw < 10.5 && dw > 0.04) {
-				float r_cur = rad_s * 0.46 + age * 2.05;
-				float band_w = 0.42 + age * 0.32;
-				float dist_w = dw - r_cur;
-				float dw_n = dist_w / band_w;
-				float w_env = exp(-(dw_n * dw_n)) * exp(-age * 1.22) * wp.w * feather;
-				if (w_env > 0.004) {
-					float k_w = 4.4;
-					float ph_w = dist_w * k_w - age * 2.2;
-					h += sin(ph_w) * 0.018 * w_env;
-					grad += (rel_w / dw) * (cos(ph_w) * k_w * 0.018 * w_env);
+	if (active_wake_count > 0) {
+		for (int i = 0; i < 12; i++) {
+			vec4 wp = wake_points[i];
+			float age = wp.y;
+			if (age >= 0.0 && age < 2.6 && wp.w > 0.01) {
+				vec2 rel_w = world_xz - wp.xz;
+				float dw = length(rel_w);
+				if (dw < 10.5 && dw > 0.04) {
+					float r_cur = rad_s * 0.46 + age * 2.05;
+					float band_w = 0.42 + age * 0.32;
+					float dist_w = dw - r_cur;
+					float dw_n = dist_w / band_w;
+					float w_env = exp(-(dw_n * dw_n)) * exp(-age * 1.22) * wp.w * feather;
+					if (w_env > 0.004) {
+						float k_w = 4.4;
+						float ph_w = dist_w * k_w - age * 2.2;
+						h += sin(ph_w) * 0.018 * w_env;
+						grad += (rel_w / dw) * (cos(ph_w) * k_w * 0.018 * w_env);
+					}
 				}
 			}
 		}
@@ -160,68 +156,66 @@ void vertex() {
 	if (!is_waterfall) {
 		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 		float feather = clamp(v_col.r, 0.0, 1.0);
-		float is_stream_v = clamp(v_col.g, 0.0, 1.0);
-		vec3 wv = sample_cave_waves(v_world_pos.xz, TIME, feather);
-		VERTEX.y += wv.x * (1.0 - 0.62 * is_stream_v);
-	} else {
-		if (v_col.b < 0.5) {
-			float side_s = sin(clamp(UV.x, 0.0, 1.0) * 3.14159);
-			float fall_s = smoothstep(0.04, 0.28, UV.y);
-			float surge = sin(UV.y * 15.0 - TIME * 11.5 + UV.x * 5.0) * 0.055
-				+ cos(UV.y * 27.0 - TIME * 16.0 - UV.x * 8.0) * 0.024;
-			VERTEX += NORMAL * (surge * side_s * fall_s);
-		} else {
-			float boil = sin(UV.x * 18.849 - TIME * 6.5) * cos(UV.y * 10.0 - TIME * 8.0) * 0.045;
-			VERTEX.y += boil * sin(clamp(UV.y, 0.0, 1.0) * 3.14159);
+		if (feather > 0.005) {
+			float is_stream_v = clamp(v_col.g, 0.0, 1.0);
+			vec3 wv = sample_cave_waves(v_world_pos.xz, TIME, feather);
+			VERTEX.y += wv.x * (1.0 - 0.62 * is_stream_v);
 		}
+	} else {
+		float side_s = sin(clamp(UV.x, 0.0, 1.0) * 3.14159);
+		float fall_s = smoothstep(0.10, 0.30, UV.y);
+		float is_veil_v = step(0.5, v_col.r);
+		float surge_amp = mix(0.080, 0.135, is_veil_v);
+		float flutter = sin(UV.y * 13.0 - TIME * 12.0 + UV.x * 6.5) * 0.65
+			+ cos(UV.y * 23.0 - TIME * 17.5 - UV.x * 11.0) * 0.35;
+		float sway = sin(UV.y * 5.5 - TIME * 5.2) * cos(UV.x * 9.0 + TIME * 2.1) * 0.045;
+		VERTEX += NORMAL * (flutter * surge_amp * side_s * fall_s + sway * fall_s);
 		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	}
 }
 
 void fragment() {
 	if (is_waterfall) {
-		if (v_col.b >= 0.5) {
-			// Billowing plunge mist & churning splash collar at the waterfall impact base
-			float r_t = clamp(v_uv.y, 0.0, 1.0);
-			float ring_env = pow(sin(r_t * 3.14159), 1.45);
-			float ang_s = v_uv.x * 6.28318;
-			vec2 swirl_uv = vec2(cos(ang_s), sin(ang_s));
-			float n1 = value_noise(swirl_uv * 4.8 + vec2(0.0, r_t * 6.5 - TIME * 4.2));
-			float n2 = value_noise(vec2(cos(ang_s - TIME * 0.9), sin(ang_s - TIME * 0.9)) * 9.2 + vec2(r_t * 9.5 - TIME * 6.4));
-			float n3 = value_noise(swirl_uv * 16.0 - vec2(TIME * 2.1, r_t * 14.0 - TIME * 8.5));
-			float edge_soft = pow(clamp(abs(dot(normalize(NORMAL), normalize(VIEW))), 0.0, 1.0), 1.45);
-			float wisps = smoothstep(0.34, 0.84, n1 * 0.45 + n2 * 0.35 + n3 * 0.20);
-			float mist_density = wisps * ring_env * (0.28 + 0.72 * edge_soft);
-			vec3 mist_col = mix(shallow_color * 0.94, foam_color, clamp(0.55 + wisps * 0.45, 0.0, 1.0));
-			ALBEDO = mist_col;
-			EMISSION = mist_col * (0.14 + 0.28 * mist_density);
-			ROUGHNESS = 0.48;
-			SPECULAR = 0.20;
-			ALPHA = clamp(mist_density * 0.78, 0.0, 0.72);
-		} else {
-			// High-velocity gravity-accelerated cascade ribbons, aerated foam veins & micro-droplet shimmer
-			float side_fade = pow(sin(clamp(v_uv.x, 0.0, 1.0) * 3.14159), 0.78);
-			float top_fade = smoothstep(0.0, 0.14, v_uv.y);
-			float y_acc = v_uv.y * (0.76 + v_uv.y * 0.58);
-			float streak1 = value_noise(vec2(v_uv.x * 9.0, y_acc * 5.2 - TIME * 4.6));
-			float streak2 = value_noise(vec2(v_uv.x * 17.5 + 3.7, y_acc * 9.8 - TIME * 7.2));
-			float droplets = value_noise(vec2(v_uv.x * 32.0 - 2.1, y_acc * 16.5 - TIME * 10.6));
-			float du = value_noise(vec2(v_uv.x * 9.0 + 0.14, y_acc * 5.2 - TIME * 4.6)) - streak1;
-			float dv = value_noise(vec2(v_uv.x * 9.0, (y_acc + 0.04) * 5.2 - TIME * 4.6)) - streak1;
-			NORMAL = normalize(NORMAL + TANGENT * (du * 1.8) + BINORMAL * (dv * 1.4));
+		bool is_veil = (v_col.r >= 0.5);
+		float y_acc = v_uv.y * (0.64 + v_uv.y * 0.72);
+		// Domain warp so falling water strands curve, braid & break cleanly
+		float wx = value_noise(vec2(v_uv.x * 4.4, y_acc * 3.1 - TIME * 2.8)) - 0.5;
+		float wy = value_noise(vec2(v_uv.x * 5.2 + 7.1, y_acc * 4.0 - TIME * 3.9)) - 0.5;
+		float ux = v_uv.x + wx * mix(0.09, 0.16, is_veil ? 1.0 : 0.0);
+		float uy = y_acc + wy * 0.06;
 
-			float core_veins = smoothstep(0.24, 0.76, streak1 * 0.52 + streak2 * 0.34 + droplets * 0.14);
-			float aerated = smoothstep(0.42, 0.86, streak2 * 0.62 + droplets * 0.38);
-			float lip_spill = (1.0 - smoothstep(0.04, 0.22, v_uv.y)) * top_fade;
-			float bot_churn = smoothstep(0.56, 1.0, v_uv.y);
-			float foam_w = clamp(aerated * 0.68 + lip_spill * 0.45 + bot_churn * 0.64, 0.0, 1.0);
-			vec3 wf_col = mix(shallow_color * 0.82, foam_color, foam_w);
-			ALBEDO = wf_col;
-			EMISSION = wf_col * (0.12 + 0.18 * core_veins + 0.20 * aerated + 0.24 * bot_churn) * top_fade;
-			ROUGHNESS = mix(0.18, 0.38, foam_w);
-			SPECULAR = 0.44;
-			ALPHA = clamp(side_fade * top_fade * (0.42 + 0.42 * core_veins + 0.24 * bot_churn), 0.0, 0.92);
-		}
+		vec3 s1_g = value_noise_grad(vec2(ux * 7.8, uy * 4.4 - TIME * 5.2));
+		float streak1 = s1_g.x;
+		float streak2 = value_noise(vec2(ux * 15.5 + 3.7, uy * 8.6 - TIME * 8.1));
+		float droplets = value_noise(vec2(ux * 29.0 - 2.1, uy * 15.0 - TIME * 11.8));
+		float du = s1_g.y * 0.18;
+		float dv = s1_g.z * 0.14;
+		NORMAL = normalize(NORMAL + TANGENT * du + BINORMAL * dv);
+
+		// Organic edge erosion on left/right edges so cascade blends smoothly into water;
+		// minimal top fade only inside the shadowed stone spring fissure so spout lip stays full & solid
+		float edge_sine = sin(clamp(v_uv.x, 0.0, 1.0) * 3.14159);
+		float edge_noise = (streak2 * 0.65 + droplets * 0.35 - 0.48) * (is_veil ? 0.54 : 0.32);
+		float side_fade = smoothstep(0.04, is_veil ? 0.52 : 0.38, edge_sine + edge_noise);
+		float top_fade = smoothstep(0.0, 0.03, v_uv.y);
+		float bot_fade = 1.0 - smoothstep(0.84, 1.00, v_uv.y);
+		float end_fade = top_fade * bot_fade;
+
+		float core_veins = smoothstep(0.24, 0.74, streak1 * 0.50 + streak2 * 0.34 + droplets * 0.16);
+		float aerated = smoothstep(is_veil ? 0.36 : 0.42, 0.84, streak2 * 0.56 + droplets * 0.44);
+		float spark = pow(clamp(droplets * streak2 * 1.65, 0.0, 1.0), 3.2);
+		float lip_spill = exp(-pow((v_uv.y - 0.16) / 0.075, 2.0)) * top_fade;
+
+		float foam_w = clamp(aerated * (is_veil ? 0.85 : 0.65) + lip_spill * 0.62 + spark * 0.45, 0.0, 1.0);
+		vec3 base_aqua = mix(vec3(0.08, 0.46, 0.60), shallow_color, 0.65);
+		vec3 wf_col = mix(base_aqua, foam_color, foam_w);
+		float veil_fade = is_veil ? (0.30 + 0.58 * aerated + 0.35 * spark) : (0.54 + 0.38 * core_veins);
+
+		ALBEDO = wf_col;
+		EMISSION = wf_col * (0.16 + 0.24 * core_veins + 0.28 * aerated + 0.30 * spark) * end_fade;
+		ROUGHNESS = mix(0.14, 0.36, foam_w);
+		SPECULAR = 0.48;
+		ALPHA = clamp(side_fade * end_fade * veil_fade * (is_veil ? 0.76 : 0.92), 0.0, 0.92);
 	} else {
 		float depth_raw = texture(depth_texture, SCREEN_UV).r;
 		vec3 ndc = vec3(SCREEN_UV * 2.0 - 1.0, depth_raw);
@@ -240,14 +234,12 @@ void fragment() {
 		// 1. High-Frequency Perturbed Surface Normals + Micro-Ripples -> Specular Glinting Waves
 		float stream_drift = is_stream * t * 0.95;
 		vec3 wave_info = sample_cave_waves(v_world_pos.xz, TIME, mesh_feather);
-		// Rotated noise capillary slopes for organic water sparkle even at rest
+		// Rotated noise capillary slopes using analytic gradient (3x fewer hash evaluations)
 		mat2 cap_rot = mat2(vec2(0.866, -0.5), vec2(0.5, 0.866));
 		vec2 cap_p = (cap_rot * v_world_pos.xz) * 2.4 + vec2(t * 0.34, -t * 0.27 - stream_drift);
-		float n_ax = value_noise(cap_p);
-		float n_bx = value_noise(cap_p + vec2(0.18, 0.0));
-		float n_bz = value_noise(cap_p + vec2(0.0, 0.18));
-		float micro_dx = (n_bx - n_ax) * 1.35;
-		float micro_dz = (n_bz - n_ax) * 1.35;
+		vec3 ng = value_noise_grad(cap_p);
+		float micro_dx = ng.y * 0.24;
+		float micro_dz = ng.z * 0.24;
 
 		vec2 wave_grad = vec2(wave_info.y, wave_info.z);
 		float wave_glen = length(wave_grad);

@@ -44,26 +44,26 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 	{
 		"index": 0,
 		"name": "Low",
-		"render_scale": 1.0,
-		"scaling_mode": Viewport.SCALING_3D_MODE_FSR,
-		"fxaa": true,
+		"render_scale": 0.58,
+		"scaling_mode": Viewport.SCALING_3D_MODE_BILINEAR,
+		"fxaa": false,
 		"msaa": Viewport.MSAA_DISABLED,
 		"msaa_idx": 0,
 		"shadow_enabled": false,
 		"shadow_distance": 30.0,
 		"shadow_splits": DirectionalLight3D.SHADOW_ORTHOGONAL,
 		"shadow_idx": 0,
-		"grass_mult": 0.4,
-		"vis_grass": 90.0,
-		"vis_trees": 260.0,
-		"vis_rocks": 200.0,
-		"vis_veg": 180.0,
+		"grass_mult": 0.20,
+		"vis_grass": 50.0,
+		"vis_trees": 130.0,
+		"vis_rocks": 120.0,
+		"vis_veg": 100.0,
 		"dof_far": false,
 	},
 	{
 		"index": 1,
 		"name": "Medium",
-		"render_scale": 1.0,
+		"render_scale": 0.78,
 		"scaling_mode": Viewport.SCALING_3D_MODE_FSR,
 		"fxaa": true,
 		"msaa": Viewport.MSAA_DISABLED,
@@ -72,11 +72,11 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 		"shadow_distance": 60.0,
 		"shadow_splits": DirectionalLight3D.SHADOW_ORTHOGONAL,
 		"shadow_idx": 1,
-		"grass_mult": 0.7,
-		"vis_grass": 130.0,
-		"vis_trees": 420.0,
-		"vis_rocks": 340.0,
-		"vis_veg": 300.0,
+		"grass_mult": 0.55,
+		"vis_grass": 105.0,
+		"vis_trees": 380.0,
+		"vis_rocks": 300.0,
+		"vis_veg": 260.0,
 		"dof_far": false,
 	},
 	{
@@ -127,6 +127,7 @@ const REBINDABLE_ACTIONS: Array[Dictionary] = [
 	{"action": "move_left", "label": "Move Left"},
 	{"action": "move_right", "label": "Move Right"},
 	{"action": "run", "label": "Sprint / Fast Crawl"},
+	{"action": "jump", "label": "Jump (Hold to Charge)"},
 	{"action": "split_follow", "label": "Split Follower Clone"},
 	{"action": "split_roam", "label": "Split Roamer Clone"},
 	{"action": "merge_clones", "label": "Merge Nearby Clones"},
@@ -136,7 +137,7 @@ const DEFAULTS: Dictionary = {
 	"display": {
 		"window_mode": 0,       # 0 = Windowed, 1 = Fullscreen, 2 = Borderless
 		"resolution_index": 2,  # 1920x1080
-		"vsync": true,
+		"vsync": false,
 		"max_fps": 0,           # 0 = Unlimited
 		"ui_scale": 1.0,
 	},
@@ -167,6 +168,7 @@ const DEFAULTS: Dictionary = {
 	},
 	"gameplay": {
 		"night_mode": false,
+		"time_mode": "dynamic",
 		"show_hud_hints": true,
 	}
 }
@@ -529,7 +531,9 @@ func _apply_display() -> void:
 		return
 	var st := _scene_tree()
 	var root_win: Window = st.root if st != null else null
-	var is_embedded_win: bool = root_win != null and root_win.is_embedded()
+	var is_embedded_win: bool = (root_win != null and root_win.is_embedded()) \
+		or Engine.is_embedded_in_editor() \
+		or ("--wid" in OS.get_cmdline_args())
 
 	if not is_embedded_win:
 		var mode: int = int(get_value("display", "window_mode", 0))
@@ -556,7 +560,7 @@ func _apply_display() -> void:
 				if cur_mode != DisplayServer.WINDOW_MODE_FULLSCREEN:
 					DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 
-		var vsync: bool = bool(get_value("display", "vsync", true))
+		var vsync: bool = bool(get_value("display", "vsync", false))
 		var target_vsync := DisplayServer.VSYNC_ENABLED if vsync else DisplayServer.VSYNC_DISABLED
 		if DisplayServer.window_get_vsync_mode() != target_vsync:
 			DisplayServer.window_set_vsync_mode(target_vsync)
@@ -669,17 +673,24 @@ func _apply_to_active_scene() -> void:
 	var shadow_q: int = int(get_value("graphics", "shadow_quality", preset["shadow_idx"]))
 
 	# Apply to 3D Sandbox nodes if present
+	var low_lod: bool = (q_idx == 0)
 	var props := scene.get_node_or_null("Ecosystem") as SlimeProps
 	if props:
 		for s in props.registered_slimes:
 			if is_instance_valid(s):
 				s.set_shader_param("uJiggleStrength", jiggle)
 				s.set_shader_param("uNightMode", night)
+				s.force_low_lod = low_lod
+				s._lod_timer = 0.0
+				s._update_lod(0.0)
 
 	var player_slime := scene.get_node_or_null("Slime") as Slime
 	if player_slime:
 		player_slime.set_shader_param("uJiggleStrength", jiggle)
 		player_slime.set_shader_param("uNightMode", night)
+		player_slime.force_low_lod = low_lod
+		player_slime._lod_timer = 0.0
+		player_slime._update_lod(0.0)
 
 	var cam_rig := scene.get_node_or_null("CameraRig") as OrbitCamera
 	if cam_rig:
@@ -700,6 +711,8 @@ func _apply_to_active_scene() -> void:
 		elif hud._hint and hud._hint.get_parent():
 			hud._hint.get_parent().visible = show_hints
 
+	var has_time_weather: bool = scene.get_node_or_null("WorldTimeWeather") != null
+
 	# DirectionalLight3D Sun: shadows and outdoor baseline lighting
 	var sun := scene.get_node_or_null("Sun") as DirectionalLight3D
 	if sun:
@@ -708,19 +721,22 @@ func _apply_to_active_scene() -> void:
 		sun.directional_shadow_max_distance = float(preset["shadow_distance"])
 		sun.directional_shadow_mode = preset["shadow_splits"] as DirectionalLight3D.ShadowMode
 
-		# Preserve outdoor baseline lighting: 1.35 when daytime is active
-		var day_sun_energy := 1.35
-		sun.light_energy = lerpf(day_sun_energy, 0.34, night)
+		# Preserve outdoor baseline lighting when WorldTimeWeather isn't active
+		if not has_time_weather:
+			var day_sun_energy := 1.38
+			sun.light_energy = lerpf(day_sun_energy, 0.34, night)
 
 	# WorldEnvironment: clean up dead properties and support Ultra DOF far blur
 	var world_env := scene.get_node_or_null("WorldEnvironment") as WorldEnvironment
 	if world_env and world_env.environment:
 		var env: Environment = world_env.environment
-		var day_amb := Color(0.86, 0.93, 1.0, 1.0)
-		var night_amb := Color(0.28, 0.48, 0.78, 1.0)
-		env.ambient_light_color = day_amb.lerp(night_amb, night)
-		var day_amb_energy := 0.95
-		env.ambient_light_energy = lerpf(day_amb_energy, 0.42, night)
+		if not has_time_weather:
+			var day_amb := Color(0.76, 0.85, 0.98, 1.0)
+			var night_amb := Color(0.28, 0.48, 0.78, 1.0)
+			env.ambient_light_color = day_amb.lerp(night_amb, night)
+			var day_amb_energy := 0.56
+			env.ambient_light_energy = lerpf(day_amb_energy, 0.42, night)
+		env.glow_enabled = (q_idx > 0)
 
 		# DOF far blur (Ultra preset via CameraAttributesPractical)
 		var dof_enabled: bool = bool(preset.get("dof_far", false))
@@ -756,39 +772,55 @@ func _apply_to_active_scene() -> void:
 
 
 func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void:
-	var vis_grass: float = float(preset.get("vis_grass", 160.0))
+	var vis_grass: float = clampf(float(preset.get("vis_grass", 160.0)) * 0.56, 28.0, 95.0)
 	var vis_trees: float = float(preset.get("vis_trees", 550.0))
 	var vis_rocks: float = float(preset.get("vis_rocks", 450.0))
 	var vis_veg: float = float(preset.get("vis_veg", 400.0))
 
-	# Grass & Wispy grass
-	var grass_node := terrain.get_node_or_null("Grass") as GeometryInstance3D
+	var apply_group_range := func(node: Node, range_val: float) -> void:
+		if node is GeometryInstance3D:
+			(node as GeometryInstance3D).visibility_range_end = range_val
+		for child in node.get_children():
+			if child is GeometryInstance3D:
+				(child as GeometryInstance3D).visibility_range_end = range_val
+
+	# Grass & Wispy grass (chunks are children named Chunk_*)
+	var grass_node := terrain.get_node_or_null("Grass")
 	if grass_node:
-		grass_node.visibility_range_end = vis_grass
-	var wispy_node := terrain.get_node_or_null("GrassWispy") as GeometryInstance3D
+		apply_group_range.call(grass_node, vis_grass)
+	var wispy_node := terrain.get_node_or_null("GrassWispy")
 	if wispy_node:
-		wispy_node.visibility_range_end = vis_grass
+		apply_group_range.call(wispy_node, vis_grass)
 
 	# Trees
 	var trees_node := terrain.get_node_or_null("Trees")
 	if trees_node:
 		for child in trees_node.get_children():
-			if child is GeometryInstance3D:
-				child.visibility_range_end = vis_trees
+			apply_group_range.call(child, vis_trees)
 
 	# Rocks
 	var rocks_node := terrain.get_node_or_null("Rocks")
 	if rocks_node:
 		for child in rocks_node.get_children():
-			if child is GeometryInstance3D:
-				child.visibility_range_end = vis_rocks
+			apply_group_range.call(child, vis_rocks)
 
 	# Vegetation
 	var veg_node := terrain.get_node_or_null("Vegetation")
 	if veg_node:
 		for child in veg_node.get_children():
-			if child is GeometryInstance3D:
-				child.visibility_range_end = vis_veg
+			apply_group_range.call(child, vis_veg)
+
+	# Village
+	var village_node := terrain.get_node_or_null("Village")
+	if village_node:
+		_apply_recursive_vis_range(village_node, vis_trees)
+
+
+func _apply_recursive_vis_range(node: Node, range_val: float) -> void:
+	if node is GeometryInstance3D:
+		(node as GeometryInstance3D).visibility_range_end = range_val
+	for child in node.get_children():
+		_apply_recursive_vis_range(child, range_val)
 
 
 func _fast_update_terrain_grass(terrain: Node, target_grass: int) -> void:
@@ -830,6 +862,7 @@ func _setup_ui_sound_bank() -> void:
 	_sound_bank["tab"] = _synth_tone(480.0, 620.0, 0.060, 0.25)
 	_sound_bank["back"] = _synth_tone(540.0, 340.0, 0.080, 0.28)
 	_sound_bank["poke"] = _synth_jelly_boing(290.0, 580.0, 0.16, 0.38)
+	_sound_bank["jump"] = _synth_jelly_boing(240.0, 620.0, 0.18, 0.36)
 	_sound_bank["confirm"] = _synth_jelly_boing(380.0, 860.0, 0.20, 0.40)
 
 

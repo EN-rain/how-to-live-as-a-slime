@@ -5,6 +5,15 @@ uniform float emission_strength : hint_range(0.2, 4.0, 0.05) = 0.92;
 uniform float fresnel_power : hint_range(1.0, 6.0, 0.1) = 3.4;
 uniform float striation_strength : hint_range(0.0, 1.5, 0.05) = 0.12;
 uniform float pulse_speed : hint_range(0.0, 4.0, 0.1) = 1.25;
+uniform vec3 uTintColor : source_color = vec3(-1.0, -1.0, -1.0);
+
+uniform vec3 uGlow : source_color = vec3(0.25, 1.0, 0.78);
+uniform float uGlowStrength = 2.6;
+uniform float uNoiseScale = 3.0;
+uniform float uThresholdScale = 1.25;
+uniform float uThresholdBias = 0.1;
+uniform float uEdgeWidth = 0.12;
+uniform float uDissolve : hint_range(0.0, 1.0) = 0.0;
 
 uniform sampler2D striation_normal : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform sampler2D interior_veil_tex : source_color, filter_linear_mipmap, repeat_enable;
@@ -17,6 +26,22 @@ varying float v_crown;
 varying vec2 v_uv;
 varying vec3 v_local_pos;
 varying vec3 v_local_nrm;
+
+float dh(vec3 p) {
+	p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+	p += dot(p, p.yxz + 33.33);
+	return fract((p.x + p.y) * p.z);
+}
+
+float dvn(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(
+		mix(mix(dh(i), dh(i + vec3(1.0, 0.0, 0.0)), f.x), mix(dh(i + vec3(0.0, 1.0, 0.0)), dh(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+		mix(mix(dh(i + vec3(0.0, 0.0, 1.0)), dh(i + vec3(1.0, 0.0, 1.0)), f.x), mix(dh(i + vec3(0.0, 1.0, 1.0)), dh(i + vec3(1.0, 1.0, 1.0)), f.x), f.y),
+		f.z);
+}
 
 void vertex() {
 	v_height01 = clamp(UV.y, 0.0, 1.0);
@@ -31,7 +56,7 @@ void vertex() {
 }
 
 void fragment() {
-	vec3 hue = v_inst_col;
+	vec3 hue = (uTintColor.r >= 0.0) ? uTintColor : v_inst_col;
 	if (length(hue) < 0.05 || min(hue.r, min(hue.g, hue.b)) > 0.96) {
 		hue = vec3(0.14, 0.78, 1.0);
 	}
@@ -46,20 +71,25 @@ void fragment() {
 	float pulse = 0.91 + 0.09 * sin(TIME * pulse_speed + v_phase + v_height01 * 1.4);
 
 	if (v_part_u < 0.5) {
-		// Dark fractured obsidian-basalt matrix pedestal/cradle (3D object-space coords -> crisp angular stone, zero sine stripes)
+		// Fractured dark slate-basalt stone cradle/pedestal (remains clearly visible after crystal shards are absorbed)
+		vec3 q_rn = floor(normalize(v_local_nrm) * 16.0 + 0.5);
+		float r_facet = fract(sin(dot(q_rn, vec3(19.19, 73.73, 41.41)) + v_phase * 0.23) * 43758.5453);
+		float facet_tone = 0.74 + 0.48 * r_facet;
 		vec2 rock_uv1 = v_local_pos.xz * 0.72 + vec2(v_local_pos.y * 0.44, -v_local_pos.y * 0.38);
 		vec2 rock_uv2 = v_local_pos.xy * 0.88 + vec2(-v_local_pos.z * 0.52, 0.27);
 		vec4 rs1 = texture(interior_veil_tex, rock_uv1);
 		vec4 rs2 = texture(interior_veil_tex, rock_uv2);
 		float grain = mix(rs1.a, rs2.g, 0.45);
-		float rim_stone = pow(max(1.0 - ndv, 1e-4), 3.0);
-		vec3 basalt = mix(vec3(0.022, 0.028, 0.038), vec3(0.068, 0.082, 0.105), smoothstep(0.25, 0.78, grain));
-		basalt += vec3(0.04, 0.09, 0.14) * rim_stone * 0.55;
-		float socket_bounce = smoothstep(0.55, 1.0, v_height01) * 0.08;
+		vec3 l_r1 = normalize(vec3(0.42, 0.84, 0.34));
+		float r_diff = 0.44 + 0.56 * clamp(dot(n_view, l_r1), 0.0, 1.0);
+		float rim_stone = pow(max(1.0 - ndv, 1e-4), 2.6);
+		vec3 basalt = mix(vec3(0.068, 0.082, 0.105), vec3(0.175, 0.205, 0.245), smoothstep(0.22, 0.78, grain));
+		basalt = basalt * facet_tone * r_diff + vec3(0.08, 0.13, 0.18) * rim_stone * 0.52;
+		float socket_bounce = smoothstep(0.55, 1.0, v_height01) * 0.06;
 		ALBEDO = basalt + deep_hue * socket_bounce;
 		EMISSION = vec3(0.0);
-		ROUGHNESS = 0.88;
-		SPECULAR = 0.0;
+		ROUGHNESS = 0.86;
+		SPECULAR = 0.08;
 		METALLIC = 0.0;
 	} else {
 		bool is_floating = (v_part_u > 1.5);
@@ -146,5 +176,15 @@ void fragment() {
 		ROUGHNESS = 0.84;
 		SPECULAR = 0.0;
 		METALLIC = 0.0;
+
+		if (uDissolve > 0.001) {
+			float dn = dvn(v_local_pos * uNoiseScale);
+			float dth = uDissolve * uThresholdScale - uThresholdBias;
+			if (dn < dth) {
+				discard;
+			}
+			float dedge = 1.0 - smoothstep(0.0, uEdgeWidth, dn - dth);
+			EMISSION += mix(rich_hue, uGlow, 0.55) * dedge * uGlowStrength;
+		}
 	}
 }

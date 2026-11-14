@@ -13,20 +13,43 @@ const GEOFENCE_OVERWORLD_H := 56.5
 
 @export var greybox_mode: bool = false
 
+@export_group("Inspector Configs")
+@export var bake_config: CaveBakeConfig
+@export var scatter_config: CaveScatterConfig
+@export var water_config: CaveWaterConfig
+@export var layout_data: CaveLayoutData
+
+@export_group("Landmarks & Gameplay")
+@export_range(1.0, 25.0, 0.5) var geode_volume_bonus: float = 8.0
+@export_range(5.0, 60.0, 1.0) var door_awaken_distance: float = 28.0
+@export_range(0.0, 1.0, 0.02) var door_idle_glow: float = 0.18
+
+@export_group("Editor Actions")
+@export_tool_button("Export CaveOrigin -> cave_layout.tres") var btn_export_layout := _editor_export_layout
+@export_tool_button("Rebuild Cave Preview") var btn_rebuild_cave := _editor_rebuild_preview
+
 static var _shared_sdf: CaveSDF = null
-static var _soft_particle_tex: ImageTexture = null
 static var _cached_props_data: Dictionary = {}
 static var _cached_pebble_mesh: Mesh = null
 static var _cached_speleothem_mesh: Mesh = null
-static var _cached_crystal_mesh: Mesh = null
-static var _cached_abyssal_bundle_mesh: ArrayMesh = null
+static var _cached_crystal_stone_mesh: Mesh = null
+static var _cached_crystal_shards_mesh: Mesh = null
+static var _cached_abyssal_stone_mesh: ArrayMesh = null
 static var _cached_water_meshes: Dictionary = {}
+static var _cached_wf_ceil_y: float = 34.0
 static var _crystal_striation_tex: ImageTexture = null
 static var _crystal_interior_tex: ImageTexture = null
+static var _fire_flipbook_tex: ImageTexture = null
+static var _fire_noise_tex: ImageTexture = null
+
+var _pending_crystal_props: Array[Dictionary] = []
+var _crystal_mat_cache := {}
 
 var _cached_rock_mat: ShaderMaterial = null
 var _grass_shader_mat: ShaderMaterial = null
-var _flora_grass_node: MultiMeshInstance3D = null
+var _flora_grass_node: Node3D = null
+var _cave_shell_chunks: Array[MeshInstance3D] = []
+var _cave_boulder_shapes: Array[Shape3D] = []
 var _slime_ref: Node3D = null
 var _pool_water_mat: ShaderMaterial = null
 var _lake_water_mat: ShaderMaterial = null
@@ -39,6 +62,17 @@ var _geode_reward_area: Area3D = null
 var _geode_reward_collected: bool = false
 var _geode_spin_t: float = 0.0
 var _geode_orb_satellites: Array[Node3D] = []
+var _door_anim_t: float = 0.0
+var _fire_flicker_t: float = 0.0
+var _door_awaken_val: float = 0.18
+var _door_astrolabe_outer: Node3D = null
+var _door_astrolabe_inner: Node3D = null
+var _door_relief_mat: ShaderMaterial = null
+var _torch_flame_mats: Array[ShaderMaterial] = []
+var _torch_card_mats: Array[ShaderMaterial] = []
+var _torch_haze_mats: Array[ShaderMaterial] = []
+var _vault_door_omni: OmniLight3D = null
+var _vault_door_omni_base_pos: Vector3 = Vector3.ZERO
 var _reverb_bus_idx: int = -1
 
 var _wake_points: Array[Vector4] = []
@@ -48,6 +82,48 @@ var _wake_emit_timer := 0.0
 var _water_ripple_submersion := 0.0
 var _water_ripple_pos := Vector3(9999.0, -9999.0, 9999.0)
 var _water_ripple_rad := 1.6
+var _water_uniforms_dirty := true
+var _last_grass_slime_pos := Vector3(1e9, 1e9, 1e9)
+
+# Zone & frustum culling node refs
+var _cave_shell: MeshInstance3D = null
+var _lighting_rig: Node3D = null
+var _skylight_spot: SpotLight3D = null
+var _accent_lights: Array[OmniLight3D] = []
+var _water_holder: Node3D = null
+var _shards_holder: Node3D = null
+var _abyssal_holder: Node3D = null
+var _crystal_stones_node: Node3D = null
+var _abyssal_base_node: MeshInstance3D = null
+var _pebbles_node: Node3D = null
+var _speleothems_node: Node3D = null
+var _flora_node: Node3D = null
+var _beams_node: Node3D = null
+var _door_node: Node3D = null
+var _pedestal_node: MeshInstance3D = null
+var _boulders_node: Node3D = null
+
+var _ow_terrain: Node3D = null
+var _ow_grass: Node3D = null
+var _ow_wispy: Node3D = null
+var _ow_trees: Node3D = null
+var _ow_rocks: Node3D = null
+var _ow_veg: Node3D = null
+var _ow_water: Node3D = null
+var _ow_village: Node3D = null
+var _ow_sun: DirectionalLight3D = null
+var _zone_cull_mode: int = -1 # -1 uninit, 0 full/transitional, 1 far outdoors, 2 deep underground
+var _last_cull_cam := Vector3(1e9, 1e9, 1e9)
+
+
+func _ready() -> void:
+	if Engine.is_editor_hint() and get_tree() != null and get_tree().edited_scene_root == self:
+		if get_node_or_null("BakedCaveMesh") == null and ResourceLoader.exists(CAVE_MESH_PATH):
+			var mi := MeshInstance3D.new()
+			mi.name = "BakedCaveMesh"
+			mi.mesh = ResourceLoader.load(CAVE_MESH_PATH) as Mesh
+			mi.material_override = _get_cave_rock_material()
+			add_child(mi)
 
 
 static func get_sdf() -> CaveSDF:
@@ -301,6 +377,17 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	_geode_reward_area = null
 	_geode_reward_collected = false
 	_geode_orb_satellites.clear()
+	_door_anim_t = 0.0
+	_fire_flicker_t = 0.0
+	_door_awaken_val = 0.18
+	_door_astrolabe_outer = null
+	_door_astrolabe_inner = null
+	_door_relief_mat = null
+	_torch_flame_mats.clear()
+	_torch_card_mats.clear()
+	_torch_haze_mats.clear()
+	_vault_door_omni = null
+	_vault_door_omni_base_pos = Vector3.ZERO
 	_wake_points.clear()
 	for _wi in 12:
 		_wake_points.append(Vector4(0.0, -1.0, 0.0, 0.0))
@@ -322,10 +409,11 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	var shell := MeshInstance3D.new()
 	shell.name = "CaveShell"
 	shell.mesh = cave_mesh
-	shell.material_override = _get_cave_rock_material()
+	shell.layers = 0
 	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	shell.custom_aabb = AABB(Vector3(-345.0, -5.0, -325.0), Vector3(425.0, 85.0, 420.0))
 	add_child(shell)
+	_build_chunked_cave_shell(shell, cave_mesh, _get_cave_rock_material())
 
 	if build_colliders:
 		if ResourceLoader.exists(CAVE_FLOOR_SHAPE_PATH):
@@ -378,10 +466,12 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	_build_skylight_beams_and_dust()
 
 	# P4: Radiating Geode crystal clusters + tiny Fork crawlway mouth teaser crystals + Deep Abyssal Shard Bundle
+	_pending_crystal_props.clear()
+	_crystal_mat_cache.clear()
 	_build_crystals(null, props_data)
 	_build_abyssal_shard_bundle(boulder_body)
 
-	# P5: Pool basin water, drip waterfall ribbon + splash, outflow stream, river pebbles,
+	# P5: Pool basin water, drip waterfall ribbon, outflow stream, river pebbles,
 	#     paired speleothems, strictly zero-collision ecological CaveFlora, and the Ancient Big Door
 	_build_water_features()
 	_build_pebbles(null, props_data)
@@ -392,6 +482,149 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	# P6: Geode Prismatic Crystal Core collectible reward & acoustic zone reverb plumbing
 	_build_geode_reward()
 	_build_reverb_zones()
+	_init_zone_culling_refs()
+
+	if not Engine.is_editor_hint() and build_colliders and not _pending_crystal_props.is_empty():
+		_register_crystal_props_deferred.call_deferred()
+
+
+func _init_zone_culling_refs() -> void:
+	_cave_shell = get_node_or_null("CaveShell") as MeshInstance3D
+	_lighting_rig = get_node_or_null("CaveLighting") as Node3D
+	_skylight_spot = _lighting_rig.get_node_or_null("SkylightKeySpot") as SpotLight3D if _lighting_rig != null else null
+	_accent_lights.clear()
+	_vault_door_omni = null
+	if _lighting_rig != null:
+		for ch in _lighting_rig.get_children():
+			if ch is OmniLight3D:
+				_accent_lights.append(ch as OmniLight3D)
+				if ch.name == "VaultDoorOmni":
+					_vault_door_omni = ch as OmniLight3D
+					_vault_door_omni_base_pos = _vault_door_omni.position
+	_water_holder = get_node_or_null("CaveWater") as Node3D
+	_shards_holder = get_node_or_null("CaveCrystalShards") as Node3D
+	_abyssal_holder = get_node_or_null("CaveAbyssalCrystalShards") as Node3D
+	_crystal_stones_node = get_node_or_null("CaveCrystalStones") as Node3D
+	_abyssal_base_node = get_node_or_null("CaveAbyssalShards") as MeshInstance3D
+	_pebbles_node = get_node_or_null("CavePebbles") as Node3D
+	_speleothems_node = get_node_or_null("CaveSpeleothems") as Node3D
+	_flora_node = get_node_or_null("CaveFlora") as Node3D
+	_beams_node = get_node_or_null("SkylightBeams") as Node3D
+	_door_node = get_node_or_null("AncientBigDoor") as Node3D
+	_pedestal_node = get_node_or_null("GeodeAltarPedestal") as MeshInstance3D
+	_boulders_node = get_node_or_null("CaveBoulders") as Node3D
+
+	var terrain_p := get_parent()
+	if terrain_p != null:
+		_ow_terrain = terrain_p.get_node_or_null("Terrain") as Node3D
+		_ow_grass = terrain_p.get_node_or_null("Grass") as Node3D
+		_ow_wispy = terrain_p.get_node_or_null("GrassWispy") as Node3D
+		_ow_trees = terrain_p.get_node_or_null("Trees") as Node3D
+		_ow_rocks = terrain_p.get_node_or_null("Rocks") as Node3D
+		_ow_veg = terrain_p.get_node_or_null("Vegetation") as Node3D
+		_ow_water = terrain_p.get_node_or_null("Water") as Node3D
+		_ow_village = terrain_p.get_node_or_null("Village") as Node3D
+		var main_n := terrain_p.get_parent()
+		_ow_sun = main_n.get_node_or_null("Sun") as DirectionalLight3D if main_n != null else null
+	_zone_cull_mode = -1
+	_last_cull_cam = Vector3(1e9, 1e9, 1e9)
+	_water_uniforms_dirty = true
+
+
+func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> void:
+	if Engine.is_editor_hint() or _cave_shell == null:
+		return
+	if cam_pos.distance_squared_to(_last_cull_cam) < 0.36 and _zone_cull_mode >= 0:
+		return
+	_last_cull_cam = cam_pos
+
+	var sky_c: Vector3 = CaveLayout.SKYLIGHT["c"]
+	var d_skylight_2d := Vector2(cl.x - sky_c.x, cl.z - sky_c.z).length()
+	var d_mouth_2d := Vector2(cl.x, cl.z).length()
+
+	# Mode: 1 = far outdoors (hide deep cave interiors & lights); 2 = deep subterranean (hide overworld foliage/ocean/terrain); 0 = twilight/skylight transition
+	var target_mode := 0
+	if cave_factor < 0.03 and (cl.z < -8.0 or (cl.y > 41.0 and d_skylight_2d > 42.0 and d_mouth_2d > 54.0)):
+		target_mode = 1
+	elif cave_factor > 0.85 and cl.z > 44.0 and cl.y < 36.0 and d_skylight_2d > 48.0 and d_mouth_2d > 56.0:
+		target_mode = 2
+
+	var show_cave_interior := (target_mode != 1)
+	var show_overworld := (target_mode != 2) or (d_mouth_2d < 85.0) or (d_skylight_2d < 60.0)
+	var hide_ocean_in_cave := (cave_factor > 0.70 and cl.z > 20.0 and cl.y < 40.0)
+
+	if _zone_cull_mode != target_mode:
+		_zone_cull_mode = target_mode
+		if _lighting_rig != null:
+			_lighting_rig.visible = show_cave_interior
+		if _water_holder != null:
+			_water_holder.visible = show_cave_interior
+		if _shards_holder != null:
+			_shards_holder.visible = show_cave_interior
+		if _abyssal_holder != null:
+			_abyssal_holder.visible = show_cave_interior
+		if _crystal_stones_node != null:
+			_crystal_stones_node.visible = show_cave_interior
+		if _abyssal_base_node != null:
+			_abyssal_base_node.visible = show_cave_interior
+		if _pebbles_node != null:
+			_pebbles_node.visible = show_cave_interior
+		if _speleothems_node != null:
+			_speleothems_node.visible = show_cave_interior
+		if _flora_node != null:
+			_flora_node.visible = show_cave_interior
+		if _beams_node != null:
+			_beams_node.visible = show_cave_interior
+		if _door_node != null:
+			_door_node.visible = show_cave_interior
+		if _pedestal_node != null:
+			_pedestal_node.visible = show_cave_interior
+		if _geode_reward_node != null:
+			_geode_reward_node.visible = show_cave_interior
+
+		if _ow_terrain != null:
+			_ow_terrain.visible = show_overworld
+		if _ow_grass != null:
+			_ow_grass.visible = show_overworld
+		if _ow_wispy != null:
+			_ow_wispy.visible = show_overworld
+		if _ow_trees != null:
+			_ow_trees.visible = show_overworld
+		if _ow_rocks != null:
+			_ow_rocks.visible = show_overworld
+		if _ow_veg != null:
+			_ow_veg.visible = show_overworld
+		if _ow_village != null:
+			_ow_village.visible = show_overworld
+		if _ow_sun != null:
+			_ow_sun.visible = show_overworld
+
+	if _ow_water != null:
+		var want_ocean := show_overworld and not hide_ocean_in_cave
+		if _ow_water.visible != want_ocean:
+			_ow_water.visible = want_ocean
+
+	# Always fine-tune SkylightKeySpot shadow pass & far exterior CaveShell shadows/visibility
+	if _skylight_spot != null:
+		var spot_in_range := show_cave_interior and d_skylight_2d < 72.0
+		if _skylight_spot.visible != spot_in_range:
+			_skylight_spot.visible = spot_in_range
+	if show_cave_interior:
+		for omni in _accent_lights:
+			if omni != null:
+				var max_r := omni.omni_range + 42.0
+				omni.visible = cam_pos.distance_squared_to(omni.global_position) <= max_r * max_r
+	if _cave_shell != null:
+		var want_shell_shadow := (target_mode != 1 and d_skylight_2d < 32.0)
+		var target_shadow := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if want_shell_shadow else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if _cave_shell.cast_shadow != target_shadow:
+			_cave_shell.cast_shadow = target_shadow
+			for chunk_mi in _cave_shell_chunks:
+				if chunk_mi != null and is_instance_valid(chunk_mi):
+					chunk_mi.cast_shadow = target_shadow
+		var want_shell_vis := not (target_mode == 1 and d_mouth_2d > 110.0 and d_skylight_2d > 85.0 and cl.z < -22.0)
+		if _cave_shell.visible != want_shell_vis:
+			_cave_shell.visible = want_shell_vis
 
 
 func _load_or_compute_props(terrain_scene: Node3D, seed_val: int = 1337) -> Dictionary:
@@ -429,8 +662,26 @@ func _process(delta: float) -> void:
 		if ow_w != null and ow_w.material_override is ShaderMaterial:
 			_ocean_water_mat = ow_w.material_override as ShaderMaterial
 
-	if _grass_shader_mat != null and _slime_ref != null:
-		_grass_shader_mat.set_shader_parameter("slime_pos", _slime_ref.global_position)
+	if _grass_shader_mat != null and _slime_ref != null and (_flora_node == null or _flora_node.visible):
+		var sp_g := _slime_ref.global_position
+		var g_scale := float(_slime_ref.get("slime_scale")) if "slime_scale" in _slime_ref else 1.0
+		var g_rad := maxf(2.15, g_scale * 2.25)
+		var g_h := maxf(2.4, g_scale * 2.65)
+		var g_belly := sp_g
+		if "model" in _slime_ref and _slime_ref.model != null:
+			var m_g: Variant = _slime_ref.model
+			var spr_x := 1.0 + (maxf(0.0, float(_slime_ref.get("spread_x"))) * 0.55 if "spread_x" in _slime_ref else 0.0)
+			g_rad = maxf(2.15, maxf(float(m_g.semi_a), float(m_g.semi_b)) * spr_x * 1.10)
+			g_h = maxf(2.0, float(m_g.full_height))
+			g_belly = sp_g - Vector3(0.0, float(m_g.rest_half_height) * g_scale * 0.45, 0.0)
+		var g_vel := Vector3.ZERO
+		if "motor" in _slime_ref and _slime_ref.motor != null and "velocity" in _slime_ref.motor:
+			g_vel = _slime_ref.motor.velocity
+		_last_grass_slime_pos = g_belly
+		_grass_shader_mat.set_shader_parameter("slime_pos", g_belly)
+		_grass_shader_mat.set_shader_parameter("slime_radius", g_rad)
+		_grass_shader_mat.set_shader_parameter("slime_height", g_h)
+		_grass_shader_mat.set_shader_parameter("slime_vel", g_vel)
 
 	var active_water_slime: Node3D = _slime_ref
 	if active_water_slime != null:
@@ -499,6 +750,7 @@ func _process(delta: float) -> void:
 		s_rad = _water_ripple_rad
 		_wake_emit_timer = 0.0
 
+	var active_wakes := 0
 	for wi in 12:
 		var wp: Vector4 = _wake_points[wi]
 		if wp.y >= 0.0:
@@ -511,16 +763,23 @@ func _process(delta: float) -> void:
 				if wp.w < 0.02 or wp.y > 2.2:
 					wp = Vector4(0.0, -1.0, 0.0, 0.0)
 			_wake_points[wi] = wp
+			if wp.y >= 0.0:
+				active_wakes += 1
 
-	for wmat: ShaderMaterial in [_pool_water_mat, _lake_water_mat, _stream_water_mat, _ocean_water_mat]:
-		if wmat != null:
-			wmat.set_shader_parameter("slime_pos", s_pos)
-			wmat.set_shader_parameter("slime_vel", s_vel)
-			wmat.set_shader_parameter("slime_radius", s_rad)
-			wmat.set_shader_parameter("slime_submersion", _water_ripple_submersion)
-			wmat.set_shader_parameter("wake_points", _wake_points)
+	var water_active := any_in_water or _water_ripple_submersion > 0.0 or active_wakes > 0
+	if water_active or _water_uniforms_dirty:
+		_water_uniforms_dirty = water_active
+		for wmat: ShaderMaterial in [_pool_water_mat, _lake_water_mat, _stream_water_mat, _ocean_water_mat]:
+			if wmat != null:
+				wmat.set_shader_parameter("slime_pos", s_pos)
+				wmat.set_shader_parameter("slime_vel", s_vel)
+				wmat.set_shader_parameter("slime_radius", s_rad)
+				wmat.set_shader_parameter("slime_submersion", _water_ripple_submersion)
+				wmat.set_shader_parameter("active_wake_count", active_wakes)
+				if active_wakes > 0 or not water_active:
+					wmat.set_shader_parameter("wake_points", _wake_points)
 
-	if not _geode_reward_collected and _geode_reward_mesh != null and is_instance_valid(_geode_reward_mesh):
+	if not _geode_reward_collected and (_geode_reward_node == null or _geode_reward_node.visible) and _geode_reward_mesh != null and is_instance_valid(_geode_reward_mesh):
 		_geode_spin_t += delta
 		_geode_reward_mesh.rotation.y = _geode_spin_t * 0.42
 		_geode_reward_mesh.position.y = sin(_geode_spin_t * 1.9) * 0.14
@@ -537,11 +796,51 @@ func _process(delta: float) -> void:
 				sat.position = Vector3(cos(orb_ang) * orb_r, sin(orb_ang) * tilt + 0.12 * cos(orb_ang * 2.0), sin(orb_ang) * orb_r)
 				sat.rotation = Vector3(sin(orb_ang) * 0.32, -orb_ang + PI * 0.5, cos(orb_ang) * 0.28)
 
+	if _door_node != null and _door_node.visible and is_instance_valid(_door_node):
+		var target_awaken := door_idle_glow
+		if _slime_ref != null and is_instance_valid(_slime_ref):
+			var d_door := _slime_ref.global_position.distance_to(_door_node.global_position)
+			target_awaken = clampf(1.0 - (d_door - 7.5) / maxf(door_awaken_distance, 1.0), door_idle_glow, 1.0)
+		_door_awaken_val = lerpf(_door_awaken_val, target_awaken, minf(delta * 3.2, 1.0))
+		var speed_mult := 1.0 + _door_awaken_val * 0.55
+		_door_anim_t += delta * speed_mult
+		_fire_flicker_t += delta
 
-func _physics_process(_delta: float) -> void:
-	if Engine.is_editor_hint() or _geode_reward_collected or _geode_reward_node == null:
+		for mat: ShaderMaterial in _torch_flame_mats:
+			if mat != null:
+				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+		for mat: ShaderMaterial in _torch_card_mats:
+			if mat != null:
+				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+		for mat: ShaderMaterial in _torch_haze_mats:
+			if mat != null:
+				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+
+		if _vault_door_omni != null and is_instance_valid(_vault_door_omni) and _vault_door_omni.visible:
+			var ft := _fire_flicker_t
+			# Summed irrational-ratio firelight waves + subtle high-frequency flicker
+			var wave_a := sin(ft * 7.31) * 0.42
+			var wave_b := sin(ft * 13.73 + 1.17) * 0.28
+			var wave_c := cos(ft * 21.19 + 2.41) * 0.18
+			var wave_d := sin(ft * 33.47 + 0.53) * 0.12
+			var flicker_raw := wave_a + wave_b + wave_c + wave_d
+			var flicker_e := clampf(0.95 + 0.16 * flicker_raw, 0.76, 1.16)
+			_vault_door_omni.light_energy = (3.55 + _door_awaken_val * 0.55) * flicker_e
+
+			var jx := (sin(ft * 9.13) * 0.6 + cos(ft * 19.31) * 0.4) * 0.14
+			var jy := (sin(ft * 11.47 + 0.8) * 0.6 + sin(ft * 24.71) * 0.4) * 0.13
+			var jz := (cos(ft * 8.29 + 1.9) * 0.6 + sin(ft * 17.53) * 0.4) * 0.14
+			_vault_door_omni.position = _vault_door_omni_base_pos + Vector3(jx, jy, jz)
+
+			var ember_c := Color(1.0, 0.56, 0.22)
+			var flame_gold_c := Color(1.0, 0.80, 0.48)
+			var color_t := clampf(0.50 + 0.42 * flicker_raw + _door_awaken_val * 0.12, 0.0, 1.0)
+			_vault_door_omni.light_color = ember_c.lerp(flame_gold_c, color_t)
+
+
+func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint():
 		return
-	var rpos := _geode_reward_node.global_position
 	var candidates: Array = []
 	var parent := get_parent()
 	var main_node := parent.get_parent() if parent != null else null
@@ -553,16 +852,48 @@ func _physics_process(_delta: float) -> void:
 		if direct_slime != null and not candidates.has(direct_slime):
 			candidates.append(direct_slime)
 
-	for s in candidates:
-		if not is_instance_valid(s):
+	if not _geode_reward_collected and _geode_reward_node != null:
+		var rpos := _geode_reward_node.global_position
+		for s in candidates:
+			if not is_instance_valid(s):
+				continue
+			var sp: Vector3 = (s as Node3D).global_position
+			var dx := sp.x - rpos.x
+			var dz := sp.z - rpos.z
+			var dy := absf(sp.y - rpos.y)
+			if (dx * dx + dz * dz) <= 7.84 and dy <= 3.5:
+				_collect_geode_reward(s)
+				break
+
+
+func _register_crystal_props_deferred() -> void:
+	if Engine.is_editor_hint() or _pending_crystal_props.is_empty():
+		return
+	var parent := get_parent()
+	var main_node := parent.get_parent() if parent != null else null
+	var eco := main_node.get_node_or_null("Ecosystem") as SlimeProps if main_node != null else null
+	if eco == null:
+		return
+	for item: Dictionary in _pending_crystal_props:
+		var mi := item["mi"] as MeshInstance3D
+		var mat := item["mat"] as ShaderMaterial
+		if mi == null or not is_instance_valid(mi):
 			continue
-		var sp: Vector3 = (s as Node3D).global_position
-		var dx := sp.x - rpos.x
-		var dz := sp.z - rpos.z
-		var dy := absf(sp.y - rpos.y)
-		if (dx * dx + dz * dz) <= 7.84 and dy <= 3.5:
-			_collect_geode_reward(s)
-			break
+		eco.register_external_prop(
+			mi,
+			mat,
+			int(item["shape"]),
+			item["half"] as Vector3,
+			float(item["base_r"]),
+			int(item["sides"]),
+			float(item["vol"]),
+			true,
+			&"cave_crystals",
+			true,
+			true,
+			true
+		)
+	_pending_crystal_props.clear()
 
 
 func _collect_geode_reward(collector: Variant) -> void:
@@ -578,7 +909,7 @@ func _collect_geode_reward(collector: Variant) -> void:
 			target_slime = player_slime
 
 	if target_slime != null and target_slime.has_method("add_volume"):
-		target_slime.add_volume(8.0)
+		target_slime.add_volume(geode_volume_bonus)
 
 	if _geode_reward_mesh != null:
 		_geode_reward_mesh.visible = false
@@ -587,7 +918,7 @@ func _collect_geode_reward(collector: Variant) -> void:
 
 	var st := get_tree()
 	if st != null:
-		st.call_group("hud", "show_toast", "Geode Heart Absorbed! (+8.0 m³)", Color(0.55, 0.94, 1.0), 4.0)
+		st.call_group("hud", "show_toast", "Geode Heart Absorbed! (+%.1f m³)" % geode_volume_bonus, Color(0.55, 0.94, 1.0), 4.0)
 
 	if DisplayServer.get_name() != "headless":
 		var sm := get_node_or_null("/root/SettingsManager")
@@ -608,9 +939,37 @@ func is_geode_reward_collected() -> bool:
 
 
 func _clear_generated_children() -> void:
+	_pending_crystal_props.clear()
+	_crystal_mat_cache.clear()
+	_cave_shell_chunks.clear()
+	_cave_boulder_shapes.clear()
+	if not Engine.is_editor_hint() and is_inside_tree():
+		var parent := get_parent()
+		var main_node := parent.get_parent() if parent != null else null
+		var eco := main_node.get_node_or_null("Ecosystem") as SlimeProps if main_node != null else null
+		if eco != null:
+			eco.clear_external_group(&"cave_crystals")
 	for c in get_children():
+		# Preserve Inspector-authored scene nodes (CaveOrigin, authored CaveLighting, sub-scenes)
+		if c is CaveOriginNode or c.has_meta("_authored") or c.scene_file_path != "" or (c.name == "CaveLighting" and c.owner != null):
+			continue
 		remove_child(c)
 		c.free()
+
+
+func _editor_export_layout() -> void:
+	var origin := get_node_or_null("CaveOrigin") as CaveOriginNode
+	if origin != null:
+		origin.export_layout_resource()
+		layout_data = CaveLayout.load_active_layout()
+	else:
+		push_warning("[CaveSystem] No CaveOrigin child node found to export.")
+
+
+func _editor_rebuild_preview() -> void:
+	var parent_ts := get_parent()
+	if parent_ts != null:
+		rebuild_cave(parent_ts, bake_config.seed_val if bake_config != null else 1337, false)
 
 
 func _get_cave_rock_material() -> ShaderMaterial:
@@ -636,7 +995,181 @@ func _get_cave_rock_material() -> ShaderMaterial:
 # P3: LIGHTING RIG (<= 4 DYNAMIC LIGHTS, EXACTLY 1 SHADOWED)
 # ==============================================================================
 
+static func _cave_zone_for_world_pos(wp: Vector3) -> int:
+	var cl := CaveLayout.to_local(wp)
+	if cl.z < 42.0:
+		return 0
+	if cl.z < 106.0 and cl.x <= 0.0:
+		return 1
+	if cl.z < 130.0 and cl.x > 0.0:
+		return 2
+	if cl.x >= -75.0:
+		return 3
+	return 4
+
+
+func _build_chunked_cave_shell(shell: MeshInstance3D, cave_mesh: ArrayMesh, mat: Material) -> void:
+	_cave_shell_chunks.clear()
+	if cave_mesh.get_surface_count() == 0:
+		return
+	var arrs := cave_mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrs[Mesh.ARRAY_VERTEX]
+	if verts.is_empty():
+		return
+	var normals: PackedVector3Array = arrs[Mesh.ARRAY_NORMAL]
+	var colors: PackedColorArray = arrs[Mesh.ARRAY_COLOR]
+	var uvs: PackedVector2Array = arrs[Mesh.ARRAY_TEX_UV]
+	var indices: PackedInt32Array = arrs[Mesh.ARRAY_INDEX]
+	var has_nrm := normals.size() == verts.size()
+	var has_col := colors.size() == verts.size()
+	var has_uv := uvs.size() == verts.size()
+	var use_idx := not indices.is_empty()
+	var tri_count := (indices.size() if use_idx else verts.size()) / 3
+
+	var zone_tris: Array[PackedInt32Array] = []
+	for _z in 5:
+		zone_tris.append(PackedInt32Array())
+	for ti in tri_count:
+		var b := ti * 3
+		var i0 := indices[b] if use_idx else b
+		var i1 := indices[b + 1] if use_idx else (b + 1)
+		var i2 := indices[b + 2] if use_idx else (b + 2)
+		var centroid := (verts[i0] + verts[i1] + verts[i2]) * (1.0 / 3.0)
+		var zid := _cave_zone_for_world_pos(centroid)
+		var zarr := zone_tris[zid]
+		zarr.append(i0)
+		zarr.append(i1)
+		zarr.append(i2)
+
+	var vmap_local := PackedInt32Array()
+	vmap_local.resize(verts.size())
+	var vmap_stamp := PackedInt32Array()
+	vmap_stamp.resize(verts.size())
+	var stamp := 0
+
+	for zid in 5:
+		var tris := zone_tris[zid]
+		if tris.is_empty():
+			continue
+		stamp += 1
+		var c_verts := PackedVector3Array()
+		var c_normals := PackedVector3Array()
+		var c_colors := PackedColorArray()
+		var c_uvs := PackedVector2Array()
+		var c_indices := PackedInt32Array()
+		c_indices.resize(tris.size())
+		var min_pt := Vector3(INF, INF, INF)
+		var max_pt := Vector3(-INF, -INF, -INF)
+
+		for k in tris.size():
+			var gi := tris[k]
+			var li: int
+			if vmap_stamp[gi] == stamp:
+				li = vmap_local[gi]
+			else:
+				li = c_verts.size()
+				vmap_stamp[gi] = stamp
+				vmap_local[gi] = li
+				var vp := verts[gi]
+				c_verts.append(vp)
+				if has_nrm:
+					c_normals.append(normals[gi])
+				if has_col:
+					c_colors.append(colors[gi])
+				if has_uv:
+					c_uvs.append(uvs[gi])
+				min_pt.x = minf(min_pt.x, vp.x)
+				min_pt.y = minf(min_pt.y, vp.y)
+				min_pt.z = minf(min_pt.z, vp.z)
+				max_pt.x = maxf(max_pt.x, vp.x)
+				max_pt.y = maxf(max_pt.y, vp.y)
+				max_pt.z = maxf(max_pt.z, vp.z)
+			c_indices[k] = li
+
+		var c_arrs := []
+		c_arrs.resize(Mesh.ARRAY_MAX)
+		c_arrs[Mesh.ARRAY_VERTEX] = c_verts
+		if has_nrm:
+			c_arrs[Mesh.ARRAY_NORMAL] = c_normals
+		if has_col:
+			c_arrs[Mesh.ARRAY_COLOR] = c_colors
+		if has_uv:
+			c_arrs[Mesh.ARRAY_TEX_UV] = c_uvs
+		c_arrs[Mesh.ARRAY_INDEX] = c_indices
+
+		var c_mesh := ArrayMesh.new()
+		c_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrs)
+		var chunk_mi := MeshInstance3D.new()
+		chunk_mi.name = "CaveShellChunk_%d" % zid
+		chunk_mi.mesh = c_mesh
+		chunk_mi.material_override = mat
+		chunk_mi.cast_shadow = shell.cast_shadow
+		chunk_mi.custom_aabb = AABB(min_pt, max_pt - min_pt).grow(0.5)
+		shell.add_child(chunk_mi)
+		_cave_shell_chunks.append(chunk_mi)
+
+
+func _add_zoned_multimeshes(parent_node: Node3D, base_name: String, mesh: Mesh, xforms: Array, colors: Array, cast_shadow: GeometryInstance3D.ShadowCastingSetting, mat_ov: Material = null, vis_end: float = 0.0, vis_margin: float = 0.0, aabb_grow: float = 3.0) -> void:
+	if parent_node == null or mesh == null or xforms.is_empty():
+		return
+	var zone_xfs: Array[Array] = [[], [], [], [], []]
+	var zone_cols: Array[Array] = [[], [], [], [], []]
+	var use_cols := colors.size() == xforms.size()
+	for i in xforms.size():
+		var xf: Transform3D = xforms[i] as Transform3D
+		var zid := _cave_zone_for_world_pos(xf.origin)
+		zone_xfs[zid].append(xf)
+		if use_cols:
+			zone_cols[zid].append(colors[i])
+
+	for zid in 5:
+		var zxfs: Array = zone_xfs[zid]
+		if zxfs.is_empty():
+			continue
+		var min_pt := Vector3(INF, INF, INF)
+		var max_pt := Vector3(-INF, -INF, -INF)
+		for i in zxfs.size():
+			var o: Vector3 = (zxfs[i] as Transform3D).origin
+			min_pt.x = minf(min_pt.x, o.x)
+			min_pt.y = minf(min_pt.y, o.y)
+			min_pt.z = minf(min_pt.z, o.z)
+			max_pt.x = maxf(max_pt.x, o.x)
+			max_pt.y = maxf(max_pt.y, o.y)
+			max_pt.z = maxf(max_pt.z, o.z)
+		var center := (min_pt + max_pt) * 0.5
+
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = use_cols
+		mm.mesh = mesh
+		mm.instance_count = zxfs.size()
+		var zcols: Array = zone_cols[zid]
+		for i in zxfs.size():
+			var xf: Transform3D = zxfs[i] as Transform3D
+			xf.origin -= center
+			mm.set_instance_transform(i, xf)
+			if use_cols:
+				mm.set_instance_color(i, zcols[i] as Color)
+
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "%s_Z%d" % [base_name, zid]
+		mmi.position = center
+		mmi.multimesh = mm
+		mmi.cast_shadow = cast_shadow
+		if mat_ov != null:
+			mmi.material_override = mat_ov
+		if vis_end > 0.0:
+			mmi.visibility_range_end = vis_end
+			mmi.visibility_range_end_margin = vis_margin
+			mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		mmi.custom_aabb = AABB(min_pt - center, max_pt - min_pt).grow(aabb_grow)
+		parent_node.add_child(mmi)
+
+
 func _build_interior_lighting_rig() -> void:
+	var existing := get_node_or_null("CaveLighting")
+	if existing != null:
+		return
 	var rig := Node3D.new()
 	rig.name = "CaveLighting"
 	add_child(rig)
@@ -689,7 +1222,7 @@ func _build_interior_lighting_rig() -> void:
 		["SpiralLedgeStartOmni", Vector3(-73.0, 23.5, 81.0), Color(0.65, 0.55, 1.0), 1.45, 22.0, 1.45],
 		["GeodeCrystalOmni", Vector3(5.5, 20.8, 55.0), Color(0.56, 0.72, 1.0), 4.20, 44.0, 0.85],
 		["UndergroundLakeOmni", Vector3(-6.0, 15.2, 178.0), Color(0.58, 0.92, 1.00), 5.10, 116.0, 0.60],
-		["VaultDoorOmni", Vector3(-184.0, 6.8, 66.0), Color(1.0, 0.76, 0.38), 3.40, 34.0, 1.35],
+		["VaultDoorOmni", Vector3(-183.6, 7.2, 66.4), Color(0.96, 0.80, 0.56), 3.65, 42.0, 0.96],
 	]
 	for a: Array in accents:
 		var omni := OmniLight3D.new()
@@ -1552,29 +2085,18 @@ func _build_boulders_and_trees(
 	for a in 3:
 		var m: Mesh = rock_meshes[a] if a < rock_meshes.size() else null
 		var xforms: Array = grouped[a] if a < grouped.size() else []
-		if m == null or xforms.is_empty():
-			continue
-		var mmi := MultiMeshInstance3D.new()
-		mmi.name = "CaveRock%d" % (a + 1)
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = m
-		mm.instance_count = xforms.size()
-		for i in xforms.size():
-			mm.set_instance_transform(i, xforms[i] as Transform3D)
-		mmi.multimesh = mm
-		holder.add_child(mmi)
+		_add_zoned_multimeshes(holder, "CaveRock%d" % (a + 1), m, xforms, [], GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 0.0, 0.0, 5.0)
 
 	if boulder_body != null:
+		var body_rid := boulder_body.get_rid()
+		PhysicsServer3D.body_clear_shapes(body_rid)
+		_cave_boulder_shapes.clear()
 		for c_item: Dictionary in collider_items:
 			var arch: int = int(c_item["arch"])
 			var conv: ConvexPolygonShape3D = rock_shapes[arch] if arch < rock_shapes.size() else null
 			if conv != null:
-				var cs := CollisionShape3D.new()
-				cs.shape = conv
-				cs.transform = c_item["xf"] as Transform3D
-				boulder_body.add_child(cs)
+				_cave_boulder_shapes.append(conv)
+				PhysicsServer3D.body_add_shape(body_rid, conv.get_rid(), c_item["xf"] as Transform3D)
 
 	var bark_mat := StandardMaterial3D.new()
 	bark_mat.albedo_texture = load("res://assets/nature/Bark_NormalTree.png") as Texture2D
@@ -1942,27 +2464,50 @@ static func _add_chisel_crystal_to_st(
 			_add_tri_outward(st_t, ring_l[nxt], bot_pt, ring_l[i], Vector2(u1, 0.14), Vector2(0.5 * (u0 + u1), 0.0), Vector2(u0, 0.14), prism_ref, part_u, col, use_col, 1.0)
 
 
-func _build_crystal_mesh() -> ArrayMesh:
-	if _cached_crystal_mesh != null:
-		return _cached_crystal_mesh
+func _get_crystal_material(emission_str: float = 0.92, fresnel_pw: float = 3.4) -> ShaderMaterial:
+	var cmat := ShaderMaterial.new()
+	cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
+	cmat.set_shader_parameter("emission_strength", emission_str)
+	cmat.set_shader_parameter("fresnel_power", fresnel_pw)
+	cmat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
+	cmat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
+	return cmat
+
+
+func _get_absorbable_crystal_material(tint: Color, emission_str: float = 0.92, fresnel_pw: float = 3.4) -> ShaderMaterial:
+	var qtint := Vector4(snappedf(tint.r, 0.02), snappedf(tint.g, 0.02), snappedf(tint.b, 0.02), snappedf(emission_str, 0.05))
+	var key := "%s|%.1f" % [str(qtint), fresnel_pw]
+	if _crystal_mat_cache.has(key):
+		return _crystal_mat_cache[key] as ShaderMaterial
+	var cmat := _get_crystal_material(emission_str, fresnel_pw)
+	cmat.set_shader_parameter("uTintColor", Vector3(tint.r, tint.g, tint.b))
+	cmat.set_shader_parameter("uGlow", Vector3(clampf(tint.r * 0.4 + 0.3, 0.0, 1.0), clampf(tint.g * 0.4 + 0.55, 0.0, 1.0), clampf(tint.b * 0.4 + 0.55, 0.0, 1.0)))
+	cmat.set_shader_parameter("uDissolve", 0.0)
+	_crystal_mat_cache[key] = cmat
+	return cmat
+
+
+func _build_crystal_stone_mesh() -> ArrayMesh:
+	if _cached_crystal_stone_mesh != null:
+		return _cached_crystal_stone_mesh as ArrayMesh
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# 1. Craggy Obsidian-Basalt Matrix Cradle (UV2.x = 0.0, grounded flush around chunky crystal chunks with deep skirt)
+	# Chunky Craggy Basalt Matrix Cradle (UV2.x = 0.0 -> substantial faceted rock base left intact after shards are absorbed)
 	var rock_sides := 8
 	var rock_bot: Array[Vector3] = []
 	var rock_mid: Array[Vector3] = []
 	var rock_top: Array[Vector3] = []
-	var rock_peak := Vector3(0.0, 0.38, 0.0)
-	var rock_ref := Vector3(0.0, -0.26, 0.0)
+	var rock_peak := Vector3(0.0, 0.62, 0.0)
+	var rock_ref := Vector3(0.0, -0.20, 0.0)
 	for i in rock_sides:
 		var a := (float(i) / float(rock_sides)) * TAU + 0.14 * sin(float(i) * 2.3)
-		var rb := 0.94 + 0.12 * cos(float(i) * 2.9)
-		var rm := 0.72 + 0.09 * sin(float(i) * 3.1)
-		var rt := 0.46 + 0.06 * cos(float(i) * 2.1)
-		var hm := 0.10 + 0.06 * sin(float(i) * 1.9)
-		var ht := 0.30 + 0.07 * cos(float(i) * 2.4 + 0.7)
-		rock_bot.append(Vector3(cos(a) * rb, -0.68, sin(a) * rb))
+		var rb := 1.08 + 0.15 * cos(float(i) * 2.9)
+		var rm := 0.86 + 0.12 * sin(float(i) * 3.1)
+		var rt := 0.56 + 0.08 * cos(float(i) * 2.1)
+		var hm := 0.24 + 0.08 * sin(float(i) * 1.9)
+		var ht := 0.46 + 0.09 * cos(float(i) * 2.4 + 0.7)
+		rock_bot.append(Vector3(cos(a) * rb, -0.75, sin(a) * rb))
 		rock_mid.append(Vector3(cos(a) * rm, hm, sin(a) * rm))
 		rock_top.append(Vector3(cos(a) * rt, ht, sin(a) * rt))
 	for i in rock_sides:
@@ -1975,22 +2520,31 @@ func _build_crystal_mesh() -> ArrayMesh:
 		_add_tri_outward(st, rock_mid[i], rock_top[i], rock_top[nxt], Vector2(u0, 0.45), Vector2(u0, 0.85), Vector2(u1, 0.85), rock_ref, 0.0)
 		_add_tri_outward(st, rock_top[i], rock_peak, rock_top[nxt], Vector2(u0, 0.85), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, 0.85), rock_ref, 0.0)
 
-	# 2. Chunky Sculptural Interlocking Mineral Quartz Cluster (~1.4:1 to 1.6:1 stout bold proportions, locked tightly in rock cradle)
-	_add_chisel_crystal_to_st(st, Vector3(0.00, 0.08, 0.00), Vector3(0.06, 1.00, -0.04), 0.320, 0.320, 0.290, 0.78, 1.04, 0.24, 1.24, 0.84, Color.WHITE, false, false, 0.35, 1.0, false)
-	_add_chisel_crystal_to_st(st, Vector3(-0.14, 0.08, 0.12), Vector3(-0.18, 0.97, 0.15), 0.255, 0.255, 0.230, 0.56, 0.76, 1.45, 0.86, 1.18, Color.WHITE, false, false, 0.35, 1.0, false)
-	_add_chisel_crystal_to_st(st, Vector3(0.18, 0.07, 0.05), Vector3(0.36, 0.92, 0.12), 0.240, 0.240, 0.214, 0.52, 0.70, 1.05, 0.88, 1.16, Color.WHITE, false, false, 0.35, 1.0, true)
-	_add_chisel_crystal_to_st(st, Vector3(-0.18, 0.07, -0.08), Vector3(-0.38, 0.91, -0.16), 0.220, 0.220, 0.194, 0.45, 0.61, -0.78, 1.16, 0.86, Color.WHITE, false, false, 0.35, 1.0, true)
-	_add_chisel_crystal_to_st(st, Vector3(0.04, 0.07, -0.17), Vector3(0.12, 0.89, -0.44), 0.200, 0.200, 0.174, 0.40, 0.54, 2.35, 0.90, 1.14, Color.WHITE, false, false, 0.35, 1.0, false)
-	_add_chisel_crystal_to_st(st, Vector3(0.09, 0.07, 0.17), Vector3(0.20, 0.89, 0.42), 0.190, 0.190, 0.164, 0.36, 0.50, 0.62, 1.14, 0.88, Color.WHITE, false, false, 0.35, 1.0, true)
+	st.generate_tangents()
+	_cached_crystal_stone_mesh = st.commit()
+	_cached_crystal_stone_mesh.surface_set_material(0, _get_crystal_material())
+	return _cached_crystal_stone_mesh as ArrayMesh
+
+
+func _build_crystal_shards_mesh() -> ArrayMesh:
+	if _cached_crystal_shards_mesh != null:
+		return _cached_crystal_shards_mesh as ArrayMesh
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Chunky Sculptural Interlocking Mineral Quartz Cluster centered around (0, 0, 0) for clean SlimeProps digestion
+	var y_off := Vector3(0.0, -0.68, 0.0)
+	_add_chisel_crystal_to_st(st, Vector3(0.00, 0.24, 0.00) + y_off, Vector3(0.06, 1.00, -0.04), 0.320, 0.320, 0.290, 0.78, 1.04, 0.24, 1.24, 0.84, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(-0.14, 0.23, 0.12) + y_off, Vector3(-0.18, 0.97, 0.15), 0.255, 0.255, 0.230, 0.56, 0.76, 1.45, 0.86, 1.18, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(0.18, 0.20, 0.05) + y_off, Vector3(0.36, 0.92, 0.12), 0.240, 0.240, 0.214, 0.52, 0.70, 1.05, 0.88, 1.16, Color.WHITE, false, false, 0.35, 1.0, true)
+	_add_chisel_crystal_to_st(st, Vector3(-0.18, 0.20, -0.08) + y_off, Vector3(-0.38, 0.91, -0.16), 0.220, 0.220, 0.194, 0.45, 0.61, -0.78, 1.16, 0.86, Color.WHITE, false, false, 0.35, 1.0, true)
+	_add_chisel_crystal_to_st(st, Vector3(0.04, 0.19, -0.17) + y_off, Vector3(0.12, 0.89, -0.44), 0.200, 0.200, 0.174, 0.40, 0.54, 2.35, 0.90, 1.14, Color.WHITE, false, false, 0.35, 1.0, false)
+	_add_chisel_crystal_to_st(st, Vector3(0.09, 0.19, 0.17) + y_off, Vector3(0.20, 0.89, 0.42), 0.190, 0.190, 0.164, 0.36, 0.50, 0.62, 1.14, 0.88, Color.WHITE, false, false, 0.35, 1.0, true)
 
 	st.generate_tangents()
-	_cached_crystal_mesh = st.commit()
-	var cmat := ShaderMaterial.new()
-	cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
-	cmat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
-	cmat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
-	_cached_crystal_mesh.surface_set_material(0, cmat)
-	return _cached_crystal_mesh
+	_cached_crystal_shards_mesh = st.commit()
+	_cached_crystal_shards_mesh.surface_set_material(0, _get_crystal_material())
+	return _cached_crystal_shards_mesh as ArrayMesh
 
 
 static func _basis_align_y(up_dir: Vector3, twist: float) -> Basis:
@@ -2010,20 +2564,43 @@ func _build_crystals(_rng: RandomNumberGenerator = null, props_data: Dictionary 
 	if xforms.is_empty():
 		return
 
-	var cmesh := _build_crystal_mesh()
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "CaveCrystals"
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	mm.mesh = cmesh
-	mm.instance_count = xforms.size()
+	# 1. Permanent Obsidian-Basalt Stone Cradles (chunked by chamber for frustum & Mobile-light culling)
+	var stones_holder := Node3D.new()
+	stones_holder.name = "CaveCrystalStones"
+	add_child(stones_holder)
+	_add_zoned_multimeshes(stones_holder, "CaveCrystalStones", _build_crystal_stone_mesh(), xforms, colors, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, null, 0.0, 0.0, 2.5)
+
+	# 2. Absorbable Mineral Crystal Shards (registered with SlimeProps for physics push-resistance, inside-belly shrink & uDissolve)
+	var shards_holder := Node3D.new()
+	shards_holder.name = "CaveCrystalShards"
+	add_child(shards_holder)
+	var shards_mesh := _build_crystal_shards_mesh()
 	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i] as Transform3D)
-		mm.set_instance_color(i, colors[i] as Color)
-	mmi.multimesh = mm
-	add_child(mmi)
+		var xf := xforms[i] as Transform3D
+		var col := colors[i] as Color
+		var rot_b := xf.basis.orthonormalized()
+		var sh := xf.basis.y.length()
+		var world_center := xf.origin + rot_b.y * (0.68 * sh)
+		var mat := _get_absorbable_crystal_material(col, 0.92, 3.4)
+		var mi := MeshInstance3D.new()
+		mi.name = "CaveCrystalShard_%d" % i
+		mi.mesh = shards_mesh
+		mi.material_override = mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = 105.0
+		mi.visibility_range_end_margin = 14.0
+		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		mi.transform = Transform3D(rot_b.scaled(Vector3.ONE * sh), world_center)
+		shards_holder.add_child(mi)
+		_pending_crystal_props.append({
+			"mi": mi,
+			"mat": mat,
+			"shape": SlimeProps.SHAPE_PRISM,
+			"half": Vector3(0.46, 0.56, 0.46),
+			"base_r": 0.44,
+			"sides": 6,
+			"vol": clampf(0.56 * sh * sh * sh, 0.35, 1.85),
+		})
 
 
 func _build_abyssal_shard_bundle(boulder_body: StaticBody3D) -> void:
@@ -2032,11 +2609,11 @@ func _build_abyssal_shard_bundle(boulder_body: StaticBody3D) -> void:
 	var fy_pit := clampf(_sample_floor_y(sdf, pit_c.x, 5.5, pit_c.z), 1.15, 2.25)
 	var bundle_pos := CaveLayout.to_world(Vector3(pit_c.x, fy_pit - 0.12, pit_c.z))
 
-	if _cached_abyssal_bundle_mesh == null:
+	if _cached_abyssal_stone_mesh == null:
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-		# 1. Tectonic Angular Basalt Fissure Pedestal (10-sided craggy bedrock cradle, embedded deeply in pit floor)
+		# 1. Tectonic Angular Basalt Fissure Pedestal (10-sided craggy bedrock cradle, ALWAYS stays after shards are absorbed)
 		var r_sides := 10
 		var rock_bot: Array[Vector3] = []
 		var rock_mid: Array[Vector3] = []
@@ -2064,92 +2641,150 @@ func _build_abyssal_shard_bundle(boulder_body: StaticBody3D) -> void:
 			_add_tri_outward(st, rock_mid[i], rock_top[i], rock_top[nxt], Vector2(u0, 0.45), Vector2(u0, 0.85), Vector2(u1, 0.85), rock_ref, 0.0, basalt_col, true)
 			_add_tri_outward(st, rock_top[i], rock_peak, rock_top[nxt], Vector2(u0, 0.85), Vector2(0.5 * (u0 + u1), 1.0), Vector2(u1, 0.85), rock_ref, 0.0, basalt_col, true)
 
-		# 2. Dense Monumental Cluster of 20 Massive Chunky Crystal Columns & Interlocking Blocks (safe beneath swimming depth <= 5.10 m)
-		var brng := RandomNumberGenerator.new()
-		brng.seed = 7734
-		var shard_palette := [
-			Color(0.08, 0.92, 1.0),
-			Color(0.14, 0.62, 1.0),
-			Color(0.10, 0.96, 0.80),
-			Color(0.54, 0.30, 1.0),
-		]
-		var max_tip_reach := clampf(4.65 - (fy_pit - 0.12), 2.20, 3.25)
-
-		# Tier 0: 3 Colossal Central Heart Crystal Monoliths (1.04m - 1.32m wide chunky columns, ~2.1:1 ratio)
-		var hero_specs := [
-			[Vector3(0.0, 0.34, 0.0), Vector3(0.08, 0.99, -0.05), 0.66, 0.59, 0.96, false, 1.18, 0.86],
-			[Vector3(-0.62, 0.28, 0.40), Vector3(-0.22, 0.96, 0.16), 0.56, 0.50, 0.82, false, 0.88, 1.16],
-			[Vector3(0.64, 0.30, -0.34), Vector3(0.24, 0.95, -0.18), 0.52, 0.46, 0.74, true, 1.15, 0.88],
-		]
-		for hi in hero_specs.size():
-			var hs: Array = hero_specs[hi]
-			var th_tot: float = max_tip_reach * float(hs[4])
-			_add_chisel_crystal_to_st(
-				st, hs[0] as Vector3, hs[1] as Vector3,
-				float(hs[2]), float(hs[2]), float(hs[3]),
-				th_tot * 0.74, th_tot, brng.randf() * TAU,
-				float(hs[6]), float(hs[7]), shard_palette[hi % shard_palette.size()], true, false, 0.35, 1.0, bool(hs[5])
-			)
-
-		# Tier 1: 7 Heavy Buttress Crystal Blocks tightly ringing the hero monoliths (~1.8:1 chunky ratio)
-		for mi in 7:
-			var ang_m := (float(mi) / 7.0) * TAU + brng.randf_range(-0.14, 0.14)
-			var rad_m := brng.randf_range(0.76, 1.18)
-			var tilt_m := brng.randf_range(0.26, 0.46)
-			var dir_m := Vector3(cos(ang_m) * sin(tilt_m), cos(tilt_m), sin(ang_m) * sin(tilt_m)).normalized()
-			var base_m := Vector3(cos(ang_m) * rad_m, brng.randf_range(0.34, 0.52), sin(ang_m) * rad_m)
-			var tot_m := max_tip_reach * brng.randf_range(0.46, 0.68)
-			var rb_m := brng.randf_range(0.36, 0.46)
-			var rs_m := rb_m * brng.randf_range(0.86, 0.92)
-			_add_chisel_crystal_to_st(
-				st, base_m, dir_m, rb_m, rb_m, rs_m,
-				tot_m * 0.74, tot_m, brng.randf() * TAU,
-				1.18 if (mi % 2 == 0) else 0.86, 0.86 if (mi % 2 == 0) else 1.18,
-				shard_palette[(mi + 1) % shard_palette.size()], true, false, 0.35, 1.0, (mi % 2 == 1)
-			)
-
-		# Tier 2: 10 Stout Basal Crystal Chunks forming a dense crystal skirt atop the basalt pedestal (~1.6:1 ratio)
-		for oi in 10:
-			var ang_o := (float(oi) / 10.0) * TAU + 0.31 + brng.randf_range(-0.12, 0.12)
-			var rad_o := brng.randf_range(0.96, 1.42)
-			var tilt_o := brng.randf_range(0.38, 0.58)
-			var dir_o := Vector3(cos(ang_o) * sin(tilt_o), cos(tilt_o), sin(ang_o) * sin(tilt_o)).normalized()
-			var base_o := Vector3(cos(ang_o) * rad_o, brng.randf_range(0.42, 0.60), sin(ang_o) * rad_o)
-			var tot_o := max_tip_reach * brng.randf_range(0.34, 0.50)
-			var rb_o := brng.randf_range(0.28, 0.38)
-			var rs_o := rb_o * brng.randf_range(0.86, 0.92)
-			_add_chisel_crystal_to_st(
-				st, base_o, dir_o, rb_o, rb_o, rs_o,
-				tot_o * 0.74, tot_o, brng.randf() * TAU,
-				1.16 if (oi % 2 == 0) else 0.88, 0.88 if (oi % 2 == 0) else 1.16,
-				shard_palette[(oi + 2) % shard_palette.size()], true, false, 0.35, 1.0, (oi % 2 == 0)
-			)
-
 		st.generate_tangents()
-		_cached_abyssal_bundle_mesh = st.commit()
-		var cmat := ShaderMaterial.new()
-		cmat.shader = load("res://terrain/cave_crystal.gdshader") as Shader
-		cmat.set_shader_parameter("emission_strength", 1.38)
-		cmat.set_shader_parameter("fresnel_power", 2.9)
-		cmat.set_shader_parameter("striation_normal", _get_crystal_striation_normal_tex())
-		cmat.set_shader_parameter("interior_veil_tex", _get_crystal_interior_tex())
-		_cached_abyssal_bundle_mesh.surface_set_material(0, cmat)
+		_cached_abyssal_stone_mesh = st.commit()
+		_cached_abyssal_stone_mesh.surface_set_material(0, _get_crystal_material(1.38, 2.9))
 
 	var mi := MeshInstance3D.new()
 	mi.name = "CaveAbyssalShards"
-	mi.mesh = _cached_abyssal_bundle_mesh
+	mi.mesh = _cached_abyssal_stone_mesh
 	mi.position = bundle_pos
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 
-	# Basal basalt core collision cylinder cleanly well below swimming slime buoyancy depth (top ~ 3.2 m vs water_y 6.40)
+	# 2. 20 Individually Absorbable Chunky Crystal Shards seeded atop the Basalt Stone Pedestal
+	var brng := RandomNumberGenerator.new()
+	brng.seed = 7734
+	var shard_palette := [
+		Color(0.08, 0.92, 1.0),
+		Color(0.14, 0.62, 1.0),
+		Color(0.10, 0.96, 0.80),
+		Color(0.54, 0.30, 1.0),
+	]
+	var max_tip_reach := clampf(4.65 - (fy_pit - 0.12), 2.20, 3.25)
+	var shard_items: Array[Dictionary] = []
+
+	# Tier 0: 3 Colossal Central Heart Crystal Monoliths
+	var hero_specs := [
+		[Vector3(0.0, 0.34, 0.0), Vector3(0.08, 0.99, -0.05), 0.66, 0.96, 1.18, 0.86],
+		[Vector3(-0.62, 0.28, 0.40), Vector3(-0.22, 0.96, 0.16), 0.56, 0.82, 0.88, 1.16],
+		[Vector3(0.64, 0.30, -0.34), Vector3(0.24, 0.95, -0.18), 0.52, 0.74, 1.15, 0.88],
+	]
+	for hi in hero_specs.size():
+		var hs: Array = hero_specs[hi]
+		var th_tot := max_tip_reach * float(hs[3])
+		var rb := float(hs[2])
+		var dir_h := (hs[1] as Vector3).normalized()
+		shard_items.append({
+			"base": hs[0] as Vector3,
+			"dir": dir_h,
+			"twist": brng.randf() * TAU,
+			"col": shard_palette[hi % shard_palette.size()],
+			"h": th_tot,
+			"r": rb,
+			"ax": float(hs[4]),
+			"az": float(hs[5]),
+			"vol": 1.35,
+		})
+
+	# Tier 1: 7 Heavy Buttress Crystal Blocks tightly ringing the hero monoliths
+	for mi_idx in 7:
+		var ang_m := (float(mi_idx) / 7.0) * TAU + brng.randf_range(-0.14, 0.14)
+		var rad_m := brng.randf_range(0.76, 1.18)
+		var tilt_m := brng.randf_range(0.26, 0.46)
+		var dir_m := Vector3(cos(ang_m) * sin(tilt_m), cos(tilt_m), sin(ang_m) * sin(tilt_m)).normalized()
+		var base_m := Vector3(cos(ang_m) * rad_m, brng.randf_range(0.34, 0.52), sin(ang_m) * rad_m)
+		var tot_m := max_tip_reach * brng.randf_range(0.46, 0.68)
+		var rb_m := brng.randf_range(0.36, 0.46)
+		var ax_m := 1.18 if (mi_idx % 2 == 0) else 0.86
+		var az_m := 0.86 if (mi_idx % 2 == 0) else 1.18
+		shard_items.append({
+			"base": base_m,
+			"dir": dir_m,
+			"twist": brng.randf() * TAU,
+			"col": shard_palette[(mi_idx + 1) % shard_palette.size()],
+			"h": tot_m,
+			"r": rb_m,
+			"ax": ax_m,
+			"az": az_m,
+			"vol": 0.90,
+		})
+
+	# Tier 2: 10 Stout Basal Crystal Chunks forming a dense crystal skirt atop the basalt pedestal
+	for oi in 10:
+		var ang_o := (float(oi) / 10.0) * TAU + 0.31 + brng.randf_range(-0.12, 0.12)
+		var rad_o := brng.randf_range(0.96, 1.42)
+		var tilt_o := brng.randf_range(0.38, 0.58)
+		var dir_o := Vector3(cos(ang_o) * sin(tilt_o), cos(tilt_o), sin(ang_o) * sin(tilt_o)).normalized()
+		var base_o := Vector3(cos(ang_o) * rad_o, brng.randf_range(0.42, 0.60), sin(ang_o) * rad_o)
+		var tot_o := max_tip_reach * brng.randf_range(0.34, 0.50)
+		var rb_o := brng.randf_range(0.28, 0.38)
+		var ax_o := 1.16 if (oi % 2 == 0) else 0.88
+		var az_o := 0.88 if (oi % 2 == 0) else 1.16
+		shard_items.append({
+			"base": base_o,
+			"dir": dir_o,
+			"twist": brng.randf() * TAU,
+			"col": shard_palette[(oi + 2) % shard_palette.size()],
+			"h": tot_o,
+			"r": rb_o,
+			"ax": ax_o,
+			"az": az_o,
+			"vol": 0.60,
+		})
+
+	var abyss_holder := Node3D.new()
+	abyss_holder.name = "CaveAbyssalCrystalShards"
+	add_child(abyss_holder)
+	for si in shard_items.size():
+		var item: Dictionary = shard_items[si]
+		var rb_s := float(item["r"])
+		var h_s := float(item["h"])
+		var ax_s := float(item["ax"])
+		var az_s := float(item["az"])
+		var dir_s := item["dir"] as Vector3
+		var twist_s := float(item["twist"])
+		var base_s := item["base"] as Vector3
+		var col_s := item["col"] as Color
+
+		var st_sh := SurfaceTool.new()
+		st_sh.begin(Mesh.PRIMITIVE_TRIANGLES)
+		_add_chisel_crystal_to_st(st_sh, Vector3(0.0, -0.45 * h_s, 0.0), Vector3.UP, rb_s, rb_s, rb_s * 0.88, 0.74 * h_s, h_s, 0.0, ax_s, az_s, Color.WHITE, false, false, 0.35, 1.0, false)
+		st_sh.generate_tangents()
+		var sh_mesh := st_sh.commit()
+		var mat_s := _get_absorbable_crystal_material(col_s, 1.38, 2.9)
+
+		var sh_mi := MeshInstance3D.new()
+		sh_mi.name = "CaveAbyssalCrystalShard_%d" % si
+		sh_mi.mesh = sh_mesh
+		sh_mi.material_override = mat_s
+		sh_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		sh_mi.visibility_range_end = 105.0
+		sh_mi.visibility_range_end_margin = 14.0
+		sh_mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		var world_pos_s := bundle_pos + base_s + dir_s * (0.45 * h_s)
+		sh_mi.transform = Transform3D(_basis_align_y(dir_s, twist_s), world_pos_s)
+		abyss_holder.add_child(sh_mi)
+
+		var rad_eff := rb_s * maxf(ax_s, az_s)
+		_pending_crystal_props.append({
+			"mi": sh_mi,
+			"mat": mat_s,
+			"shape": SlimeProps.SHAPE_PRISM,
+			"half": Vector3(rad_eff, h_s * 0.50, rad_eff),
+			"base_r": rad_eff,
+			"sides": 6,
+			"vol": float(item["vol"]),
+		})
+
+	# Permanent basalt stone pedestal collider seated below the shards so slimes can reach/eat every shard on top
 	if boulder_body != null:
 		var cs := CollisionShape3D.new()
 		var cyl := CylinderShape3D.new()
-		cyl.radius = 1.75
-		cyl.height = 2.0
+		cyl.radius = 1.45
+		cyl.height = 1.4
 		cs.shape = cyl
-		cs.position = bundle_pos + Vector3(0.0, 0.85, 0.0)
+		cs.position = bundle_pos + Vector3(0.0, 0.25, 0.0)
 		boulder_body.add_child(cs)
 
 
@@ -2215,6 +2850,14 @@ func _build_water_features() -> void:
 		w_mi.material_override = wf_mat
 		w_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		holder.add_child(w_mi)
+
+		if _cached_water_meshes.has("waterfall_spout"):
+			var sp_mi := MeshInstance3D.new()
+			sp_mi.name = "WaterfallSpoutRock"
+			sp_mi.mesh = _cached_water_meshes["waterfall_spout"]
+			sp_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			holder.add_child(sp_mi)
+
 		return
 
 	# Build fast spatial hash of actual baked floor + rim triangles across Pool & Stream Grotto
@@ -2430,80 +3073,227 @@ func _build_water_features() -> void:
 	stream_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(stream_mi)
 
-	# 3. Dynamic Cascading Waterfall Column (parabolic spill from back rock lip) + Billowing Plunge Mist
+	# 3. Dynamic Multi-Layer Waterfall (Carved Limestone Spring Alcove + U-Channel Spillway + Trough-Connected Cascade)
 	var wf_loc := CaveLayout.WATERFALL
-	var wf_ceil_y := clampf(_sample_ceiling_y(sdf, wf_loc.x, wf_loc.y + 2.0, wf_loc.z, 40.0), wf_loc.y + 8.0, 36.5)
+	var wf_ceil_y := clampf(_sample_ceiling_y(sdf, wf_loc.x, wf_loc.y + 4.0, wf_loc.z + 0.5, 45.0), wf_loc.y + 9.5, 36.5)
+	_cached_wf_ceil_y = wf_ceil_y
+	var spout_y := clampf(wf_ceil_y - 2.45, wf_loc.y + 8.5, 31.4)
+
+	# 3A. Closed-Manifold Organic Limestone Spring Alcove & Carved U-Channel Spillway (cave_rock.gdshader + CaveShell-buried crown)
+	var st_spout := SurfaceTool.new()
+	st_spout.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var u_segs := 18
+	var half_span_u := 4.65
+	var s_back := wf_loc.z + 6.4
+	var p_count := 10
+	var sp_grid: Array[Array] = []
+	var sp_cols: Array[Array] = []
+	var sp_uvs: Array[Array] = []
+	var sp_outs_local: Array[Array] = []
+
+	for iu in range(u_segs + 1):
+		var ut := float(iu) / float(u_segs)
+		var u_off := (ut * 2.0 - 1.0) * half_span_u
+		var u_world_loc := wf_loc.x + u_off
+		var end_w := pow(sin(ut * PI), 0.45)
+		var ch_u := smoothstep(0.0, 1.0, clampf(absf(u_off) / 1.28, 0.0, 1.0))
+		var crag := 0.26 * sin(u_off * 1.45 + 0.6) + 0.13 * cos(u_off * 3.1 - 0.9)
+
+		var s_lip := lerpf(s_back - 1.2, wf_loc.z + lerpf(0.52, 1.45, ch_u) + crag * 0.34 * ch_u, end_w)
+		var recess_depth := lerpf(3.35, 0.15, ch_u) * end_w
+		var s_trough_back := s_lip + recess_depth
+		var s_chin := lerpf(s_lip + 0.55, s_back - 0.8, 0.15)
+		var s_belly := lerpf(s_lip + 1.85, s_back - 0.4, 0.22)
+		var s_brow := lerpf(s_lip + 0.85, s_lip + 0.18, ch_u)
+
+		var y_bed_lip := spout_y + lerpf(0.0, 1.05, ch_u) + crag * 0.35 * ch_u
+		var y_bed_back := y_bed_lip + lerpf(0.46, 0.10, ch_u)
+		var y_chin := spout_y - lerpf(1.20, 1.85, end_w) + crag * 0.40
+		var y_belly := spout_y - lerpf(2.75, 3.35, end_w) + crag * 0.28
+		var mouth_open_h := lerpf(1.45, 0.08, ch_u)
+		var y_brow := spout_y + lerpf(1.75, 2.25, ch_u) + crag * 0.35
+		var ceil_front := _sample_ceiling_y(sdf, u_world_loc, wf_loc.y + 4.0, minf(s_brow, wf_loc.z + 3.0), 45.0)
+		var y_crown_front := maxf(ceil_front + 2.2, y_brow + 1.4)
+		var y_crown_back := maxf(y_crown_front + 0.45, spout_y + 4.6)
+
+		# Simple non-self-intersecting clockwise loop in (S, Y) plane; outward normal = (-dY, dS)
+		var prof: Array[Vector2] = [
+			Vector2(s_back, y_belly + 0.55),                    # 0: buried lower rear
+			Vector2(s_belly, y_belly),                          # 1: recessed lower rock apron
+			Vector2(s_chin, y_chin),                            # 2: undercut spillway chin
+			Vector2(s_lip, y_bed_lip),                          # 3: rounded wet spillway lip
+			Vector2(lerpf(s_lip, s_trough_back, 0.52), lerpf(y_bed_lip, y_bed_back, 0.52)), # 4: mid trough bed
+			Vector2(s_trough_back, y_bed_back),                 # 5: deep spring mouth floor
+			Vector2(s_trough_back + 0.18 * (1.0 - ch_u), y_bed_back + mouth_open_h), # 6: spring inner back roof
+			Vector2(s_brow, y_brow),                            # 7: overhanging spring mouth brow
+			Vector2(s_brow - 0.35, y_crown_front),              # 8: front ceiling embed
+			Vector2(s_back, y_crown_back),                      # 9: deep rear ceiling embed
+		]
+		# Vertex COLOR channels for cave_rock.gdshader: R=AO, G=SkyVis (keep <0.25 so no exterior grass!), B=Wetness, A=Curvature
+		var wet_trough := lerpf(0.95, 0.28, ch_u) * end_w
+		var prof_col: Array[Color] = [
+			Color(0.14, 0.04, 0.25, 0.28),
+			Color(0.32, 0.06, 0.55, 0.34),
+			Color(0.50, 0.08, 0.72, 0.58),
+			Color(0.70, 0.10, maxf(wet_trough, 0.55), 0.76),
+			Color(0.40, 0.07, wet_trough, 0.44),
+			Color(0.18, 0.04, wet_trough, 0.26),
+			Color(0.14, 0.04, 0.65, 0.24),
+			Color(0.46, 0.09, 0.45, 0.68),
+			Color(0.24, 0.05, 0.20, 0.40),
+			Color(0.12, 0.03, 0.15, 0.25),
+		]
+
+		var row_p: Array[Vector3] = []
+		var row_c: Array[Color] = []
+		var row_uv: Array[Vector2] = []
+		var row_out: Array[Vector3] = []
+		for ip in range(p_count):
+			var cur_sy: Vector2 = prof[ip]
+			var prev_sy: Vector2 = prof[(ip - 1 + p_count) % p_count]
+			var nxt_sy: Vector2 = prof[(ip + 1) % p_count]
+			var d_sy := nxt_sy - prev_sy
+			# Outward normal in (u, y, s) from CW (S, Y) tangent: s' = -dY, y' = +dS
+			var out_n_loc := Vector3(0.0, d_sy.x, -d_sy.y).normalized()
+			var out_n_w := (CaveLayout.to_world(Vector3(u_world_loc + out_n_loc.x, out_n_loc.y, cur_sy.x + out_n_loc.z)) - CaveLayout.to_world(Vector3(u_world_loc, 0.0, cur_sy.x)))
+			out_n_w.y = out_n_loc.y
+			out_n_w = out_n_w.normalized()
+
+			row_p.append(CaveLayout.to_world(Vector3(u_world_loc, cur_sy.y, cur_sy.x)))
+			row_c.append(prof_col[ip])
+			row_uv.append(Vector2(ut, float(ip) / float(p_count)))
+			row_out.append(out_n_w)
+		sp_grid.append(row_p)
+		sp_cols.append(row_c)
+		sp_uvs.append(row_uv)
+		sp_outs_local.append(row_out)
+
+	var sp_nrms: Array[Array] = []
+	for iu in range(u_segs + 1):
+		var nrow: Array[Vector3] = []
+		for ip in range(p_count):
+			var p_l: Vector3 = sp_grid[maxi(iu - 1, 0)][ip]
+			var p_r: Vector3 = sp_grid[mini(iu + 1, u_segs)][ip]
+			var p_prev: Vector3 = sp_grid[iu][(ip - 1 + p_count) % p_count]
+			var p_nxt: Vector3 = sp_grid[iu][(ip + 1) % p_count]
+			var tu: Vector3 = p_r - p_l
+			var tp: Vector3 = p_nxt - p_prev
+			var wn := tp.cross(tu).normalized()
+			if wn.length_squared() < 1e-6:
+				wn = sp_outs_local[iu][ip]
+			elif wn.dot(sp_outs_local[iu][ip]) < 0.0:
+				wn = -wn
+			nrow.append(wn)
+		sp_nrms.append(nrow)
+
+	var add_spout_tri := func(p0: Vector3, p1: Vector3, p2: Vector3, n0: Vector3, n1: Vector3, n2: Vector3, c0: Color, c1: Color, c2: Color, uv0: Vector2, uv1: Vector2, uv2: Vector2, hint_out: Vector3) -> void:
+		var fn := (p2 - p0).cross(p1 - p0)
+		if fn.length_squared() < 1e-10:
+			return
+		var a1 := p1; var a2 := p2
+		var an1 := n1; var an2 := n2
+		var ac1 := c1; var ac2 := c2
+		var au1 := uv1; var au2 := uv2
+		if fn.dot(hint_out) < 0.0:
+			a1 = p2; a2 = p1
+			an1 = n2; an2 = n1
+			ac1 = c2; ac2 = c1
+			au1 = uv2; au2 = uv1
+		st_spout.set_normal(n0); st_spout.set_color(c0); st_spout.set_uv(uv0); st_spout.add_vertex(p0)
+		st_spout.set_normal(an1); st_spout.set_color(ac1); st_spout.set_uv(au1); st_spout.add_vertex(a1)
+		st_spout.set_normal(an2); st_spout.set_color(ac2); st_spout.set_uv(au2); st_spout.add_vertex(a2)
+
+	for iu in range(u_segs):
+		for ip in range(p_count):
+			var ip_nxt := (ip + 1) % p_count
+			var hint: Vector3 = (sp_outs_local[iu][ip] + sp_outs_local[iu + 1][ip] + sp_outs_local[iu][ip_nxt] + sp_outs_local[iu + 1][ip_nxt]).normalized()
+			add_spout_tri.call(
+				sp_grid[iu][ip], sp_grid[iu + 1][ip], sp_grid[iu + 1][ip_nxt],
+				sp_nrms[iu][ip], sp_nrms[iu + 1][ip], sp_nrms[iu + 1][ip_nxt],
+				sp_cols[iu][ip], sp_cols[iu + 1][ip], sp_cols[iu + 1][ip_nxt],
+				sp_uvs[iu][ip], sp_uvs[iu + 1][ip], sp_uvs[iu + 1][ip_nxt],
+				hint
+			)
+			add_spout_tri.call(
+				sp_grid[iu][ip], sp_grid[iu + 1][ip_nxt], sp_grid[iu][ip_nxt],
+				sp_nrms[iu][ip], sp_nrms[iu + 1][ip_nxt], sp_nrms[iu][ip_nxt],
+				sp_cols[iu][ip], sp_cols[iu + 1][ip_nxt], sp_cols[iu][ip_nxt],
+				sp_uvs[iu][ip], sp_uvs[iu + 1][ip_nxt], sp_uvs[iu][ip_nxt],
+				hint
+			)
+
+	st_spout.generate_tangents()
+	var spout_mi := MeshInstance3D.new()
+	spout_mi.name = "WaterfallSpoutRock"
+	spout_mi.mesh = st_spout.commit()
+	spout_mi.mesh.surface_set_material(0, _get_cave_rock_material())
+	_cached_water_meshes["waterfall_spout"] = spout_mi.mesh
+	spout_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	holder.add_child(spout_mi)
+
+	# 3B. Dual-Layer Curved Cascade pouring directly out of the Carved Spring Trough into PoolWater
 	var st_wf := SurfaceTool.new()
 	st_wf.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var w_segs := 12
-	var h_segs := 22
-	var wf_grid: Array[Array] = []
-	for iy in range(h_segs + 1):
-		var vt := float(iy) / float(h_segs)
-		var y_cur := lerpf(wf_ceil_y + 1.4, wf_loc.y - 0.30, vt)
-		var w_half := lerpf(0.52, 1.24, pow(vt, 0.72))
-		var row_wf: Array = []
-		for ix in range(w_segs + 1):
-			var ut := float(ix) / float(w_segs)
-			var u_off := (ut * 2.0 - 1.0) * w_half
-			var bow := sin(ut * PI) * 0.46 + (vt * vt) * 1.38 + vt * 0.25 - 0.88
-			var lp := Vector3(wf_loc.x + u_off, y_cur, wf_loc.z - bow)
-			row_wf.append({"pos": CaveLayout.to_world(lp), "uv": Vector2(ut, vt)})
-		wf_grid.append(row_wf)
+	var add_waterfall_sheet := func(col_tag: Color, w_trough: float, w_lip: float, w_bot: float, bow_depth: float, fwd_shift: float) -> void:
+		var w_segs := 16
+		var h_segs := 30
+		var trough_end := 0.18
+		var grid: Array[Array] = []
+		for iy in range(h_segs + 1):
+			var vt := float(iy) / float(h_segs)
+			var y_cur := 0.0
+			var s_center := 0.0
+			var w_half := 0.0
+			var bow_k := 0.0
+			if vt <= trough_end:
+				var k := vt / trough_end
+				var ks := smoothstep(0.0, 1.0, k)
+				y_cur = lerpf(spout_y + 0.62, spout_y + 0.14, pow(k, 1.25))
+				s_center = wf_loc.z + lerpf(3.55, 0.42, k) - fwd_shift * 0.25
+				w_half = lerpf(w_trough, w_lip, ks)
+				bow_k = 0.28 + 0.42 * ks
+			else:
+				var u_fall := (vt - trough_end) / (1.0 - trough_end)
+				var pitch_arch := smoothstep(0.0, 0.22, u_fall)
+				y_cur = lerpf(spout_y + 0.14, wf_loc.y - 0.34, pow(u_fall, 0.86))
+				s_center = wf_loc.z + 0.42 - (pitch_arch * 1.48 + (u_fall * u_fall) * 0.72 + fwd_shift)
+				w_half = lerpf(w_lip, w_bot, pow(u_fall, 0.78))
+				bow_k = 0.70 + 0.30 * u_fall
+			var row_wf: Array = []
+			for ix in range(w_segs + 1):
+				var ut := float(ix) / float(w_segs)
+				var u_off := (ut * 2.0 - 1.0) * w_half
+				var s_cur := s_center - sin(ut * PI) * bow_depth * bow_k
+				var lp := Vector3(wf_loc.x + u_off, y_cur, s_cur)
+				row_wf.append({"pos": CaveLayout.to_world(lp), "uv": Vector2(ut, vt)})
+			grid.append(row_wf)
 
-	for iy in range(h_segs + 1):
-		for ix in range(w_segs + 1):
-			var p_left: Vector3 = wf_grid[iy][maxi(ix - 1, 0)]["pos"]
-			var p_right: Vector3 = wf_grid[iy][mini(ix + 1, w_segs)]["pos"]
-			var p_top: Vector3 = wf_grid[maxi(iy - 1, 0)][ix]["pos"]
-			var p_bot: Vector3 = wf_grid[mini(iy + 1, h_segs)][ix]["pos"]
-			var tu: Vector3 = p_right - p_left
-			var tv: Vector3 = p_bot - p_top
-			var nrm: Vector3 = tv.cross(tu).normalized()
-			wf_grid[iy][ix]["nrm"] = nrm
+		for iy in range(h_segs + 1):
+			for ix in range(w_segs + 1):
+				var p_left: Vector3 = grid[iy][maxi(ix - 1, 0)]["pos"]
+				var p_right: Vector3 = grid[iy][mini(ix + 1, w_segs)]["pos"]
+				var p_top: Vector3 = grid[maxi(iy - 1, 0)][ix]["pos"]
+				var p_bot: Vector3 = grid[mini(iy + 1, h_segs)][ix]["pos"]
+				var tu: Vector3 = p_right - p_left
+				var tv: Vector3 = p_bot - p_top
+				grid[iy][ix]["nrm"] = tv.cross(tu).normalized()
 
-	var col_column := Color(0.0, 0.0, 0.0, 1.0)
-	for iy in h_segs:
-		for ix in w_segs:
-			var a: Dictionary = wf_grid[iy][ix]
-			var b: Dictionary = wf_grid[iy][ix + 1]
-			var c: Dictionary = wf_grid[iy + 1][ix + 1]
-			var d: Dictionary = wf_grid[iy + 1][ix]
-			st_wf.set_normal(a["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(b["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
-			st_wf.set_normal(c["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(a["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(c["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(d["nrm"]); st_wf.set_color(col_column); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
+		for iy in h_segs:
+			for ix in w_segs:
+				var a: Dictionary = grid[iy][ix]
+				var b: Dictionary = grid[iy][ix + 1]
+				var c: Dictionary = grid[iy + 1][ix + 1]
+				var d: Dictionary = grid[iy + 1][ix]
+				st_wf.set_normal(a["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+				st_wf.set_normal(b["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
+				st_wf.set_normal(c["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+				st_wf.set_normal(a["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
+				st_wf.set_normal(c["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
+				st_wf.set_normal(d["nrm"]); st_wf.set_color(col_tag); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
 
-	# Plunge mist collar dome around waterfall base (v_col.b = 1.0 selects billowing spray boil in shader)
-	var col_mist := Color(0.0, 0.0, 1.0, 1.0)
-	var mist_rings := 4
-	var mist_segs := 20
-	var mist_grid: Array[Array] = []
-	for ir in range(mist_rings + 1):
-		var rt := float(ir) / float(mist_rings)
-		var mr := lerpf(0.38, 2.85, rt)
-		var my := wf_loc.y + sin(rt * PI) * 0.72 + (1.0 - rt) * 0.14
-		var m_row: Array = []
-		for iseg in range(mist_segs + 1):
-			var ut := float(iseg) / float(mist_segs)
-			var ang := ut * TAU
-			var lp := Vector3(wf_loc.x + cos(ang) * mr, my, (wf_loc.z - 0.65) + sin(ang) * mr * 0.85)
-			m_row.append({"pos": CaveLayout.to_world(lp), "uv": Vector2(ut, rt)})
-		mist_grid.append(m_row)
-	for ir in mist_rings:
-		for iseg in mist_segs:
-			var a: Dictionary = mist_grid[ir][iseg]
-			var b: Dictionary = mist_grid[ir][iseg + 1]
-			var c: Dictionary = mist_grid[ir + 1][iseg + 1]
-			var d: Dictionary = mist_grid[ir + 1][iseg]
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(b["uv"]); st_wf.add_vertex(b["pos"])
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(a["uv"]); st_wf.add_vertex(a["pos"])
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(c["uv"]); st_wf.add_vertex(c["pos"])
-			st_wf.set_normal(Vector3.UP); st_wf.set_color(col_mist); st_wf.set_uv(d["uv"]); st_wf.add_vertex(d["pos"])
+	# Core Translucent Cascade + Wider Outer Silk Veil
+	add_waterfall_sheet.call(Color(0.0, 0.0, 0.0, 1.0), 0.92, 1.02, 1.58, 0.42, 0.0)
+	add_waterfall_sheet.call(Color(1.0, 0.0, 0.0, 1.0), 0.98, 1.14, 1.98, 0.56, 0.22)
 
 	st_wf.generate_tangents()
 	var wf_mi := MeshInstance3D.new()
@@ -2628,17 +3418,10 @@ func _build_pebbles(_rng: RandomNumberGenerator = null, props_data: Dictionary =
 	if pmesh == null:
 		return
 
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "CavePebbles"
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = pmesh
-	mm.instance_count = xforms.size()
-	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i] as Transform3D)
-	mmi.multimesh = mm
-	add_child(mmi)
+	var pebbles_holder := Node3D.new()
+	pebbles_holder.name = "CavePebbles"
+	add_child(pebbles_holder)
+	_add_zoned_multimeshes(pebbles_holder, "CavePebbles", pmesh, xforms, [], GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, null, 105.0, 14.0, 2.5)
 
 
 func _build_speleothem_mesh() -> ArrayMesh:
@@ -2689,27 +3472,19 @@ func _build_speleothems(boulder_body: StaticBody3D, _rng: RandomNumberGenerator 
 	if xforms.is_empty():
 		return
 	var smesh := _build_speleothem_mesh()
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "CaveSpeleothems"
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = smesh
-	mm.instance_count = xforms.size()
-	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i] as Transform3D)
-	mmi.multimesh = mm
-	add_child(mmi)
+	var spele_holder := Node3D.new()
+	spele_holder.name = "CaveSpeleothems"
+	add_child(spele_holder)
+	_add_zoned_multimeshes(spele_holder, "CaveSpeleothems", smesh, xforms, [], GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 115.0, 16.0, 4.0)
 
 	if boulder_body != null:
+		var body_rid := boulder_body.get_rid()
 		for col_info: Dictionary in stalagmites:
-			var cs_st := CollisionShape3D.new()
 			var cyl := CylinderShape3D.new()
 			cyl.radius = float(col_info.get("radius", 0.4))
 			cyl.height = float(col_info.get("height", 2.0))
-			cs_st.shape = cyl
-			cs_st.position = col_info.get("pos", Vector3.ZERO) as Vector3
-			boulder_body.add_child(cs_st)
+			_cave_boulder_shapes.append(cyl)
+			PhysicsServer3D.body_add_shape(body_rid, cyl.get_rid(), Transform3D(Basis.IDENTITY, col_info.get("pos", Vector3.ZERO) as Vector3))
 
 
 func _build_vine_mesh() -> ArrayMesh:
@@ -2813,23 +3588,15 @@ func _build_flora(terrain_scene: Node3D, fallen_log_xf: Transform3D, _rng: Rando
 	grotto_mush_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
 	var grotto_mush_mesh := _extract_surface_mesh("res://assets/nature/Mushroom_Common.gltf", [0], [grotto_mush_mat])
 
-	var add_mm := func(n_name: String, m: Mesh, mat_ov: Material, xfs: Array, shadows: bool) -> MultiMeshInstance3D:
+	var add_mm := func(n_name: String, m: Mesh, mat_ov: Material, xfs: Array, shadows: bool) -> Node3D:
 		if m == null or xfs.is_empty():
 			return null
-		var mmi := MultiMeshInstance3D.new()
-		mmi.name = n_name
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if mat_ov != null:
-			mmi.material_override = mat_ov
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = m
-		mm.instance_count = xfs.size()
-		for i in xfs.size():
-			mm.set_instance_transform(i, xfs[i] as Transform3D)
-		mmi.multimesh = mm
-		flora.add_child(mmi)
-		return mmi
+		var holder := Node3D.new()
+		holder.name = n_name
+		flora.add_child(holder)
+		var sh := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_add_zoned_multimeshes(holder, n_name, m, xfs, [], sh, mat_ov, 105.0, 14.0, 2.5)
+		return holder
 
 	_flora_grass_node = add_mm.call("MoundGrass", grass_mesh, _grass_shader_mat, grass_xf, false)
 	add_mm.call("MoundFerns", fern_mesh, null, fern_xf, true)
@@ -3177,12 +3944,1442 @@ func _build_geode_reward() -> void:
 	_geode_reward_area = area
 
 
+static func _add_smooth_tri_outward(
+		st: SurfaceTool,
+		p0: Vector3,
+		p1: Vector3,
+		p2: Vector3,
+		n0: Vector3,
+		n1: Vector3,
+		n2: Vector3,
+		uv0: Vector2,
+		uv1: Vector2,
+		uv2_v: Vector2,
+		c0: Color,
+		c1: Color,
+		c2: Color,
+		hint_out: Vector3,
+		use_uv2: bool = false,
+		uv2_0 := Vector2.ZERO,
+		uv2_1 := Vector2.ZERO,
+		uv2_2 := Vector2.ZERO
+) -> void:
+	var fn := (p2 - p0).cross(p1 - p0)
+	if fn.length_squared() < 1e-10:
+		return
+	var a1 := p1; var a2 := p2
+	var an1 := n1; var an2 := n2
+	var au1 := uv1; var au2 := uv2_v
+	var ac1 := c1; var ac2 := c2
+	var ax1 := uv2_1; var ax2 := uv2_2
+	if fn.dot(hint_out) < 0.0:
+		a1 = p2; a2 = p1
+		an1 = n2; an2 = n1
+		au1 = uv2_v; au2 = uv1
+		ac1 = c2; ac2 = c1
+		ax1 = uv2_2; ax2 = uv2_1
+	st.set_color(c0)
+	if use_uv2:
+		st.set_uv2(uv2_0)
+	st.set_normal(n0.normalized()); st.set_uv(uv0); st.add_vertex(p0)
+	st.set_color(ac1)
+	if use_uv2:
+		st.set_uv2(ax1)
+	st.set_normal(an1.normalized()); st.set_uv(au1); st.add_vertex(a1)
+	st.set_color(ac2)
+	if use_uv2:
+		st.set_uv2(ax2)
+	st.set_normal(an2.normalized()); st.set_uv(au2); st.add_vertex(a2)
+
+
+static func _emit_smooth_grid(
+		st: SurfaceTool,
+		grid_pts: Array,
+		grid_uvs: Array,
+		grid_cols: Array,
+		grid_outs: Array,
+		closed_u: bool = false,
+		closed_v: bool = false,
+		use_uv2: bool = false,
+		mat_id: float = 0.0,
+		grid_phases: Array = [],
+		grid_explicit_nrms: Array = []
+) -> void:
+	var nu := grid_pts.size()
+	if nu < 2:
+		return
+	var row0: Array = grid_pts[0]
+	var nv := row0.size()
+	if nv < 2:
+		return
+
+	var has_explicit_nrms := grid_explicit_nrms.size() == nu
+	var grid_nrms: Array = []
+	for iu in nu:
+		var nrow: Array[Vector3] = []
+		var iu_prev := (iu - 1 + nu) % nu if closed_u else maxi(iu - 1, 0)
+		var iu_next := (iu + 1) % nu if closed_u else mini(iu + 1, nu - 1)
+		var row_cur: Array = grid_pts[iu]
+		var row_prev: Array = grid_pts[iu_prev]
+		var row_next: Array = grid_pts[iu_next]
+		var out_row: Array = grid_outs[iu]
+		var exp_row: Array = grid_explicit_nrms[iu] if has_explicit_nrms else []
+		for iv in nv:
+			if has_explicit_nrms and iv < exp_row.size():
+				nrow.append((exp_row[iv] as Vector3).normalized())
+				continue
+			var iv_prev := (iv - 1 + nv) % nv if closed_v else maxi(iv - 1, 0)
+			var iv_next := (iv + 1) % nv if closed_v else mini(iv + 1, nv - 1)
+			var p_u0: Vector3 = row_prev[iv]
+			var p_u1: Vector3 = row_next[iv]
+			var p_v0: Vector3 = row_cur[iv_prev]
+			var p_v1: Vector3 = row_cur[iv_next]
+			var tu := p_u1 - p_u0
+			var tv := p_v1 - p_v0
+			var hint_v: Vector3 = out_row[iv]
+			var nrm := tv.cross(tu)
+			if nrm.length_squared() < 1e-9:
+				nrm = hint_v.normalized()
+			else:
+				nrm = nrm.normalized()
+				if nrm.dot(hint_v) < 0.0:
+					nrm = -nrm
+			nrow.append(nrm)
+		grid_nrms.append(nrow)
+
+	var u_quads := nu if closed_u else (nu - 1)
+	var v_quads := nv if closed_v else (nv - 1)
+	var has_phases := grid_phases.size() == nu
+	for iu in u_quads:
+		var iu1 := (iu + 1) % nu
+		var pts0: Array = grid_pts[iu]
+		var pts1: Array = grid_pts[iu1]
+		var nrm0: Array = grid_nrms[iu]
+		var nrm1: Array = grid_nrms[iu1]
+		var uvs0: Array = grid_uvs[iu]
+		var uvs1: Array = grid_uvs[iu1]
+		var col0: Array = grid_cols[iu]
+		var col1: Array = grid_cols[iu1]
+		var out0: Array = grid_outs[iu]
+		var out1: Array = grid_outs[iu1]
+		var ph0: Array = grid_phases[iu] if has_phases else []
+		var ph1: Array = grid_phases[iu1] if has_phases else []
+		for iv in v_quads:
+			var iv1 := (iv + 1) % nv
+			var p00: Vector3 = pts0[iv]
+			var p10: Vector3 = pts1[iv]
+			var p11: Vector3 = pts1[iv1]
+			var p01: Vector3 = pts0[iv1]
+			var n00: Vector3 = nrm0[iv]
+			var n10: Vector3 = nrm1[iv]
+			var n11: Vector3 = nrm1[iv1]
+			var n01: Vector3 = nrm0[iv1]
+			var uv00: Vector2 = uvs0[iv]
+			var uv10: Vector2 = uvs1[iv]
+			var uv11: Vector2 = uvs1[iv1]
+			var uv01: Vector2 = uvs0[iv1]
+			var c00: Color = col0[iv]
+			var c10: Color = col1[iv]
+			var c11: Color = col1[iv1]
+			var c01: Color = col0[iv1]
+			var h00: Vector3 = out0[iv]
+			var h10: Vector3 = out1[iv]
+			var h11: Vector3 = out1[iv1]
+			var h01: Vector3 = out0[iv1]
+			var q_hint := (h00 + h10 + h11 + h01)
+			if q_hint.length_squared() < 1e-8:
+				q_hint = Vector3.BACK
+			else:
+				q_hint = q_hint.normalized()
+			var x00 := Vector2(mat_id, float(ph0[iv]) if has_phases else 0.0)
+			var x10 := Vector2(mat_id, float(ph1[iv]) if has_phases else 0.0)
+			var x11 := Vector2(mat_id, float(ph1[iv1]) if has_phases else 0.0)
+			var x01 := Vector2(mat_id, float(ph0[iv1]) if has_phases else 0.0)
+			_add_smooth_tri_outward(st, p00, p10, p11, n00, n10, n11, uv00, uv10, uv11, c00, c10, c11, q_hint, use_uv2, x00, x10, x11)
+			_add_smooth_tri_outward(st, p00, p11, p01, n00, n11, n01, uv00, uv11, uv01, c00, c11, c01, q_hint, use_uv2, x00, x11, x01)
+
+
+static func _ogive_half_width_at_y(
+		y: float,
+		half_span: float = 3.55,
+		spring_y: float = 4.60,
+		apex_y: float = 11.45,
+		y_root: float = -0.55,
+		flare_amt: float = 0.56
+) -> float:
+	if y <= spring_y:
+		var root_t := clampf(1.0 - (y - y_root) / maxf(spring_y - y_root, 0.01), 0.0, 1.0)
+		return half_span + flare_amt * pow(root_t, 2.15)
+	if y >= apex_y:
+		return 0.0
+	var h_arch := apex_y - spring_y
+	var c_off := (h_arch * h_arch - half_span * half_span) / maxf(2.0 * half_span, 0.01)
+	var r_arch := half_span + c_off
+	var dy := y - spring_y
+	var rad_sq := maxf(r_arch * r_arch - dy * dy, 0.0)
+	return maxf(sqrt(rad_sq) - c_off, 0.0)
+
+
+static func _ogive_arch_frame(
+		t: float,
+		half_span: float = 3.55,
+		spring_y: float = 4.60,
+		apex_y: float = 11.45,
+		y_root: float = -0.55,
+		flare_amt: float = 0.56
+) -> Dictionary:
+	# t in [0..1]: 0.0 = left root, 0.5 = pointed crown apex, 1.0 = right root
+	var is_right := t > 0.5
+	var u := (1.0 - t) * 2.0 if is_right else (t * 2.0) # u in [0..1] from root -> apex
+	var side_s := 1.0 if is_right else -1.0
+	var spring_frac := 0.40
+	var pos_2d := Vector2.ZERO
+	var out_2d := Vector2.ZERO
+	if u <= spring_frac:
+		var f := u / spring_frac
+		var y := lerpf(y_root, spring_y, f)
+		var root_t := 1.0 - f
+		var hw := half_span + flare_amt * pow(root_t, 2.15)
+		var dhw_dy := -flare_amt * 2.15 * pow(maxf(root_t, 0.0), 1.15) / maxf(spring_y - y_root, 0.01)
+		pos_2d = Vector2(side_s * hw, y)
+		# Curve point (side_s * hw(y), y); outward normal points away from x=0
+		out_2d = Vector2(side_s, -dhw_dy).normalized()
+	else:
+		var fa := (u - spring_frac) / (1.0 - spring_frac)
+		var h_arch := apex_y - spring_y
+		var c_off := (h_arch * h_arch - half_span * half_span) / maxf(2.0 * half_span, 0.01)
+		var r_arch := half_span + c_off
+		var alpha_top := acos(clampf(c_off / r_arch, -1.0, 1.0))
+		var alpha := fa * alpha_top
+		var hw := -c_off + r_arch * cos(alpha)
+		var y := spring_y + r_arch * sin(alpha)
+		pos_2d = Vector2(side_s * maxf(hw, 0.0), y)
+		out_2d = Vector2(side_s * cos(alpha), sin(alpha)).normalized()
+		# Blend outward normal smoothly near pointed apex so lofted moldings form a crisp spire hood without pinching
+		var apex_blend := smoothstep(0.88, 1.0, fa)
+		out_2d = out_2d.lerp(Vector2(0.0, 1.0), apex_blend * 0.86).normalized()
+	return {"pos": pos_2d, "out": out_2d}
+
+
+static func _sculpt_lofted_tube(
+		st: SurfaceTool,
+		spine_pts: Array[Vector3],
+		radii_a: Array[float],
+		radii_b: Array[float],
+		sides: int,
+		mat_id: float,
+		phase: float = 0.0,
+		ao_start: float = 0.84,
+		ao_end: float = 0.96,
+		bevel: float = 0.82,
+		accent: float = 0.25,
+		flute_amp: float = 0.0,
+		flute_freq: float = 5.0,
+		twist_rad: float = 0.0,
+		use_uv2: bool = true,
+		rock_wet: float = 0.30,
+		rock_curv: float = 0.65
+) -> void:
+	var n_spine := spine_pts.size()
+	if n_spine < 2 or sides < 4:
+		return
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phases: Array = []
+
+	var prev_nrm := Vector3.ZERO
+	for si in n_spine:
+		var f := float(si) / float(n_spine - 1)
+		var p_cur: Vector3 = spine_pts[si]
+		var tang: Vector3
+		if si == 0:
+			tang = (spine_pts[1] - spine_pts[0]).normalized()
+		elif si == n_spine - 1:
+			tang = (spine_pts[n_spine - 1] - spine_pts[n_spine - 2]).normalized()
+		else:
+			tang = (spine_pts[si + 1] - spine_pts[si - 1]).normalized()
+		if tang.length_squared() < 1e-6:
+			tang = Vector3.UP
+
+		var frame_n: Vector3
+		if si == 0:
+			var ref := Vector3.BACK if absf(tang.dot(Vector3.BACK)) < 0.90 else Vector3.RIGHT
+			frame_n = (ref - tang * ref.dot(tang)).normalized()
+		else:
+			frame_n = prev_nrm - tang * prev_nrm.dot(tang)
+			if frame_n.length_squared() < 1e-6:
+				var ref2 := Vector3.RIGHT if absf(tang.dot(Vector3.RIGHT)) < 0.90 else Vector3.UP
+				frame_n = (ref2 - tang * ref2.dot(tang)).normalized()
+			else:
+				frame_n = frame_n.normalized()
+		prev_nrm = frame_n
+		var frame_b := tang.cross(frame_n).normalized()
+
+		var ra := radii_a[mini(si, radii_a.size() - 1)]
+		var rb := radii_b[mini(si, radii_b.size() - 1)]
+		var ao_cur := lerpf(ao_start, ao_end, f)
+
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for vi in sides:
+			var vf := float(vi) / float(sides)
+			var ang := vf * TAU + f * twist_rad
+			var flute := 1.0 + flute_amp * cos(vf * TAU * flute_freq)
+			var ca := cos(ang)
+			var sa := sin(ang)
+			var out_dir := (frame_n * (ca * maxf(rb, 0.004)) + frame_b * (sa * maxf(ra, 0.004))).normalized()
+			var offset := (frame_n * (ca * ra) + frame_b * (sa * rb)) * flute
+			row_p.append(p_cur + offset)
+			row_uv.append(Vector2(vf, f))
+			var back_ao := lerpf(0.72, 1.0, clampf(0.5 + 0.5 * out_dir.z, 0.0, 1.0))
+			if use_uv2:
+				row_c.append(Color(ao_cur * back_ao, bevel, accent, 1.0))
+			else:
+				var rock_back_ao := lerpf(0.88, 1.0, clampf(0.5 + 0.5 * out_dir.z, 0.0, 1.0))
+				var curv_v := clampf(rock_curv + flute_amp * cos(vf * TAU * flute_freq) * 0.6, 0.22, 0.92)
+				row_c.append(Color(ao_cur * rock_back_ao, 0.0, rock_wet, curv_v))
+			row_o.append(out_dir)
+			row_ph.append(phase + f * 0.35)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phases.append(row_ph)
+
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, false, true, use_uv2, mat_id, grid_phases)
+
+
+static func _sculpt_smooth_torus_arc(
+		st: SurfaceTool,
+		center: Vector3,
+		r_in: float,
+		r_out: float,
+		depth: float,
+		segs: int,
+		prof_segs: int,
+		mat_id: float,
+		phase: float = 0.0,
+		ao: float = 0.94,
+		bevel: float = 0.88,
+		accent: float = 0.32,
+		arc_start: float = 0.0,
+		arc_span: float = TAU
+) -> void:
+	var closed := absf(arc_span - TAU) < 1e-3
+	var r_mid := (r_in + r_out) * 0.5
+	var r_tube := maxf((r_out - r_in) * 0.5, 0.008)
+	var z_tube := maxf(depth * 0.5, 0.008)
+	var u_count := segs if closed else (segs + 1)
+	var v_count := maxi(prof_segs, 6)
+
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phases: Array = []
+
+	for iu in u_count:
+		var uf := float(iu) / float(segs)
+		var ang := arc_start + uf * arc_span
+		var rad_dir := Vector3(cos(ang), sin(ang), 0.0)
+		var ring_c := center + rad_dir * r_mid
+		var pinch_end := 1.0
+		if not closed:
+			pinch_end = clampf(sin(uf * PI) * 2.6, 0.14, 1.0)
+
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for iv in v_count:
+			var vf := float(iv) / float(v_count)
+			var pa := vf * TAU
+			var cp := cos(pa)
+			var sp := sin(pa)
+			# Superellipse almond-bevel profile (smoothly rounded, zero flat box facets)
+			var sx := signf(cp) * pow(absf(cp), 0.82)
+			var sz := signf(sp) * pow(absf(sp), 0.82)
+			var p := ring_c + rad_dir * (sx * r_tube * pinch_end) + Vector3(0.0, 0.0, sz * z_tube * pinch_end)
+			var out_v := (rad_dir * (cp / maxf(r_tube, 0.005)) + Vector3(0.0, 0.0, sp / maxf(z_tube, 0.005))).normalized()
+			var shade_ao := ao * lerpf(0.76, 1.0, clampf(0.5 + 0.5 * sz, 0.0, 1.0))
+			row_p.append(p)
+			row_uv.append(Vector2(vf, uf))
+			row_c.append(Color(shade_ao, bevel * (0.65 + 0.35 * absf(cp)), accent, 1.0))
+			row_o.append(out_v)
+			row_ph.append(phase + uf * 0.25)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phases.append(row_ph)
+
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, closed, true, true, mat_id, grid_phases)
+
+
+static func _sample_door_wall_z_and_nrm(
+		sdf: CaveSDF,
+		door_xf: Transform3D,
+		inv_basis_door: Basis,
+		px: float,
+		py: float,
+		z_aim: float = 0.6
+) -> Dictionary:
+	# Cast a 3D radial ray from deep inside open Vault Sanctum chamber air (z = +14.2m) through (px, py_wall, z_aim)
+	# into solid rock. Works seamlessly across wide side walls (|px| ~ 16m) and high ceiling domes (py ~ 19m).
+	var py_wall := maxf(py, 0.75)
+	var p_air := Vector3(clampf(px * 0.14, -2.5, 2.5), clampf(py_wall * 0.44 + 3.0, 2.8, 10.6), 14.2)
+	var p_mid := Vector3(px, py_wall, z_aim)
+	var p_deep := p_air + (p_mid - p_air) * 2.30
+
+	var step_n := 20
+	var prev_p := p_air
+	var lp0 := CaveLayout.to_local(door_xf * prev_p)
+	var prev_d := sdf.eval_sdf_full(lp0.x, lp0.y, lp0.z, GEOFENCE_OVERWORLD_H)
+	var hit_p := p_mid + Vector3(0.0, 0.0, -2.5)
+	var found := false
+	for si in range(1, step_n + 1):
+		var cur_p := p_air.lerp(p_deep, float(si) / float(step_n))
+		var lp := CaveLayout.to_local(door_xf * cur_p)
+		var cur_d := sdf.eval_sdf_full(lp.x, lp.y, lp.z, GEOFENCE_OVERWORLD_H)
+		if prev_d < 0.0 and cur_d >= 0.0:
+			var lo_air := prev_p
+			var hi_rock := cur_p
+			for _bs in 6:
+				var mid_p := 0.5 * (lo_air + hi_rock)
+				var lpm := CaveLayout.to_local(door_xf * mid_p)
+				if sdf.eval_sdf_full(lpm.x, lpm.y, lpm.z, GEOFENCE_OVERWORLD_H) >= 0.0:
+					hi_rock = mid_p
+				else:
+					lo_air = mid_p
+			hit_p = 0.5 * (lo_air + hi_rock)
+			found = true
+			break
+		prev_p = cur_p
+		prev_d = cur_d
+	if not found:
+		hit_p = p_air if prev_d >= 0.0 else p_deep
+
+	# Sample relaxed Surface-Nets karst normal (blending eval_sdf_full at 0.66m with smooth chamber gradient)
+	var w_hit := door_xf * hit_p
+	var l_hit := CaveLayout.to_local(w_hit)
+	var eps_f := 0.66
+	var gu_f := sdf.eval_sdf_full(l_hit.x + eps_f, l_hit.y, l_hit.z, GEOFENCE_OVERWORLD_H) - sdf.eval_sdf_full(l_hit.x - eps_f, l_hit.y, l_hit.z, GEOFENCE_OVERWORLD_H)
+	var gy_f := sdf.eval_sdf_full(l_hit.x, l_hit.y + eps_f, l_hit.z, GEOFENCE_OVERWORLD_H) - sdf.eval_sdf_full(l_hit.x, l_hit.y - eps_f, l_hit.z, GEOFENCE_OVERWORLD_H)
+	var gs_f := sdf.eval_sdf_full(l_hit.x, l_hit.y, l_hit.z + eps_f, GEOFENCE_OVERWORLD_H) - sdf.eval_sdf_full(l_hit.x, l_hit.y, l_hit.z - eps_f, GEOFENCE_OVERWORLD_H)
+	var grad_f := Vector3(gu_f, gy_f, gs_f)
+	var grad_len := maxf(grad_f.length() / (2.0 * eps_f), 0.35)
+	var nrm_f := (-grad_f).normalized() if grad_f.length_squared() > 1e-6 else Vector3(0.0, 0.0, 1.0)
+
+	var eps_s := 0.80
+	var gu_s := sdf.eval_cave_void_smooth(l_hit.x + eps_s, l_hit.y, l_hit.z) - sdf.eval_cave_void_smooth(l_hit.x - eps_s, l_hit.y, l_hit.z)
+	var gy_s := sdf.eval_cave_void_smooth(l_hit.x, l_hit.y + eps_s, l_hit.z) - sdf.eval_cave_void_smooth(l_hit.x, l_hit.y - eps_s, l_hit.z)
+	var gs_s := sdf.eval_cave_void_smooth(l_hit.x, l_hit.y, l_hit.z + eps_s) - sdf.eval_cave_void_smooth(l_hit.x, l_hit.y, l_hit.z - eps_s)
+	var grad_s := Vector3(gu_s, gy_s, gs_s)
+	var nrm_s := (-grad_s).normalized() if grad_s.length_squared() > 1e-6 else nrm_f
+
+	var l_nrm := (nrm_f * 0.68 + nrm_s * 0.32).normalized()
+	if l_nrm.dot(nrm_s) < 0.40:
+		l_nrm = (l_nrm * 0.40 + nrm_s * 0.60).normalized()
+
+	var w_nrm := Vector3(
+		CaveLayout.RIGHT_XZ.x * l_nrm.x + CaveLayout.FWD_XZ.x * l_nrm.z,
+		l_nrm.y,
+		CaveLayout.RIGHT_XZ.y * l_nrm.x + CaveLayout.FWD_XZ.y * l_nrm.z
+	).normalized()
+	var d_nrm := (inv_basis_door * w_nrm).normalized()
+
+	# Tangent-ring sample at VOXEL=0.55m matching tools/bake_cave.gd 3-pass Surface-Nets relaxation & Laplacian curvature
+	var ref_up := Vector3.UP if absf(l_nrm.y) < 0.85 else Vector3.RIGHT
+	var t1 := ref_up.cross(l_nrm).normalized()
+	var t2 := l_nrm.cross(t1).normalized()
+	var h_vox := 0.55
+	var p1 := l_hit + t1 * h_vox
+	var p2 := l_hit - t1 * h_vox
+	var p3 := l_hit + t2 * h_vox
+	var p4 := l_hit - t2 * h_vox
+	var f_sum := (
+		sdf.eval_sdf_full(p1.x, p1.y, p1.z, GEOFENCE_OVERWORLD_H)
+		+ sdf.eval_sdf_full(p2.x, p2.y, p2.z, GEOFENCE_OVERWORLD_H)
+		+ sdf.eval_sdf_full(p3.x, p3.y, p3.z, GEOFENCE_OVERWORLD_H)
+		+ sdf.eval_sdf_full(p4.x, p4.y, p4.z, GEOFENCE_OVERWORLD_H)
+	)
+	var avg_delta := 0.25 * f_sum / grad_len
+	var relax_shift := clampf(avg_delta * 0.40, -0.15, 0.18)
+	var p_relaxed := hit_p + d_nrm * relax_shift
+	var sdf_curv := clampf(0.5 - avg_delta * 0.62, 0.18, 0.84)
+
+	# Exact 4-step SDF ambient occlusion matching tools/bake_cave.gd
+	var ao_dists := [0.65, 1.45, 2.80, 4.80]
+	var occ := 0.0
+	var w_sum := 0.0
+	for ai in 4:
+		var ds: float = ao_dists[ai]
+		var sp := l_hit + l_nrm * ds
+		var clr := maxf(-sdf.eval_cave_void_smooth(sp.x, sp.y, sp.z), 0.0)
+		var wt := 1.0 / float(ai + 1)
+		occ += clampf(clr / ds, 0.0, 1.0) * wt
+		w_sum += wt
+	var sdf_ao := clampf(occ / maxf(w_sum, 0.01), 0.12, 1.0)
+	return {"pos": p_relaxed, "nrm": d_nrm, "ao": sdf_ao, "curv": sdf_curv}
+
+
+static func _build_door_wall_integration_mesh(door_xf: Transform3D, debug_grid: Array = []) -> ArrayMesh:
+	var st_wall := SurfaceTool.new()
+	st_wall.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var sdf := get_sdf()
+	var inv_basis_door := door_xf.basis.inverse()
+
+	# Unified Concave Karst Amphitheater Wall, Overhanging Stalactite Brow & Root Buttresses:
+	# Bridges concavely from the carved ogival arch socket directly to CaveShell's forward-curving side walls
+	# (|x| ~ 15.2m, z ~ +1.8m) and arched ceiling dome (y ~ 18.2m, z ~ +2.2m) so every rock facet faces inward
+	# toward VaultDoorOmni with zero protruding mound and zero grazing shadow halo!
+	var u_steps := 92
+	var v_steps := 24
+	var wall_pts: Array = []
+	var wall_uvs: Array = []
+	var wall_cols: Array = []
+	var wall_outs: Array = []
+	var sdf_nrms_grid: Array = []
+	var sdf_curv_grid: Array = []
+	var blend_grid: Array = []
+
+	for iu in range(u_steps + 1):
+		var u := float(iu) / float(u_steps)
+		var frame := _round_arch_frame(u, 3.55, 6.20, -1.05)
+		var base_xy: Vector2 = frame["pos"]
+		var out_xy: Vector2 = frame["out"]
+		var crown_w := exp(-pow((u - 0.5) / 0.18, 2.0))
+		var floor_skirt_w := pow(clampf(1.0 - minf(u, 1.0 - u) / 0.17, 0.0, 1.0), 1.45)
+		var rim_undul := 1.0 + 0.09 * sin(u * 13.0 + 0.5) + 0.06 * cos(u * 23.0 - 1.4) + 0.04 * sin(u * 37.0 + 2.2)
+
+		# Inner rock rim tucks cleanly behind the outer stone pilasters, voussoirs & spandrel masonry (no protruding tube)
+		var inner_clasp_wave := 0.12 * sin(u * 19.0 + 0.8) + 0.08 * cos(u * 33.0 - 0.5) + 0.05 * sin(u * 53.0 + 1.7)
+		var r_clasping := 0.92 + inner_clasp_wave
+		var r_far := (lerpf(11.65, 7.65, crown_w) + 0.72 * floor_skirt_w) * rim_undul
+		var y_rad_scale := lerpf(0.86, 1.0, crown_w)
+
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_sn: Array[Vector3] = []
+		var row_sc: Array[float] = []
+		var row_bw: Array[float] = []
+
+		for iv in range(v_steps + 1):
+			var v := float(iv) / float(v_steps)
+			var cliff_bell := smoothstep(0.02, 0.16, v) * (1.0 - smoothstep(0.46, 0.76, v))
+			var socket_fade := 1.0 - smoothstep(0.48, 0.76, v)
+
+			# Karst fluting, limestone bedding ledges, root spurs & overhanging crown stalactite draperies
+			var crag_a := (sin(u * 23.0 + v * 4.2 + 0.7) * 0.14 + cos(u * 39.0 - v * 6.5 + 1.9) * 0.08) * socket_fade
+			var crag_b := (sin(u * 13.0 - v * 3.5 + 2.3) * 0.14 + cos(u * 19.0 + v * 5.2 - 0.8) * 0.08) * socket_fade
+			var strata_ledge := sin((base_xy.y + v * 2.8) * 1.65 + crag_a * 1.5) * 0.11 * socket_fade
+
+			var root_buttress := (
+				exp(-pow((u - 0.08) / 0.055, 2.0)) * 0.58
+				+ exp(-pow((u - 0.92) / 0.058, 2.0)) * 0.55
+				+ exp(-pow((u - 0.17) / 0.050, 2.0)) * 0.44
+				+ exp(-pow((u - 0.82) / 0.052, 2.0)) * 0.42
+			)
+			var haunch_spur := (
+				exp(-pow((u - 0.29) / 0.055, 2.0)) * 0.36
+				+ exp(-pow((u - 0.72) / 0.058, 2.0)) * 0.38
+			)
+			var brow_drapery := crown_w * (0.36 + 0.24 * pow(0.5 + 0.5 * cos((u - 0.5) * 68.0), 1.6))
+			var buttress_lobe := (root_buttress + haunch_spur + brow_drapery) * socket_fade
+
+			var radial_dist := lerpf(r_clasping, r_far, pow(v, 0.94))
+			var px_aim := base_xy.x + out_xy.x * radial_dist + crag_a * (0.10 + 0.18 * v)
+			var py_aim := base_xy.y + out_xy.y * radial_dist * y_rad_scale + crag_b * 0.10 * v
+			py_aim -= floor_skirt_w * (0.46 + 1.35 * v)
+
+			# Inner edge tucks cleanly behind/flush with the carved stone arch perimeter (z ~ 0.50) then swells naturally onto cliff rock
+			var start_tuck := (1.0 - smoothstep(0.0, 0.18, v)) * 0.42
+			var z_arch_0 := 0.92 - start_tuck + floor_skirt_w * (1.0 - v) * 0.18
+			var p_arch_0 := Vector3(base_xy.x + out_xy.x * r_clasping, base_xy.y + out_xy.y * r_clasping * y_rad_scale, z_arch_0)
+
+			# Sample the exact CaveShell rock surface under this (px_aim, py_aim) so the collar is a thin
+			# rock-hugging shell: bounded offset from real rock everywhere, zero floating curtain edges.
+			var wall_sample := _sample_door_wall_z_and_nrm(sdf, door_xf, inv_basis_door, px_aim, py_aim, z_arch_0)
+			var p_cave: Vector3 = wall_sample["pos"]
+			var nrm_cave: Vector3 = wall_sample["nrm"]
+			var ao_cave: float = float(wall_sample["ao"])
+			var curv_cave: float = float(wall_sample["curv"])
+
+			# Blend from the stone-seated socket (v=0) onto the rock-hugging shell by mid wall
+			var outer_w := smoothstep(0.04, 0.42, v)
+			var p_pos := p_arch_0.lerp(p_cave, outer_w)
+
+			# Sculpt the collar with CaveSDF's exact 3D karst noise & horizontal bedding strata
+			var lp_m := CaveLayout.to_local(door_xf * p_pos)
+			var n_mac := sdf._noise_macro.get_noise_3d(lp_m.x * 1.1, lp_m.y * 1.35, lp_m.z * 1.1)
+			var n_frac := sdf._noise_fracture.get_noise_3d(lp_m.x * 0.9, lp_m.y * 1.15, lp_m.z * 0.9)
+			var strata_3d := sin(lp_m.y * 0.85 + n_mac * 2.2 + lp_m.x * 0.10 - lp_m.z * 0.08) * 0.12
+			var karst_disp := (n_mac * 0.52 + (n_frac - 0.5) * 0.30 + strata_3d * 0.7) * cliff_bell
+			var buttress_disp := (0.16 * buttress_lobe + strata_ledge * 0.30) * cliff_bell
+
+			# Gently step proud of rock across mid-wall without creating a narrow lip at v=0, then tuck behind at v=1
+			var proud_h := lerpf(0.06, 0.22, smoothstep(0.0, 0.22, v)) * (1.0 - smoothstep(0.30, 0.86, v)) + 0.07 * smoothstep(0.22, 0.84, v)
+			var tuck_start := 0.80 + 0.03 * sin(u * 27.0 + 1.1) + 0.02 * cos(u * 41.0 - 0.7)
+			var feather_tuck := smoothstep(tuck_start, 1.0, v) * 0.16
+			var cliff_nrm_dir := Vector3(-out_xy.x * 0.22, -out_xy.y * 0.26 * crown_w, 0.96).normalized().lerp(nrm_cave, smoothstep(0.25, 0.70, v)).normalized()
+			p_pos += cliff_nrm_dir * (karst_disp + buttress_disp + proud_h - feather_tuck)
+
+			# Concave grotto shrine alcoves carved behind WeirdTorch_L & WeirdTorch_R (x = +-6.05, y = 0..4.8)
+			var dx_torch := absf(p_pos.x) - 6.05
+			var dy_torch := (p_pos.y - 2.35) / 2.85
+			var torch_niche := exp(-(dx_torch * dx_torch) / 2.8 - dy_torch * dy_torch) * smoothstep(0.04, 0.14, v) * (1.0 - smoothstep(0.34, 0.54, v))
+			p_pos.z -= torch_niche * 0.24
+
+			# Anchor floor-skirt roots cleanly under the dished sanctuary floor
+			if py_aim < -0.10 or floor_skirt_w > 0.12:
+				var wp_f := door_xf * Vector3(p_pos.x, 1.5, maxf(p_pos.z, 0.2))
+				var floor_w_y := sample_sdf_floor_below(wp_f.x, wp_f.z, wp_f.y + 2.5, GEOFENCE_OVERWORLD_H).w
+				var floor_local_y := floor_w_y - door_xf.origin.y
+				if py_aim < -0.10:
+					p_pos.y = minf(p_pos.y, floor_local_y - 0.28 - 0.48 * v)
+
+			var wp_v := door_xf * p_pos
+			row_p.append(p_pos)
+			row_uv.append(Vector2(wp_v.x * 0.12, wp_v.z * 0.12))
+
+			# Vertex COLOR = (AO, SkyVis=0, Wetness, Curvature filled via 1-ring Laplacian below)
+			var outer_match := smoothstep(0.46, 0.76, v)
+			# Carve realistic karst crevice & overhang AO around the sculpted portal socket so rock contrast matches CaveShell!
+			var l_pos := CaveLayout.to_local(wp_v)
+			var w_cliff_n := (door_xf.basis * cliff_nrm_dir).normalized()
+			var l_cliff_n := Vector3(
+				w_cliff_n.x * CaveLayout.RIGHT_XZ.x + w_cliff_n.z * CaveLayout.RIGHT_XZ.y,
+				w_cliff_n.y,
+				w_cliff_n.x * CaveLayout.FWD_XZ.x + w_cliff_n.z * CaveLayout.FWD_XZ.y
+			).normalized()
+			var ao_pos_occ := 0.0
+			var ao_pos_w := 0.0
+			var ao_steps_c := [0.65, 1.45, 2.80, 4.80]
+			for ai in 4:
+				var ds_c: float = ao_steps_c[ai]
+				var sp_c := l_pos + l_cliff_n * ds_c
+				var clr_c := maxf(-sdf.eval_cave_void_smooth(sp_c.x, sp_c.y, sp_c.z), 0.0)
+				var wt_c := 1.0 / float(ai + 1)
+				ao_pos_occ += clampf(clr_c / ds_c, 0.0, 1.0) * wt_c
+				ao_pos_w += wt_c
+			var ao_cliff := clampf(ao_pos_occ / maxf(ao_pos_w, 0.01), 0.56, 0.94)
+			var socket_crevice_ao := lerpf(0.74, 0.92, smoothstep(0.0, 0.30, v))
+			var karst_pocket_ao := clampf(0.84 + karst_disp * 0.28 + strata_3d * 0.32, 0.62, 1.04)
+			var collar_ao := clampf(ao_cliff * socket_crevice_ao * karst_pocket_ao * (1.0 - torch_niche * 0.14), 0.44, 0.90)
+			var ao_val := lerpf(collar_ao, ao_cave, outer_match)
+			var wet_val := clampf(0.02 * (1.0 - clampf(p_pos.y / 4.5, 0.0, 1.0)) * (1.0 - outer_match), 0.0, 0.03)
+			row_c.append(Color(ao_val, 0.0, wet_val, curv_cave))
+
+			row_o.append(cliff_nrm_dir)
+			row_sn.append(nrm_cave)
+			row_sc.append(curv_cave)
+			row_bw.append(outer_match)
+
+		wall_pts.append(row_p)
+		wall_uvs.append(row_uv)
+		wall_cols.append(row_c)
+		wall_outs.append(row_o)
+		sdf_nrms_grid.append(row_sn)
+		sdf_curv_grid.append(row_sc)
+		blend_grid.append(row_bw)
+
+	# Compute 3D karst facet normals & 1-ring Laplacian curvature on the concave cliff wall,
+	# keeping normals facing inward toward VaultDoorOmni and reaching 100% CaveShell sdf_n & curv by v = 0.76!
+	var explicit_nrms: Array = []
+	var nu_w := wall_pts.size()
+	var nv_w := (wall_pts[0] as Array).size()
+	for iu in nu_w:
+		var nrow_e: Array[Vector3] = []
+		var iu_prev := maxi(iu - 1, 0)
+		var iu_next := mini(iu + 1, nu_w - 1)
+		var r_cur: Array = wall_pts[iu]
+		var r_prev: Array = wall_pts[iu_prev]
+		var r_next: Array = wall_pts[iu_next]
+		var c_row: Array = wall_cols[iu]
+		var o_row: Array = wall_outs[iu]
+		var sn_row: Array = sdf_nrms_grid[iu]
+		var sc_row: Array = sdf_curv_grid[iu]
+		var bw_row: Array = blend_grid[iu]
+		for iv in nv_w:
+			var iv_prev := maxi(iv - 1, 0)
+			var iv_next := mini(iv + 1, nv_w - 1)
+			var p_cur: Vector3 = r_cur[iv]
+			var p_u0: Vector3 = r_prev[iv]
+			var p_u1: Vector3 = r_next[iv]
+			var p_v0: Vector3 = r_cur[iv_prev]
+			var p_v1: Vector3 = r_cur[iv_next]
+			var tu := p_u1 - p_u0
+			var tv := p_v1 - p_v0
+			var hint_v: Vector3 = o_row[iv]
+			var geo_n := tv.cross(tu)
+			if geo_n.length_squared() < 1e-9:
+				geo_n = hint_v
+			else:
+				geo_n = geo_n.normalized()
+				if geo_n.dot(hint_v) < 0.0:
+					geo_n = -geo_n
+			# Preserve crisp 3D karst relief normals on the cliff face (only guard inner clasp_lip at v < 0.14 from grazing self-shadow)
+			var lip_guard := 0.34 * (1.0 - smoothstep(0.02, 0.16, float(iv) / float(maxi(nv_w - 1, 1))))
+			var cliff_n := (hint_v * lip_guard + geo_n * (1.0 - lip_guard)).normalized()
+			var sdf_n: Vector3 = sn_row[iv]
+			var bw: float = float(bw_row[iv])
+			var final_n := cliff_n.lerp(sdf_n, bw).normalized()
+			nrow_e.append(final_n)
+
+			# 1-ring Laplacian curvature normalized to bake_cave.gd's 0.55m voxel scale so ridge_shade matches CaveShell
+			var span_u := maxf(0.5 * tu.length(), 0.20)
+			var span_v := maxf(0.5 * tv.length(), 0.20)
+			var lap_u := (p_cur - 0.5 * (p_u0 + p_u1)).dot(final_n) * clampf(pow(0.55 / span_u, 1.5), 0.5, 2.2)
+			var lap_v := (p_cur - 0.5 * (p_v0 + p_v1)).dot(final_n) * clampf(pow(0.55 / span_v, 1.5), 0.5, 2.2)
+			var curv_mesh := clampf(0.5 + 0.5 * (lap_u + lap_v) * 0.65, 0.20, 0.82)
+			var curv_sdf: float = float(sc_row[iv])
+			var col_prev: Color = c_row[iv]
+			c_row[iv] = Color(col_prev.r, col_prev.g, col_prev.b, lerpf(curv_mesh, curv_sdf, bw))
+		explicit_nrms.append(nrow_e)
+
+	_emit_smooth_grid(st_wall, wall_pts, wall_uvs, wall_cols, wall_outs, false, false, false, 0.0, [], explicit_nrms)
+	if debug_grid != null:
+		debug_grid.append(wall_pts)
+
+	st_wall.generate_tangents()
+	return st_wall.commit()
+
+
+static func _build_periodic_lattice(res: int, seed_val: int) -> PackedFloat32Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val
+	var arr := PackedFloat32Array()
+	arr.resize(res * res)
+	for i in res * res:
+		arr[i] = rng.randf()
+	return arr
+
+
+static func _sample_periodic_noise(u: float, v: float, grid: PackedFloat32Array, res: int) -> float:
+	var gx := fposmod(u, 1.0) * float(res)
+	var gy := fposmod(v, 1.0) * float(res)
+	var x0 := int(floorf(gx)) % res
+	var y0 := int(floorf(gy)) % res
+	var x1 := (x0 + 1) % res
+	var y1 := (y0 + 1) % res
+	var fx := gx - floorf(gx)
+	var fy := gy - floorf(gy)
+	var sx := fx * fx * (3.0 - 2.0 * fx)
+	var sy := fy * fy * (3.0 - 2.0 * fy)
+	var a := grid[y0 * res + x0]
+	var b := grid[y0 * res + x1]
+	var c := grid[y1 * res + x0]
+	var d := grid[y1 * res + x1]
+	return lerpf(lerpf(a, b, sx), lerpf(c, d, sx), sy)
+
+
+static func _sample_periodic_fbm(
+		u: float,
+		v: float,
+		g0: PackedFloat32Array, r0: int,
+		g1: PackedFloat32Array, r1: int,
+		g2: PackedFloat32Array, r2: int
+) -> float:
+	var n0 := _sample_periodic_noise(u, v, g0, r0)
+	var n1 := _sample_periodic_noise(u * 2.0, v * 2.0, g1, r1)
+	var n2 := _sample_periodic_noise(u * 4.0, v * 4.0, g2, r2)
+	return clampf(n0 * 0.54 + n1 * 0.30 + n2 * 0.16, 0.0, 1.0)
+
+
+static func _get_fire_noise_tex() -> ImageTexture:
+	if _fire_noise_tex != null:
+		return _fire_noise_tex
+	var size := 128
+	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	var g0 := _build_periodic_lattice(8, 7103)
+	var g1 := _build_periodic_lattice(16, 7211)
+	var g2 := _build_periodic_lattice(32, 7331)
+	var g3 := _build_periodic_lattice(32, 7459)
+	for y in size:
+		var v := float(y) / float(size)
+		for x in size:
+			var u := float(x) / float(size)
+			var r := _sample_periodic_fbm(u, v, g0, 8, g1, 16, g2, 32)
+			var g := _sample_periodic_fbm(u + 0.37, v + 0.19, g1, 16, g2, 32, g3, 32)
+			var b := _sample_periodic_fbm(u * 2.0 + 0.11, v * 2.0 + 0.63, g2, 32, g3, 32, g0, 8)
+			var a := _sample_periodic_noise(u * 3.0, v * 3.0, g3, 32)
+			img.set_pixel(x, y, Color(r, g, b, a))
+	img.generate_mipmaps()
+	_fire_noise_tex = ImageTexture.create_from_image(img)
+	return _fire_noise_tex
+
+
+static func _get_fire_flipbook_tex() -> ImageTexture:
+	if _fire_flipbook_tex != null:
+		return _fire_flipbook_tex
+	var tile_sz := 64
+	var grid_n := 4
+	var total_sz := tile_sz * grid_n # 256x256
+	var img := Image.create(total_sz, total_sz, true, Image.FORMAT_RGBA8)
+	var g0 := _build_periodic_lattice(8, 9101)
+	var g1 := _build_periodic_lattice(16, 9227)
+	var g2 := _build_periodic_lattice(32, 9349)
+
+	for fi in 16:
+		var phase := float(fi) / 16.0
+		var col_i := fi % grid_n
+		var row_i := int(floorf(float(fi) / float(grid_n)))
+		var ox := col_i * tile_sz
+		var oy := row_i * tile_sz
+		for ly in tile_sz:
+			var v := (float(ly) + 0.5) / float(tile_sz) # 0 = top tip, 1 = bottom base
+			var up_t := 1.0 - v
+			var edge_v := smoothstep(0.05, 0.22, v) * (1.0 - smoothstep(0.80, 0.95, v))
+			for lx in tile_sz:
+				var u := (float(lx) + 0.5) / float(tile_sz)
+				var x_rel := (u - 0.5) * 2.0
+				var edge_u := smoothstep(0.06, 0.20, u) * (1.0 - smoothstep(0.80, 0.94, u))
+
+				var n_coarse := _sample_periodic_fbm(u * 1.0 + 0.15 * sin(phase * TAU), v * 1.0 + phase, g0, 8, g1, 16, g2, 32)
+				var n_fine := _sample_periodic_fbm(u * 2.0 - 0.10 * cos(phase * TAU), v * 2.0 + phase * 2.0, g1, 16, g2, 32, g0, 8)
+
+				var width_prof := lerpf(0.68, 0.16, pow(up_t, 0.72)) * (0.86 + 0.14 * sin(minf(up_t * 3.1, PI * 0.5)))
+				var warp_x := (n_coarse - 0.5) * (0.28 + 0.34 * up_t) + (n_fine - 0.5) * 0.16
+				var dist_x := absf(x_rel + warp_x) / maxf(width_prof, 0.08)
+
+				var rad_mask := 1.0 - smoothstep(0.18, 0.96, dist_x)
+				var top_erode := 1.0 - smoothstep(0.32, 0.96, up_t + (1.0 - n_fine) * 0.36)
+				var body := rad_mask * edge_v * edge_u * top_erode
+				var heat := clampf(body * (0.58 + 0.82 * n_coarse), 0.0, 1.0)
+				var alpha := clampf(smoothstep(0.06, 0.65, heat) * edge_v * edge_u, 0.0, 1.0)
+				img.set_pixel(ox + lx, oy + ly, Color(heat, n_fine, body, alpha))
+
+	img.generate_mipmaps()
+	_fire_flipbook_tex = ImageTexture.create_from_image(img)
+	return _fire_flipbook_tex
+
+
+static func _build_crossed_flame_cards_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var card_angles := [0.0, PI / 3.0, 2.0 * PI / 3.0]
+	var width := 1.12
+	var height := 1.78
+	var y_base := -0.04
+	var nx := 6
+	var ny := 8
+	var cup_depth := 0.085
+
+	for ca: float in card_angles:
+		var dir_x := Vector3(cos(ca), 0.0, sin(ca))
+		var dir_n := Vector3(-sin(ca), 0.0, cos(ca))
+		var grid: Array = []
+		var nrms: Array = []
+		var uvs: Array = []
+		for iy in range(ny + 1):
+			var vf := float(iy) / float(ny)
+			var y := y_base + vf * height
+			var row_p: Array[Vector3] = []
+			var row_n: Array[Vector3] = []
+			var row_uv: Array[Vector2] = []
+			for ix in range(nx + 1):
+				var uf := float(ix) / float(nx)
+				var x_off := (uf - 0.5) * width
+				var cup := sin(uf * PI) * cup_depth * (1.0 - 0.35 * vf)
+				var slope := cos(uf * PI) * PI * cup_depth / maxf(width, 0.01)
+				var p := dir_x * x_off + dir_n * cup + Vector3(0.0, y, 0.0)
+				var nrm := (dir_n - dir_x * slope).normalized()
+				row_p.append(p)
+				row_n.append(nrm)
+				row_uv.append(Vector2(uf, vf))
+			grid.append(row_p)
+			nrms.append(row_n)
+			uvs.append(row_uv)
+
+		for iy in ny:
+			var r0: Array = grid[iy]
+			var r1: Array = grid[iy + 1]
+			var n0: Array = nrms[iy]
+			var n1: Array = nrms[iy + 1]
+			var u0: Array = uvs[iy]
+			var u1: Array = uvs[iy + 1]
+			for ix in nx:
+				st.set_normal(n0[ix]); st.set_uv(u0[ix]); st.add_vertex(r0[ix])
+				st.set_normal(n0[ix + 1]); st.set_uv(u0[ix + 1]); st.add_vertex(r0[ix + 1])
+				st.set_normal(n1[ix + 1]); st.set_uv(u1[ix + 1]); st.add_vertex(r1[ix + 1])
+
+				st.set_normal(n0[ix]); st.set_uv(u0[ix]); st.add_vertex(r0[ix])
+				st.set_normal(n1[ix + 1]); st.set_uv(u1[ix + 1]); st.add_vertex(r1[ix + 1])
+				st.set_normal(n1[ix]); st.set_uv(u1[ix]); st.add_vertex(r1[ix])
+
+	return st.commit()
+
+
+static func _build_brazier_coal_bed_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var rings := 8
+	var segs := 18
+	var max_r := 0.62
+	var pts: Array = []
+	var uvs: Array = []
+	var cols: Array = []
+	var outs: Array = []
+
+	for ri in range(rings + 1):
+		var rf := maxf(float(ri) / float(rings), 0.004)
+		var rp: Array[Vector3] = []
+		var ruv: Array[Vector2] = []
+		var rc: Array[Color] = []
+		var ro: Array[Vector3] = []
+		for si in segs:
+			var uf := float(si) / float(segs)
+			var ang := uf * TAU
+			var rad := max_r * rf
+			var lump := 0.024 * sin(ang * 5.0 + rf * 9.0) + 0.016 * cos(ang * 9.0 - rf * 13.0)
+			var dome_h := (1.0 - rf * rf) * 0.11 + lump * sin(rf * PI)
+			var px := cos(ang) * rad
+			var pz := sin(ang) * rad
+			rp.append(Vector3(px, dome_h, pz))
+			ruv.append(Vector2(0.5 + 0.5 * cos(ang) * rf, 0.5 + 0.5 * sin(ang) * rf))
+			var ao_v := lerpf(0.95, 0.55, pow(rf, 1.8))
+			rc.append(Color(ao_v, 1.0, 1.0, 1.0))
+			ro.append(Vector3(px * 0.55, 1.0, pz * 0.55).normalized())
+		pts.append(rp)
+		uvs.append(ruv)
+		cols.append(rc)
+		outs.append(ro)
+
+	_emit_smooth_grid(st, pts, uvs, cols, outs, false, true, false, 0.0)
+	return st.commit()
+
+
+func _attach_brazier_fire_vfx(
+		torch_pivot: Node3D,
+		ti: int,
+		coal_mesh: ArrayMesh,
+		cards_mesh: ArrayMesh,
+		coal_shader: Shader,
+		card_shader: Shader,
+		particle_shader: Shader,
+		smoke_shader: Shader,
+		ember_shader: Shader,
+		haze_shader: Shader,
+		noise_tex: ImageTexture,
+		flipbook_tex: ImageTexture,
+		coal_tex: ImageTexture
+) -> void:
+	var side_seed := float(ti) * 1.37
+	var vfx_bounds := AABB(Vector3(-1.8, -0.5, -1.8), Vector3(3.6, 5.5, 3.6))
+
+	# Brazier glowing coal & ember bed inside the bowl
+	var coal_mat := ShaderMaterial.new()
+	coal_mat.shader = coal_shader
+	coal_mat.set_shader_parameter("veil_tex", coal_tex)
+	coal_mat.set_shader_parameter("torch_side_seed", side_seed)
+	coal_mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+	_torch_flame_mats.append(coal_mat)
+
+	var coal_mi := MeshInstance3D.new()
+	coal_mi.name = "BrazierCoalBed"
+	coal_mi.mesh = coal_mesh
+	coal_mi.material_override = coal_mat
+	coal_mi.position = Vector3(0.0, -0.02, 0.0)
+	coal_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(coal_mi)
+
+	# Supporting Effect: Subtle refractive heat haze envelope right above the flames (renders first)
+	var haze_mat := ShaderMaterial.new()
+	haze_mat.shader = haze_shader
+	haze_mat.render_priority = -1
+	haze_mat.set_shader_parameter("noise_tex", noise_tex)
+	haze_mat.set_shader_parameter("torch_seed", side_seed)
+	haze_mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+	_torch_haze_mats.append(haze_mat)
+
+	var haze_quad := QuadMesh.new()
+	haze_quad.size = Vector2(1.38, 1.92)
+	var haze_mi := MeshInstance3D.new()
+	haze_mi.name = "HeatHazeEnvelope"
+	haze_mi.mesh = haze_quad
+	haze_mi.material_override = haze_mat
+	haze_mi.position = Vector3(0.0, 1.18, 0.0)
+	haze_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(haze_mi)
+
+	# Supporting Effect: Rising soot/smoke billboard particles
+	var smoke_mat := ShaderMaterial.new()
+	smoke_mat.shader = smoke_shader
+	smoke_mat.render_priority = 0
+	smoke_mat.set_shader_parameter("noise_tex", noise_tex)
+
+	var smoke_quad := QuadMesh.new()
+	smoke_quad.size = Vector2(1.22, 1.22)
+
+	var smoke_curve := Curve.new()
+	smoke_curve.add_point(Vector2(0.0, 0.42))
+	smoke_curve.add_point(Vector2(0.45, 0.88))
+	smoke_curve.add_point(Vector2(1.0, 1.42))
+	var smoke_curve_tex := CurveTexture.new()
+	smoke_curve_tex.curve = smoke_curve
+
+	var smoke_pm := ParticleProcessMaterial.new()
+	smoke_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	smoke_pm.emission_sphere_radius = 0.24
+	smoke_pm.direction = Vector3(0.0, 1.0, 0.0)
+	smoke_pm.spread = 12.0
+	smoke_pm.initial_velocity_min = 0.72
+	smoke_pm.initial_velocity_max = 1.08
+	smoke_pm.gravity = Vector3(0.0, 0.14, 0.0)
+	smoke_pm.damping_min = 0.15
+	smoke_pm.damping_max = 0.30
+	smoke_pm.angle_min = -180.0
+	smoke_pm.angle_max = 180.0
+	smoke_pm.angular_velocity_min = -22.0
+	smoke_pm.angular_velocity_max = 22.0
+	smoke_pm.scale_min = 0.78
+	smoke_pm.scale_max = 1.18
+	smoke_pm.scale_curve = smoke_curve_tex
+	smoke_pm.turbulence_enabled = true
+	smoke_pm.turbulence_noise_strength = 0.28
+	smoke_pm.turbulence_noise_scale = 1.6
+	smoke_pm.anim_offset_min = 0.0
+	smoke_pm.anim_offset_max = 1.0
+
+	var smoke_gp := GPUParticles3D.new()
+	smoke_gp.name = "SmokeParticles"
+	smoke_gp.amount = 16
+	smoke_gp.lifetime = 2.85
+	smoke_gp.preprocess = 2.85
+	smoke_gp.local_coords = true
+	smoke_gp.custom_aabb = vfx_bounds
+	smoke_gp.process_material = smoke_pm
+	smoke_gp.draw_pass_1 = smoke_quad
+	smoke_gp.material_override = smoke_mat
+	smoke_gp.position = Vector3(0.0, 0.92, 0.0)
+	smoke_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(smoke_gp)
+
+	# Layer 2: Shader-driven crossed flame cards at the fire core
+	var card_mat := ShaderMaterial.new()
+	card_mat.shader = card_shader
+	card_mat.render_priority = 1
+	card_mat.set_shader_parameter("noise_tex", noise_tex)
+	card_mat.set_shader_parameter("torch_seed", side_seed)
+	card_mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+	_torch_card_mats.append(card_mat)
+
+	var cards_mi := MeshInstance3D.new()
+	cards_mi.name = "FlameCoreCards"
+	cards_mi.mesh = cards_mesh
+	cards_mi.material_override = card_mat
+	cards_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(cards_mi)
+
+	# Layer 1: Animated 4x4 (16-frame) flipbook billboard flame particles
+	var fp_mat := ShaderMaterial.new()
+	fp_mat.shader = particle_shader
+	fp_mat.render_priority = 2
+	fp_mat.set_shader_parameter("flipbook_tex", flipbook_tex)
+
+	var fp_quad := QuadMesh.new()
+	fp_quad.size = Vector2(0.92, 1.15)
+
+	var fp_curve := Curve.new()
+	fp_curve.add_point(Vector2(0.0, 0.72))
+	fp_curve.add_point(Vector2(0.28, 1.04))
+	fp_curve.add_point(Vector2(1.0, 0.28))
+	var fp_curve_tex := CurveTexture.new()
+	fp_curve_tex.curve = fp_curve
+
+	var fp_pm := ParticleProcessMaterial.new()
+	fp_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	fp_pm.emission_sphere_radius = 0.26
+	fp_pm.direction = Vector3(0.0, 1.0, 0.0)
+	fp_pm.spread = 14.0
+	fp_pm.initial_velocity_min = 0.92
+	fp_pm.initial_velocity_max = 1.55
+	fp_pm.gravity = Vector3(0.0, 0.72, 0.0)
+	fp_pm.damping_min = 0.35
+	fp_pm.damping_max = 0.70
+	fp_pm.angle_min = -18.0
+	fp_pm.angle_max = 18.0
+	fp_pm.angular_velocity_min = -42.0
+	fp_pm.angular_velocity_max = 42.0
+	fp_pm.scale_min = 0.68
+	fp_pm.scale_max = 1.08
+	fp_pm.scale_curve = fp_curve_tex
+	fp_pm.turbulence_enabled = true
+	fp_pm.turbulence_noise_strength = 0.24
+	fp_pm.turbulence_noise_scale = 2.4
+	fp_pm.anim_speed_min = 0.85
+	fp_pm.anim_speed_max = 1.25
+	fp_pm.anim_offset_min = 0.0
+	fp_pm.anim_offset_max = 1.0
+
+	var fp_gp := GPUParticles3D.new()
+	fp_gp.name = "FlameParticles"
+	fp_gp.amount = 22
+	fp_gp.lifetime = 0.95
+	fp_gp.preprocess = 1.5
+	fp_gp.local_coords = true
+	fp_gp.custom_aabb = vfx_bounds
+	fp_gp.process_material = fp_pm
+	fp_gp.draw_pass_1 = fp_quad
+	fp_gp.material_override = fp_mat
+	fp_gp.position = Vector3(0.0, 0.08, 0.0)
+	fp_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(fp_gp)
+
+	# Supporting Effect: Rising spiraling ember/spark particles
+	var ember_mat := ShaderMaterial.new()
+	ember_mat.shader = ember_shader
+	ember_mat.render_priority = 3
+
+	var ember_quad := QuadMesh.new()
+	ember_quad.size = Vector2(0.085, 0.11)
+
+	var ember_curve := Curve.new()
+	ember_curve.add_point(Vector2(0.0, 0.65))
+	ember_curve.add_point(Vector2(0.30, 1.0))
+	ember_curve.add_point(Vector2(1.0, 0.15))
+	var ember_curve_tex := CurveTexture.new()
+	ember_curve_tex.curve = ember_curve
+
+	var ember_pm := ParticleProcessMaterial.new()
+	ember_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+	ember_pm.emission_ring_axis = Vector3.UP
+	ember_pm.emission_ring_radius = 0.42
+	ember_pm.emission_ring_inner_radius = 0.08
+	ember_pm.emission_ring_height = 0.08
+	ember_pm.direction = Vector3(0.0, 1.0, 0.0)
+	ember_pm.spread = 20.0
+	ember_pm.initial_velocity_min = 1.05
+	ember_pm.initial_velocity_max = 2.05
+	ember_pm.gravity = Vector3(0.0, 0.35, 0.0)
+	ember_pm.damping_min = 0.25
+	ember_pm.damping_max = 0.55
+	ember_pm.scale_min = 0.70
+	ember_pm.scale_max = 1.30
+	ember_pm.scale_curve = ember_curve_tex
+	ember_pm.turbulence_enabled = true
+	ember_pm.turbulence_noise_strength = 0.85
+	ember_pm.turbulence_noise_scale = 1.8
+	ember_pm.turbulence_noise_speed_random = 0.5
+	ember_pm.anim_offset_min = 0.0
+	ember_pm.anim_offset_max = 1.0
+
+	var ember_gp := GPUParticles3D.new()
+	ember_gp.name = "EmberParticles"
+	ember_gp.amount = 28
+	ember_gp.lifetime = 1.75
+	ember_gp.preprocess = 2.0
+	ember_gp.local_coords = true
+	ember_gp.custom_aabb = vfx_bounds
+	ember_gp.process_material = ember_pm
+	ember_gp.draw_pass_1 = ember_quad
+	ember_gp.material_override = ember_mat
+	ember_gp.position = Vector3(0.0, 0.04, 0.0)
+	ember_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	torch_pivot.add_child(ember_gp)
+
+
+static func _round_arch_y_at_x(x_abs: float, half_span: float = 3.55, spring_y: float = 6.20) -> float:
+	var x_c := clampf(x_abs, 0.0, half_span)
+	return spring_y + sqrt(maxf(half_span * half_span - x_c * x_c, 0.0))
+
+
+static func _round_arch_frame(u: float, half_span: float = 3.55, spring_y: float = 6.20, y_root: float = -0.80) -> Dictionary:
+	# Inverted-U archway: straight vertical jambs below spring_y, semi-circular arch crown above spring_y
+	var jamb_h := spring_y - y_root
+	var arch_len := PI * half_span
+	var total_len := 2.0 * jamb_h + arch_len
+	var s := clampf(u, 0.0, 1.0) * total_len
+	if s <= jamb_h:
+		return {
+			"pos": Vector2(-half_span, y_root + s),
+			"out": Vector2(-1.0, 0.0),
+		}
+	elif s <= jamb_h + arch_len:
+		var ang := PI - ((s - jamb_h) / arch_len) * PI
+		return {
+			"pos": Vector2(cos(ang) * half_span, spring_y + sin(ang) * half_span),
+			"out": Vector2(cos(ang), sin(ang)),
+		}
+	else:
+		var ds := s - (jamb_h + arch_len)
+		return {
+			"pos": Vector2(half_span, spring_y - ds),
+			"out": Vector2(1.0, 0.0),
+		}
+
+
+func _add_sculpted_stone_to_st(
+	st: SurfaceTool,
+	xf: Transform3D,
+	hx_bot: float,
+	hx_top: float,
+	hy: float,
+	hz: float,
+	roundness: float,
+	mat_id: float,
+	phase: float,
+	ao_front: float,
+	ao_back: float,
+	accent: float = 0.0,
+	chisel_amp: float = 0.022
+) -> void:
+	# Closed, pillowed superellipsoid stone block with organic hand-chiseled undulation and smooth normals
+	var perim_segs := 16
+	var prof_y := [-1.0, -0.95, -0.74, 0.0, 0.74, 0.95, 1.0]
+	var prof_r := [0.18, 0.78, 0.97, 1.00, 0.97, 0.78, 0.18]
+	var p_exp := clampf(roundness, 0.28, 0.70)
+	var ref_c := xf * Vector3.ZERO
+
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phs: Array = []
+
+	for iy in prof_y.size():
+		var yn := float(prof_y[iy])
+		var rs := float(prof_r[iy])
+		var yf := (yn + 1.0) * 0.5
+		var hx := lerpf(hx_bot, hx_top, yf)
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for iu in perim_segs:
+			var uf := float(iu) / float(perim_segs)
+			var ang := uf * TAU
+			var ca := cos(ang)
+			var sa := sin(ang)
+			var sx := signf(ca) * pow(absf(ca), p_exp)
+			var sz := signf(sa) * pow(absf(sa), p_exp)
+			var undul := (sin(uf * TAU * 3.0 + phase * 11.0 + yn * 2.4) * 0.6 + cos(uf * TAU * 2.0 - phase * 7.0) * 0.4) * chisel_amp * rs
+			var lx := sx * hx * rs + ca * undul
+			var ly := yn * hy + sin(uf * TAU * 2.0 + phase * 5.0) * chisel_amp * 0.35 * (1.0 - absf(yn))
+			var lz := sz * hz * rs + sa * undul
+			var wp := xf * Vector3(lx, ly, lz)
+			var ln := Vector3(ca / maxf(hx * rs, 0.05), yn * 0.55 / maxf(hy, 0.05), sa / maxf(hz * rs, 0.05)).normalized()
+			var wn := (xf.basis * ln).normalized()
+			var front_w := clampf(0.5 + 0.5 * sa, 0.0, 1.0)
+			var mortar_ao := lerpf(0.84, 1.0, 1.0 - pow(absf(yn), 2.2))
+			var ao_v := lerpf(ao_back, ao_front, front_w) * mortar_ao
+			row_p.append(wp)
+			row_uv.append(Vector2(uf, yf))
+			row_c.append(Color(ao_v, 0.35, accent, 1.0))
+			row_o.append(wn)
+			row_ph.append(phase)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phs.append(row_ph)
+
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, false, true, true, mat_id, grid_phs)
+
+	# Cap bottom and top poles cleanly so every sculpted stone is watertight
+	var bot_center := xf * Vector3(0.0, -hy, 0.0)
+	var top_center := xf * Vector3(0.0, hy, 0.0)
+	var bot_row: Array = grid_pts[0]
+	var top_row: Array = grid_pts[prof_y.size() - 1]
+	var cap_col_b := Color(ao_back * 0.84, 0.25, accent, 1.0)
+	var cap_col_t := Color(ao_front * 0.86, 0.25, accent, 1.0)
+	for iu in perim_segs:
+		var iu_n := (iu + 1) % perim_segs
+		_add_tri_outward(st, bot_center, bot_row[iu], bot_row[iu_n], Vector2(0.5, 0.5), Vector2(0.5, 0.1), Vector2(0.7, 0.1), ref_c, mat_id, cap_col_b, true, phase)
+		_add_tri_outward(st, top_center, top_row[iu_n], top_row[iu], Vector2(0.5, 0.5), Vector2(0.5, 0.9), Vector2(0.7, 0.9), ref_c, mat_id, cap_col_t, true, phase)
+
+
+func _add_domed_rivet_to_st(
+	st: SurfaceTool,
+	center: Vector3,
+	out_dir: Vector3,
+	radius: float,
+	height: float,
+	mat_id: float,
+	phase: float,
+	ao: float = 0.94
+) -> void:
+	var n_dir := out_dir.normalized()
+	var up_ref := Vector3.UP if absf(n_dir.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
+	var t1 := up_ref.cross(n_dir).normalized()
+	var t2 := n_dir.cross(t1).normalized()
+	var segs := 10
+	var rings := 3
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phs: Array = []
+	for ri in range(rings + 1):
+		var rf := float(ri) / float(rings)
+		var r_cur := maxf(radius * cos(rf * PI * 0.5), 0.004)
+		var h_cur := height * sin(rf * PI * 0.5)
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for si in segs:
+			var sf := float(si) / float(segs)
+			var ang := sf * TAU
+			var rad_v := t1 * cos(ang) + t2 * sin(ang)
+			row_p.append(center + rad_v * r_cur + n_dir * h_cur)
+			row_uv.append(Vector2(0.5 + 0.4 * cos(ang) * (1.0 - rf), 0.5 + 0.4 * sin(ang) * (1.0 - rf)))
+			row_c.append(Color(lerpf(ao * 0.78, ao, rf), 0.35, 0.0, 1.0))
+			row_o.append((rad_v * cos(rf * PI * 0.5) + n_dir * sin(rf * PI * 0.5)).normalized())
+			row_ph.append(phase)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phs.append(row_ph)
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, false, true, true, mat_id, grid_phs)
+
+
+func _sculpt_horizontal_ring_to_st(
+	st: SurfaceTool,
+	center: Vector3,
+	r_in: float,
+	r_out: float,
+	height: float,
+	segs: int,
+	prof_segs: int,
+	mat_id: float,
+	phase: float = 0.0,
+	ao: float = 0.92,
+	bevel: float = 0.45,
+	accent: float = 0.0
+) -> void:
+	# Revolved horizontal torus ring around the Y axis (lies flat in XZ plane!)
+	var r_mid := (r_in + r_out) * 0.5
+	var r_tube := maxf((r_out - r_in) * 0.5, 0.008)
+	var y_tube := maxf(height * 0.5, 0.008)
+	var v_cnt := maxi(prof_segs, 6)
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phs: Array = []
+	for iu in segs:
+		var uf := float(iu) / float(segs)
+		var ang := uf * TAU
+		var rad_xz := Vector3(cos(ang), 0.0, sin(ang))
+		var ring_c := center + rad_xz * r_mid
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for iv in v_cnt:
+			var vf := float(iv) / float(v_cnt)
+			var pa := vf * TAU
+			var cp := cos(pa)
+			var sp := sin(pa)
+			var p := ring_c + rad_xz * (cp * r_tube) + Vector3(0.0, sp * y_tube, 0.0)
+			var out_n := (rad_xz * (cp / r_tube) + Vector3(0.0, sp / y_tube, 0.0)).normalized()
+			row_p.append(p)
+			row_uv.append(Vector2(vf, uf * 4.0))
+			row_c.append(Color(ao * lerpf(0.84, 1.0, clampf(0.5 + 0.5 * cp, 0.0, 1.0)), bevel, accent, 1.0))
+			row_o.append(out_n)
+			row_ph.append(phase + uf * 0.25)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phs.append(row_ph)
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, true, true, true, mat_id, grid_phs)
+
+
+func _add_planked_round_door_leaf_to_st(
+	st: SurfaceTool,
+	side_f: float,
+	half_span: float,
+	spring_y: float,
+	y_bot: float,
+	z_front: float
+) -> void:
+	# Smooth sculpted monolithic stone-slab door leaf with upper & lower deeply recessed coffered stone panels
+	var x_steps := 26
+	var y_steps := 28
+	var x_in := 0.035
+	var x_out := half_span + 0.12
+
+	var grid_pts: Array = []
+	var grid_uvs: Array = []
+	var grid_cols: Array = []
+	var grid_outs: Array = []
+	var grid_phs: Array = []
+
+	for iy in range(y_steps + 1):
+		var yf := float(iy) / float(y_steps)
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for ix in range(x_steps + 1):
+			var xf := float(ix) / float(x_steps)
+			var x_abs := lerpf(x_in, x_out, xf)
+			var px := side_f * x_abs
+			var y_top := _round_arch_y_at_x(x_abs, half_span, spring_y) + 0.14
+			var py := lerpf(y_bot, y_top, yf)
+
+			# Coffered stone slab: thick outer stone stiles + center transom rail + two deeply recessed stone panels
+			var bx := smoothstep(0.15, 0.23, xf) * (1.0 - smoothstep(0.77, 0.85, xf))
+			var lower_coffer := smoothstep(0.09, 0.15, yf) * (1.0 - smoothstep(0.41, 0.47, yf))
+			var upper_coffer := smoothstep(0.53, 0.59, yf) * (1.0 - smoothstep(0.83, 0.89, yf))
+			var coffer := bx * maxf(lower_coffer, upper_coffer)
+			var panel_recess := coffer * 0.085
+			var leaf_bow := cos(clampf(x_abs / half_span, 0.0, 1.0) * PI * 0.45) * 0.10
+			var warp_z := (sin(py * 0.75 + px * 0.65) * 0.010 + cos(py * 1.35 - px * 1.05) * 0.007)
+			var pz := z_front + 0.02 + leaf_bow - panel_recess + warp_z
+
+			var nrm := Vector3(-side_f * 0.08 * (x_abs / half_span), 0.0, 1.0).normalized()
+			var bevel_shadow := coffer * (1.0 - coffer) * 4.0
+			var panel_ao := lerpf(0.94, 0.74, coffer * 0.65 + bevel_shadow * 0.35)
+			var arch_ao := lerpf(0.86, 0.96, sin(yf * PI))
+			var slab_phase := 0.22 + (0.0 if side_f < 0.0 else 0.41)
+
+			row_p.append(Vector3(px, py, pz))
+			row_uv.append(Vector2(xf, yf * 2.0))
+			row_c.append(Color(panel_ao * arch_ao, 0.38, 0.0, 1.0))
+			row_o.append(nrm)
+			row_ph.append(slab_phase)
+		grid_pts.append(row_p)
+		grid_uvs.append(row_uv)
+		grid_cols.append(row_c)
+		grid_outs.append(row_o)
+		grid_phs.append(row_ph)
+
+	# Flip X order for left leaf so grid winding faces strictly +Z outward
+	if side_f < 0.0:
+		for iy in grid_pts.size():
+			(grid_pts[iy] as Array).reverse()
+			(grid_uvs[iy] as Array).reverse()
+			(grid_cols[iy] as Array).reverse()
+			(grid_outs[iy] as Array).reverse()
+			(grid_phs[iy] as Array).reverse()
+
+	_emit_smooth_grid(st, grid_pts, grid_uvs, grid_cols, grid_outs, false, false, true, 1.0, grid_phs)
+
+
 func _build_ancient_big_door() -> void:
 	var door_info: Dictionary = CaveLayout.ANCIENT_DOOR
 	var door_loc: Vector3 = door_info["pos"]
-	var door_w := float(door_info["width"])   # 7.4m
-	var door_h := float(door_info["height"])  # 9.2m
-	var door_d := float(door_info["depth"])   # 2.0m
+	var door_w := float(door_info["width"])   # 8.6m
+	var door_h := float(door_info["height"])  # 11.0m
+	var door_d := float(door_info["depth"])   # 2.4m
 
 	var door_world_pos := CaveLayout.to_world(door_loc)
 	# Local facing direction
@@ -3193,137 +5390,424 @@ func _build_ancient_big_door() -> void:
 		0.0,
 		CaveLayout.FWD_XZ.y * fwd_loc.z + CaveLayout.RIGHT_XZ.y * fwd_loc.x
 	).normalized()
-	var right_world := fwd_world.cross(Vector3.UP).normalized()
+	var right_world := Vector3.UP.cross(fwd_world).normalized()
 	var basis_door := Basis(right_world, Vector3.UP, fwd_world)
 
+	var door_xf := Transform3D(basis_door, door_world_pos)
 	var door_root := Node3D.new()
 	door_root.name = "AncientBigDoor"
-	door_root.transform = Transform3D(basis_door, door_world_pos)
+	door_root.transform = door_xf
 	add_child(door_root)
 
-	# 1. Architectural Materials
-	var stone_mat := StandardMaterial3D.new()
-	stone_mat.albedo_color = Color(0.20, 0.20, 0.22)
-	stone_mat.roughness = 0.88
-	stone_mat.metallic = 0.05
-	stone_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+	# 1. Custom Multi-Zone Procedural Door & Weird Torch Materials
+	var relief_shader := load("res://terrain/cave_door_relief.gdshader") as Shader
+	var relief_mat := ShaderMaterial.new()
+	relief_mat.shader = relief_shader
+	relief_mat.set_shader_parameter("detail_veil_tex", _get_crystal_interior_tex())
+	relief_mat.set_shader_parameter("cave_rock_tex", load("res://assets/nature/Rocks_Diffuse.png"))
+	_door_relief_mat = relief_mat
 
-	var door_mat := StandardMaterial3D.new()
-	door_mat.albedo_color = Color(0.14, 0.13, 0.15)
-	door_mat.roughness = 0.72
-	door_mat.metallic = 0.35
-	door_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+	# Living Cavern Cliff & Overhanging Ogival Portal Hood integrated directly into CaveShell rock
+	var wall_int_mi := MeshInstance3D.new()
+	wall_int_mi.name = "DoorWallIntegrationMesh"
+	wall_int_mi.mesh = _build_door_wall_integration_mesh(door_xf)
+	wall_int_mi.material_override = _get_cave_rock_material()
+	wall_int_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	door_root.add_child(wall_int_mi)
 
-	var trim_mat := StandardMaterial3D.new()
-	trim_mat.albedo_color = Color(0.42, 0.35, 0.22)
-	trim_mat.roughness = 0.45
-	trim_mat.metallic = 0.85
+	var torch_shader := load("res://terrain/cave_weird_torch.gdshader") as Shader
+	var flame_card_shader := load("res://shaders/torch_flame_card.gdshader") as Shader
+	var flame_particle_shader := load("res://shaders/torch_flame_particle.gdshader") as Shader
+	var smoke_shader := load("res://shaders/torch_smoke.gdshader") as Shader
+	var ember_shader := load("res://shaders/torch_ember.gdshader") as Shader
+	var haze_shader := load("res://shaders/torch_heat_haze.gdshader") as Shader
 
-	var rune_mat := StandardMaterial3D.new()
-	rune_mat.albedo_color = Color(1.0, 0.75, 0.28)
-	rune_mat.emission_enabled = true
-	rune_mat.emission = Color(1.0, 0.72, 0.25)
-	rune_mat.emission_energy_multiplier = 2.4
+	var st_main := SurfaceTool.new()
+	st_main.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Helper to create box mesh instance
-	var add_box := func(p_name: String, sz: Vector3, pos: Vector3, mat: Material, parent: Node3D) -> MeshInstance3D:
-		var mi := MeshInstance3D.new()
-		mi.name = p_name
-		var box := BoxMesh.new()
-		box.size = sz
-		mi.mesh = box
-		mi.material_override = mat
-		mi.position = pos
-		parent.add_child(mi)
-		return mi
+	# 2. Grounded Cut-Stone Threshold Sill & Organic Worn Flagstone Apron (zero glowing circuits or blocky tiles)
+	var floor_sdf := CaveSystem.get_sdf()
+	var sill_xs := [-2.68, 0.0, 2.68]
+	var sill_hx := [1.46, 1.40, 1.46]
+	for si in 3:
+		var sill_drop := -0.018 if si == 1 else 0.0
+		var sill_xf := Transform3D(Basis.IDENTITY, Vector3(float(sill_xs[si]), -0.26 + sill_drop, 0.44))
+		_add_sculpted_stone_to_st(st_main, sill_xf, float(sill_hx[si]), float(sill_hx[si]) * 0.98, 0.30, 0.78, 0.38, 0.0, 0.14 + float(si) * 0.23, 0.88, 0.68, 0.08, 0.018)
 
-	# 2. Outer Portal Frame (Massive Stone Arch & Pilasters)
-	var p_width := 1.2
-	var p_depth := 1.8
-	var p_height := door_h
-	# Left & Right Pilasters
-	add_box.call("PillarLeft", Vector3(p_width, p_height, p_depth), Vector3(-door_w * 0.5 + p_width * 0.5, p_height * 0.5, 0.0), stone_mat, door_root)
-	add_box.call("PillarRight", Vector3(p_width, p_height, p_depth), Vector3(door_w * 0.5 - p_width * 0.5, p_height * 0.5, 0.0), stone_mat, door_root)
-	# Stepped Plinths (Bases)
-	add_box.call("PlinthLeft", Vector3(p_width + 0.4, 0.8, p_depth + 0.4), Vector3(-door_w * 0.5 + p_width * 0.5, 0.4, 0.0), stone_mat, door_root)
-	add_box.call("PlinthRight", Vector3(p_width + 0.4, 0.8, p_depth + 0.4), Vector3(door_w * 0.5 - p_width * 0.5, 0.4, 0.0), stone_mat, door_root)
-	# Heavy Lintel Arch
-	var lintel_h := 1.6
-	add_box.call("LintelBeam", Vector3(door_w + 0.6, lintel_h, p_depth + 0.2), Vector3(0.0, door_h - lintel_h * 0.5, 0.0), stone_mat, door_root)
-	# Upper Cornice
-	add_box.call("Cornice", Vector3(door_w + 1.2, 0.5, p_depth + 0.6), Vector3(0.0, door_h + 0.25, 0.0), stone_mat, door_root)
+	# Staggered courses of rounded, weathered flagstone pavers embedded deep into the Sanctum SDF floor
+	var apron_courses := [
+		# [z_center, half_depth, span_x, count, base_y_lift, outer_rock_blend]
+		[1.48, 0.44, 4.65, 5, 0.01, 0.18],
+		[2.32, 0.42, 5.05, 6, -0.01, 0.40],
+		[3.12, 0.38, 4.15, 5, -0.03, 0.68],
+	]
+	for ci in apron_courses.size():
+		var cspec: Array = apron_courses[ci]
+		var zc := float(cspec[0])
+		var hz_p := float(cspec[1])
+		var span_x := float(cspec[2])
+		var p_cnt := int(cspec[3])
+		var y_lift := float(cspec[4])
+		var rock_bl := float(cspec[5])
+		for pi in p_cnt:
+			var pf := (float(pi) + 0.5) / float(p_cnt)
+			var px := lerpf(-span_x, span_x, pf) + sin(float(ci * 7 + pi) * 1.9) * 0.10
+			var pz := zc + cos(float(pi * 5 + ci) * 1.7) * 0.07
+			var wp_p := door_world_pos + basis_door * Vector3(px, 0.0, pz)
+			var f_sample := CaveSystem.sample_sdf_floor_below(wp_p.x, wp_p.z, door_world_pos.y + 1.4, GEOFENCE_OVERWORLD_H)
+			var cave_floor_y := (f_sample.w - door_world_pos.y) if (floor_sdf != null and f_sample.w > -50.0) else (-0.16 - 0.06 * float(ci))
+			var stone_top := cave_floor_y + 0.042 + y_lift + sin(float(pi * 3 + ci) * 2.3) * 0.014
+			var hy_p := 0.24
+			var yaw_p := sin(float(pi * 11 + ci * 3)) * 0.08
+			var hx_p := (span_x / float(p_cnt)) * 0.88
+			var p_xf := Transform3D(Basis(Vector3.UP, yaw_p), Vector3(px, stone_top - hy_p, pz))
+			_add_sculpted_stone_to_st(st_main, p_xf, hx_p, hx_p * 0.94, hy_p, hz_p, 0.56, 0.0, 0.11 + float(pi) * 0.19 + float(ci) * 0.27, 0.86, 0.72, rock_bl, 0.028)
 
-	# 3. Dual Monumental Door Slabs
-	var slab_w := (door_w - p_width * 2.0) * 0.5 - 0.04
-	var slab_h := door_h - lintel_h
-	var slab_d := 0.55
-	var slab_z := -0.25
+	# 3. Classic Inverted-U (∩) Stone Archway: Vertical Pilasters, Impost Capitals, Rounded Voussoirs, Keystone & Recessed Spandrel Masonry
+	var arch_half_span := 3.55
+	var arch_spring_y := 6.20
 
-	add_box.call("DoorSlabLeft", Vector3(slab_w, slab_h, slab_d), Vector3(-slab_w * 0.5 - 0.02, slab_h * 0.5, slab_z), door_mat, door_root)
-	add_box.call("DoorSlabRight", Vector3(slab_w, slab_h, slab_d), Vector3(slab_w * 0.5 + 0.02, slab_h * 0.5, slab_z), door_mat, door_root)
+	# Tight inner recessed stone reveal following the clean inverted-U opening (zero wavy dark outer tube!)
+	var arch_u_steps := 44
+	var arch_v_segs := 10
+	var r_rev_off := 0.12
+	var r_rev_thk := 0.22
+	var z_rev_cen := 0.18
+	var z_rev_thk := 0.48
+	var rev_pts: Array = []
+	var rev_uvs: Array = []
+	var rev_cols: Array = []
+	var rev_outs: Array = []
+	var rev_phs: Array = []
+	for iu in range(arch_u_steps + 1):
+		var uf := float(iu) / float(arch_u_steps)
+		var fr := _round_arch_frame(uf, arch_half_span, arch_spring_y, -0.75)
+		var b_xy: Vector2 = fr["pos"]
+		var o_xy: Vector2 = fr["out"]
+		var ring_c := Vector3(b_xy.x + o_xy.x * r_rev_off, b_xy.y + o_xy.y * r_rev_off, z_rev_cen)
+		var rad_3d := Vector3(o_xy.x, o_xy.y, 0.0).normalized()
+		var rp: Array[Vector3] = []
+		var ruv: Array[Vector2] = []
+		var rc: Array[Color] = []
+		var ro: Array[Vector3] = []
+		var rph: Array[float] = []
+		for iv in arch_v_segs:
+			var vf := float(iv) / float(arch_v_segs)
+			var pa := vf * TAU
+			var cp := cos(pa)
+			var sp := sin(pa)
+			var sx := signf(cp) * pow(absf(cp), 0.76)
+			var sz := signf(sp) * pow(absf(sp), 0.76)
+			var p := ring_c + rad_3d * (sx * r_rev_thk) + Vector3(0.0, 0.0, sz * z_rev_thk)
+			var out_n := (rad_3d * (cp / r_rev_thk) + Vector3(0.0, 0.0, sp / z_rev_thk)).normalized()
+			var ao_v := 0.68 * lerpf(0.75, 1.0, clampf(0.5 + 0.5 * sz, 0.0, 1.0))
+			rp.append(p)
+			ruv.append(Vector2(vf, uf * 4.0))
+			rc.append(Color(ao_v, 0.35, 0.04, 1.0))
+			ro.append(out_n)
+			rph.append(uf * 0.9)
+		rev_pts.append(rp)
+		rev_uvs.append(ruv)
+		rev_cols.append(rc)
+		rev_outs.append(ro)
+		rev_phs.append(rph)
+	_emit_smooth_grid(st_main, rev_pts, rev_uvs, rev_cols, rev_outs, false, true, true, 0.0, rev_phs)
 
-	# Heavy Bronze Horizontal Reinforcing Bands
-	for b_i in 3:
-		var by := 1.2 + float(b_i) * (slab_h - 2.4) * 0.5
-		add_box.call("BandLeft_%d" % b_i, Vector3(slab_w - 0.2, 0.26, slab_d + 0.08), Vector3(-slab_w * 0.5 - 0.02, by, slab_z), trim_mat, door_root)
-		add_box.call("BandRight_%d" % b_i, Vector3(slab_w - 0.2, 0.26, slab_d + 0.08), Vector3(slab_w * 0.5 + 0.02, by, slab_z), trim_mat, door_root)
+	# Upper spandrel masonry wall sealing cleanly behind/above the semicircular arch into DoorWallIntegrationMesh (no void gaps)
+	var spandrel_rows := [
+		# [y_center, hy, half_x_span, count, rock_blend]
+		[9.75, 0.55, 4.75, 6, 0.36],
+		[10.75, 0.58, 4.15, 5, 0.54],
+		[11.75, 0.62, 2.95, 4, 0.74],
+	]
+	for sri in spandrel_rows.size():
+		var rspec: Array = spandrel_rows[sri]
+		var sy_c := float(rspec[0])
+		var hy_s := float(rspec[1])
+		var span_s := float(rspec[2])
+		var cnt_s := int(rspec[3])
+		var r_bl := float(rspec[4])
+		for sci in cnt_s:
+			var scf := (float(sci) + 0.5) / float(cnt_s)
+			var sx := lerpf(-span_s, span_s, scf)
+			var hx_s := (span_s / float(cnt_s)) * 1.08
+			var sp_xf := Transform3D(Basis.IDENTITY, Vector3(sx, sy_c, 0.34))
+			_add_sculpted_stone_to_st(st_main, sp_xf, hx_s, hx_s * 0.96, hy_s, 0.44, 0.46, 0.0, 0.19 + float(sci) * 0.21 + float(sri) * 0.17, 0.84, 0.62, r_bl, 0.028)
 
-	# 4. Central Circular Runic Lock Medallion & Emissive Inlays
-	var st_rune := SurfaceTool.new()
-	st_rune.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var r_ring := 1.35
-	var r_thick := 0.16
-	var r_segs := 32
-	var r_center := Vector3(0.0, slab_h * 0.52, slab_z + slab_d * 0.5 + 0.02)
-	for ri in r_segs:
-		var th0 := (float(ri) / float(r_segs)) * TAU
-		var th1 := (float(ri + 1) / float(r_segs)) * TAU
-		var v0_in := r_center + Vector3(cos(th0) * (r_ring - r_thick), sin(th0) * (r_ring - r_thick), 0.0)
-		var v0_out := r_center + Vector3(cos(th0) * r_ring, sin(th0) * r_ring, 0.0)
-		var v1_in := r_center + Vector3(cos(th1) * (r_ring - r_thick), sin(th1) * (r_ring - r_thick), 0.0)
-		var v1_out := r_center + Vector3(cos(th1) * r_ring, sin(th1) * r_ring, 0.0)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v0_in)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v0_out)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v1_out)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v0_in)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v1_out)
-		st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(v1_in)
+	for side_f: float in [-1.0, 1.0]:
+		# Outer rock-cheek masonry spandrel tucking cleanly behind DoorWallIntegrationMesh along the straight jambs
+		for oji in 6:
+			var oy := -0.25 + float(oji) * 1.38
+			var o_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.82, oy, 0.32))
+			_add_sculpted_stone_to_st(st_main, o_xf, 0.56, 0.54, 0.74, 0.48, 0.50, 0.0, 0.33 + float(oji) * 0.18, 0.82, 0.62, 0.62, 0.032)
 
-	# Runic Lintel Emblem
-	var glyph_w := 2.8
-	var glyph_y := door_h - lintel_h * 0.5
-	var glyph_z := p_depth * 0.5 + 0.02
-	st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(Vector3(-glyph_w * 0.5, glyph_y - 0.25, glyph_z))
-	st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(Vector3(0.0, glyph_y + 0.35, glyph_z))
-	st_rune.set_normal(Vector3.FORWARD); st_rune.add_vertex(Vector3(glyph_w * 0.5, glyph_y - 0.25, glyph_z))
+		# Heavy carved stone base plinth anchored into cave floor (y = -0.82 .. +0.62m)
+		var plinth_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.18, -0.10, 0.48))
+		_add_sculpted_stone_to_st(st_main, plinth_xf, 0.74, 0.66, 0.74, 0.68, 0.42, 0.0, 0.18 + side_f * 0.07, 0.88, 0.64, 0.12, 0.024)
+		var plinth_cap_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.16, 0.64, 0.50))
+		_add_sculpted_stone_to_st(st_main, plinth_cap_xf, 0.68, 0.60, 0.16, 0.70, 0.42, 0.0, 0.34, 0.90, 0.68, 0.06, 0.018)
 
-	var rune_mesh := st_rune.commit()
-	var rune_mi := MeshInstance3D.new()
-	rune_mi.name = "RunicRelief"
-	rune_mi.mesh = rune_mesh
-	rune_mi.material_override = rune_mat
-	rune_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	door_root.add_child(rune_mi)
+		# 6 stacked sculpted ashlar jamb pilaster stones rising cleanly vertically from y = 0.78 to y = 5.95
+		var pil_y0 := 0.78
+		var pil_y1 := 5.95
+		var pil_courses := 6
+		var pil_step := (pil_y1 - pil_y0) / float(pil_courses)
+		for pi in pil_courses:
+			var cy := pil_y0 + (float(pi) + 0.5) * pil_step
+			var alt := 0.03 if (pi % 2 == 0) else -0.02
+			var cx := side_f * (arch_half_span + 0.58 + alt * 0.3)
+			var pil_xf := Transform3D(Basis.IDENTITY, Vector3(cx, cy, 0.50 + alt * 0.4))
+			_add_sculpted_stone_to_st(st_main, pil_xf, 0.58 + alt, 0.56 - alt * 0.4, pil_step * 0.51, 0.60 + alt * 0.5, 0.44, 0.0, 0.25 + float(pi) * 0.21 + side_f * 0.09, 0.90, 0.68, 0.06, 0.024)
 
-	# 5. Flanking Ancient Stone Pedestals & Burning Braziers
-	for s_side: float in [-1.0, 1.0]:
-		var sx := s_side * (door_w * 0.5 + 1.6)
-		var sz := 1.4
-		add_box.call("BrazierPedestal_%s" % ("L" if s_side < 0 else "R"), Vector3(0.9, 1.8, 0.9), Vector3(sx, 0.9, sz), stone_mat, door_root)
-		add_box.call("BrazierBowl_%s" % ("L" if s_side < 0 else "R"), Vector3(1.15, 0.45, 1.15), Vector3(sx, 1.95, sz), trim_mat, door_root)
-		add_box.call("BrazierFlame_%s" % ("L" if s_side < 0 else "R"), Vector3(0.65, 0.25, 0.65), Vector3(sx, 2.2, sz), rune_mat, door_root)
+		# Carved projecting impost capital stone at spring line (y = 6.14m)
+		var imp_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span + 0.60), 6.14, 0.54))
+		_add_sculpted_stone_to_st(st_main, imp_xf, 0.60, 0.70, 0.22, 0.68, 0.42, 0.0, 0.67, 0.92, 0.70, 0.04, 0.020)
 
-	# 6. Physical Obstacle Collider on Layer 4 (WALLS/OBSTACLES)
+		# 7 wedge-shaped sculpted stone voussoirs sweeping smoothly around the semi-circular arch crown
+		var voussoir_count := 7
+		var ang_key_half := 0.135
+		var ang_start := PI if side_f < 0.0 else 0.0
+		var ang_end := (PI * 0.5 + ang_key_half) if side_f < 0.0 else (PI * 0.5 - ang_key_half)
+		for vi in voussoir_count:
+			var aa := lerpf(ang_start, ang_end, float(vi) / float(voussoir_count))
+			var ab := lerpf(ang_start, ang_end, float(vi + 1) / float(voussoir_count))
+			var am := 0.5 * (aa + ab)
+			var out_2d := Vector2(cos(am), sin(am))
+			var r_mid := arch_half_span + 0.58 + (0.025 if (vi % 2 == 0) else -0.015)
+			var v_pos := Vector3(out_2d.x * r_mid, arch_spring_y + out_2d.y * r_mid, 0.54 + (0.025 if (vi % 2 == 1) else 0.0))
+			var pa_2d := Vector2(cos(aa) * arch_half_span, arch_spring_y + sin(aa) * arch_half_span)
+			var pb_2d := Vector2(cos(ab) * arch_half_span, arch_spring_y + sin(ab) * arch_half_span)
+			var tang_3d := Vector3(pb_2d.x - pa_2d.x, pb_2d.y - pa_2d.y, 0.0).normalized()
+			var out_3d := Vector3(out_2d.x, out_2d.y, 0.0).normalized()
+			if tang_3d.cross(out_3d).z < 0.0:
+				tang_3d = -tang_3d
+			var v_basis := Basis(tang_3d, out_3d, Vector3.BACK)
+			var seg_len := (arch_half_span + 0.58) * absf(ab - aa)
+			var hx_in := seg_len * 0.45
+			var hx_out := seg_len * 0.56
+			var v_xf := Transform3D(v_basis, v_pos)
+			_add_sculpted_stone_to_st(st_main, v_xf, hx_in, hx_out, 0.40, 0.54, 0.44, 0.0, 0.12 + float(vi) * 0.17 + side_f * 0.05, 0.90, 0.68, 0.06, 0.024)
+
+	# Heavy sculpted center keystone crowning the rounded arch apex (y ~ 10.34m)
+	var key_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, arch_spring_y + arch_half_span + 0.60, 0.62))
+	_add_sculpted_stone_to_st(st_main, key_xf, 0.44, 0.64, 0.68, 0.62, 0.42, 0.0, 0.89, 0.94, 0.70, 0.04, 0.026)
+
+	# 4. Heavy Kiln-Charred Ancient Oak Double Door Leaves (Inverted-U), Organic Forged Wrought-Iron Hardware
+	var door_bot_y := -0.06
+	# Solid dark backing slab behind the arch leaves so grooves never reveal empty void
+	var back_pts: Array = []
+	var back_uvs: Array = []
+	var back_cols: Array = []
+	var back_outs: Array = []
+	var back_phs: Array = []
+	for iy in 13:
+		var yf := float(iy) / 12.0
+		var row_p: Array[Vector3] = []
+		var row_uv: Array[Vector2] = []
+		var row_c: Array[Color] = []
+		var row_o: Array[Vector3] = []
+		var row_ph: Array[float] = []
+		for ix in 17:
+			var xf := float(ix) / 16.0
+			var px := lerpf(-arch_half_span - 0.10, arch_half_span + 0.10, xf)
+			var y_top := _round_arch_y_at_x(absf(px), arch_half_span, arch_spring_y) + 0.14
+			row_p.append(Vector3(px, lerpf(door_bot_y - 0.15, y_top, yf), 0.16))
+			row_uv.append(Vector2(xf, yf))
+			row_c.append(Color(0.36, 0.15, 0.0, 1.0))
+			row_o.append(Vector3.BACK)
+			row_ph.append(0.5)
+		back_pts.append(row_p)
+		back_uvs.append(row_uv)
+		back_cols.append(row_c)
+		back_outs.append(row_o)
+		back_phs.append(row_ph)
+	_emit_smooth_grid(st_main, back_pts, back_uvs, back_cols, back_outs, false, false, true, 1.0, back_phs)
+
+	for side_f: float in [-1.0, 1.0]:
+		# Sculpted coffered monolithic stone door leaf trimmed cleanly to the inverted-U arch
+		_add_planked_round_door_leaf_to_st(st_main, side_f, arch_half_span, arch_spring_y, door_bot_y, 0.34)
+
+		# Carved stone pivot bosses at top & bottom outer corners (authentic stone-door pivot architecture)
+		for piv_y: float in [door_bot_y + 0.38, arch_spring_y - 0.28]:
+			_add_sculpted_stone_to_st(st_main, Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span - 0.14), piv_y, 0.43)), 0.18, 0.18, 0.24, 0.075, 0.88, 1.0, 0.31, 0.88, 0.55, 0.0, 0.015)
+
+		# Heavy forged-iron drop-ring door handle / knocker (x = +-1.12m, y = 2.65m) mounted on a carved stone rosette
+		var ring_x := side_f * 1.12
+		var ring_bow := cos(clampf(1.12 / arch_half_span, 0.0, 1.0) * PI * 0.45) * 0.10
+		var ring_z := 0.34 + ring_bow
+		_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z), Vector3.BACK, 0.28, 0.065, 1.0, 0.38)
+		_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z + 0.05), Vector3.BACK, 0.095, 0.070, 2.0, 0.52)
+		_sculpt_smooth_torus_arc(st_main, Vector3(ring_x, 2.38, ring_z + 0.08), 0.195, 0.285, 0.095, 22, 8, 2.0, 0.62, 0.92, 0.45, 0.0)
+
+	# Carved stone central meeting astragal / rebate molding sealing the center seam
+	var seam_pts: Array[Vector3] = []
+	var seam_ra: Array[float] = []
+	var seam_rb: Array[float] = []
+	for si in 13:
+		var sy := lerpf(door_bot_y + 0.04, arch_spring_y + arch_half_span - 0.04, float(si) / 12.0)
+		seam_pts.append(Vector3(0.0, sy, 0.45))
+		seam_ra.append(0.115)
+		seam_rb.append(0.065)
+	_sculpt_lofted_tube(st_main, seam_pts, seam_ra, seam_rb, 10, 1.0, 0.19, 0.84, 0.90, 0.35, 0.0)
+
+	# Carved Stone Bas-Relief Concentric Seal Medallion across the center of the stone vault doors (y = 5.05m)
+	_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.45), 0.88, 1.06, 0.11, 32, 8, 1.0, 0.27, 0.88, 0.45, 0.0)
+	_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.46), 0.48, 0.62, 0.09, 26, 8, 1.0, 0.41, 0.90, 0.45, 0.0)
+	var esc_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, 5.05, 0.47))
+	_add_sculpted_stone_to_st(st_main, esc_xf, 0.34, 0.34, 0.34, 0.075, 0.92, 3.0, 0.44, 0.92, 0.72, 0.0, 0.008)
+	_add_domed_rivet_to_st(st_main, Vector3(0.0, 5.05, 0.56), Vector3.BACK, 0.14, 0.055, 3.0, 0.48)
+
+	# 5. Grounded Carved Stone & Forged Wrought-Iron Standing Braziers (ZERO hoops/bars above y = 3.04m!)
+	var torch_x_abs := door_w * 0.5 + 1.75 # 6.05m, centered inside the concave grotto shrine alcoves
+	var torch_z := 2.38
+	for side_f: float in [-1.0, 1.0]:
+		var tx := side_f * torch_x_abs
+		var tc_base := Vector3(tx, 0.0, torch_z)
+
+		# Grounded stepped octagonal stone plinth rooted below Sanctum floor (y = -0.68m .. 0.52m)
+		var ped_spine: Array[Vector3] = [
+			tc_base + Vector3(0.0, -0.68, 0.0),
+			tc_base + Vector3(0.0, -0.10, 0.0),
+			tc_base + Vector3(0.0, 0.18, 0.0),
+			tc_base + Vector3(0.0, 0.22, 0.0),
+			tc_base + Vector3(0.0, 0.48, 0.0),
+			tc_base + Vector3(0.0, 0.54, 0.0),
+		]
+		var ped_ra: Array[float] = [0.90, 0.88, 0.86, 0.68, 0.64, 0.46]
+		_sculpt_lofted_tube(st_main, ped_spine, ped_ra, ped_ra, 8, 0.0, 0.22, 0.80, 0.90, 0.45, 0.46)
+		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 0.56, 0.0), 0.36, 0.54, 0.14, 20, 7, 0.0, 0.28, 0.88, 0.42, 0.08)
+
+		# 12-fluted tapered ancient stone column shaft rising to capital (y = 0.56m .. 2.24m)
+		var shaft_spine: Array[Vector3] = [
+			tc_base + Vector3(0.0, 0.56, 0.0),
+			tc_base + Vector3(0.0, 1.05, 0.0),
+			tc_base + Vector3(0.0, 1.65, 0.0),
+			tc_base + Vector3(0.0, 2.22, 0.0),
+		]
+		var shaft_ra: Array[float] = [0.43, 0.40, 0.38, 0.36]
+		_sculpt_lofted_tube(st_main, shaft_spine, shaft_ra, shaft_ra, 24, 0.0, 0.16, 0.84, 0.90, 0.40, 0.06, 0.055, 12.0, 0.0)
+
+		# Carved stone column capital & horizontal neck collar (y = 2.18m .. 2.50m)
+		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.20, 0.0), 0.32, 0.46, 0.12, 20, 7, 0.0, 0.36, 0.90, 0.42, 0.04)
+		var cap_spine: Array[Vector3] = [
+			tc_base + Vector3(0.0, 2.20, 0.0),
+			tc_base + Vector3(0.0, 2.36, 0.0),
+			tc_base + Vector3(0.0, 2.50, 0.0),
+		]
+		var cap_ra: Array[float] = [0.37, 0.48, 0.44]
+		_sculpt_lofted_tube(st_main, cap_spine, cap_ra, cap_ra, 8, 0.0, 0.42, 0.86, 0.92, 0.42, 0.04)
+
+		# 4 forged-iron scroll/strut brackets flaring underneath from capital to cradle the fire bowl (strictly <= y = 2.94m)
+		for bi in 4:
+			var ba := PI * 0.25 + float(bi) * (PI * 0.5)
+			var b_dir := Vector3(cos(ba), 0.0, sin(ba))
+			var lug_pts: Array[Vector3] = [
+				tc_base + Vector3(0.0, 2.24, 0.0) + b_dir * 0.36,
+				tc_base + Vector3(0.0, 2.44, 0.0) + b_dir * 0.58,
+				tc_base + Vector3(0.0, 2.68, 0.0) + b_dir * 0.78,
+				tc_base + Vector3(0.0, 2.92, 0.0) + b_dir * 0.86,
+			]
+			_sculpt_lofted_tube(st_main, lug_pts, [0.068, 0.072, 0.066, 0.056], [0.052, 0.056, 0.052, 0.046], 8, 2.0, float(bi) * 0.22, 0.86, 0.94, 0.45, 0.0)
+
+		# Wide shallow riveted wrought-iron fire cauldron bowl with recessed hollow fire basin (y = 2.48m .. 3.03m)
+		var bowl_spine: Array[Vector3] = [
+			tc_base + Vector3(0.0, 2.48, 0.0),
+			tc_base + Vector3(0.0, 2.64, 0.0),
+			tc_base + Vector3(0.0, 2.84, 0.0),
+			tc_base + Vector3(0.0, 3.01, 0.0),
+			tc_base + Vector3(0.0, 3.03, 0.0),
+			tc_base + Vector3(0.0, 2.92, 0.0),
+			tc_base + Vector3(0.0, 2.78, 0.0),
+			tc_base + Vector3(0.0, 2.73, 0.0),
+		]
+		var bowl_ra: Array[float] = [0.42, 0.64, 0.80, 0.87, 0.77, 0.69, 0.52, 0.05]
+		_sculpt_lofted_tube(st_main, bowl_spine, bowl_ra, bowl_ra, 24, 2.0, 0.45, 0.84, 0.94, 0.45, 0.0)
+
+		# TRUE HORIZONTAL (XZ-plane) iron rim band, tarnished bronze belly band & 12 domed rivets (nothing above rim!)
+		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0), 0.78, 0.90, 0.11, 24, 7, 2.0, 0.55, 0.92, 0.45, 0.0)
+		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.68, 0.0), 0.62, 0.71, 0.08, 24, 6, 3.0, 0.40, 0.90, 0.45, 0.0)
+		for ri in 12:
+			var ra := float(ri) * (TAU / 12.0)
+			var r_dir := Vector3(cos(ra), 0.0, sin(ra))
+			_add_domed_rivet_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0) + r_dir * 0.885, r_dir, 0.036, 0.026, 2.0, 0.12 + float(ri) * 0.08)
+
+	st_main.generate_tangents()
+	var main_mesh := st_main.commit()
+	var main_mi := MeshInstance3D.new()
+	main_mi.name = "DoorMonolithMesh"
+	main_mi.mesh = main_mesh
+	main_mi.material_override = relief_mat
+	main_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	door_root.add_child(main_mi)
+
+	_door_astrolabe_outer = null
+	_door_astrolabe_inner = null
+
+	# 8. Flanking Brazier Fire VFX: Glowing Coal Bed + 4-Layer Real-Time Fire (Flipbook, Flame Cards, Smoke, Embers, Heat Haze)
+	var coal_mesh := _build_brazier_coal_bed_mesh()
+	var flame_cards_mesh := _build_crossed_flame_cards_mesh()
+	var fire_noise_tex := _get_fire_noise_tex()
+	var fire_flipbook_tex := _get_fire_flipbook_tex()
+	var coal_tex := _get_crystal_interior_tex()
+
+	for ti in 2:
+		var side_f := -1.0 if ti == 0 else 1.0
+		var sfx := "L" if ti == 0 else "R"
+		var torch_pivot := Node3D.new()
+		torch_pivot.name = "WeirdTorch_%s" % sfx
+		torch_pivot.position = Vector3(side_f * torch_x_abs, 2.86, torch_z)
+		door_root.add_child(torch_pivot)
+		_attach_brazier_fire_vfx(
+			torch_pivot, ti,
+			coal_mesh, flame_cards_mesh,
+			torch_shader, flame_card_shader, flame_particle_shader,
+			smoke_shader, ember_shader, haze_shader,
+			fire_noise_tex, fire_flipbook_tex, coal_tex
+		)
+
+	# 9. Physical Obstacle Colliders on Layer 4 (WALLS/OBSTACLES): Portal + Integrated Cliff Flanks + Bridged Torch Pedestals
 	var static_body := StaticBody3D.new()
 	static_body.name = "AncientDoorBody"
 	static_body.collision_layer = 4
 	static_body.collision_mask = 0
-	var col_shape := CollisionShape3D.new()
-	var box_shape := BoxShape3D.new()
-	box_shape.size = Vector3(door_w + 1.0, door_h + 1.0, door_d + 1.0)
-	col_shape.shape = box_shape
-	col_shape.position = Vector3(0.0, door_h * 0.5, 0.0)
-	static_body.add_child(col_shape)
+
+	var col_portal := CollisionShape3D.new()
+	col_portal.name = "PortalCollider"
+	var box_portal := BoxShape3D.new()
+	box_portal.size = Vector3(door_w + 5.8, door_h + 4.2, door_d + 1.6)
+	col_portal.shape = box_portal
+	col_portal.position = Vector3(0.0, 6.8, -0.65)
+	static_body.add_child(col_portal)
+
+	for side_f: float in [-1.0, 1.0]:
+		var sfx := "L" if side_f < 0.0 else "R"
+
+		var col_flank := CollisionShape3D.new()
+		col_flank.name = "CliffFlankCollider_%s" % sfx
+		var box_flank := BoxShape3D.new()
+		box_flank.size = Vector3(9.4, 15.0, 4.6)
+		col_flank.shape = box_flank
+		col_flank.position = Vector3(side_f * 9.8, 6.6, -1.40)
+		col_flank.rotation = Vector3(0.0, -side_f * deg_to_rad(8.0), 0.0)
+		static_body.add_child(col_flank)
+
+		var col_torch := CollisionShape3D.new()
+		col_torch.name = "TorchPedestalCollider_%s" % sfx
+		var cyl_torch := CylinderShape3D.new()
+		cyl_torch.radius = 0.92
+		cyl_torch.height = 5.0
+		col_torch.shape = cyl_torch
+		col_torch.position = Vector3(side_f * torch_x_abs, 2.1, torch_z)
+		static_body.add_child(col_torch)
+
+		var col_bridge := CollisionShape3D.new()
+		col_bridge.name = "TorchRootBridge_%s" % sfx
+		var box_bridge := BoxShape3D.new()
+		box_bridge.size = Vector3(1.84, 5.0, 1.85)
+		col_bridge.shape = box_bridge
+		col_bridge.position = Vector3(side_f * torch_x_abs, 2.1, 1.45)
+		static_body.add_child(col_bridge)
+
 	door_root.add_child(static_body)
 
 

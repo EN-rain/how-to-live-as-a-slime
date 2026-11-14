@@ -50,7 +50,13 @@ func _init() -> void:
 				reg_u1 = float(parts[2])
 				reg_s1 = float(parts[3])
 
-	var sdf := CaveSDF.new(1337)
+	var bake_cfg: CaveBakeConfig = null
+	if ResourceLoader.exists("res://terrain/cave/default_bake_config.tres"):
+		bake_cfg = ResourceLoader.load("res://terrain/cave/default_bake_config.tres") as CaveBakeConfig
+	if bake_cfg == null:
+		bake_cfg = CaveBakeConfig.new()
+	var layout_data := CaveLayout.load_active_layout()
+	var sdf := CaveSDF.new(bake_cfg.seed_val, bake_cfg, layout_data)
 
 	var nx := int(ceil((U_MAX - U_MIN) / VOXEL))
 	var ny := int(ceil((Y_MAX - Y_MIN) / VOXEL))

@@ -1,0 +1,6 @@
+[gd_resource type="Resource" script_class="CaveScatterConfig" format=3]
+
+[ext_resource type="Script" path="res://terrain/cave/resources/cave_scatter_config.gd" id="1_aw2ps"]
+
+[resource]
+script = ExtResource("1_aw2ps")

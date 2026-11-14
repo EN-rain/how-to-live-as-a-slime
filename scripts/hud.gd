@@ -4,7 +4,7 @@ extends Control
 
 @export var slime: Slime
 @export var props: SlimeProps
-@export var hint_text := "WASD move · Shift run · E split · Q roam · M merge · F5-F8 quality · F4 dev · Esc menu"
+@export var hint_text := "WASD move · Space jump (hold) · Shift run · E split · Q roam · M merge · T time · Y weather · F5-F8 quality · F4 dev · Esc menu"
 @export var debug_posture := false
 
 @export_group("Pill Styling")
@@ -23,6 +23,8 @@ extends Control
 var _stat: Label
 var _perf_line: Label
 var _perf_pill: PanelContainer
+var _env_line: Label
+var _env_pill: PanelContainer
 var _hint: Label
 var _dev_line: Label
 var _dev_pill: PanelContainer
@@ -32,8 +34,10 @@ var _toast_line: Label
 var _toast_pill: PanelContainer
 var _toast_timer: float = 0.0
 var _last := ""
+var _last_env := ""
 var _last_dev := ""
 var _last_dbg := ""
+var _time_weather: Node
 
 var _perf_accum_dt: float = 0.0
 var _perf_accum_frames: int = 0
@@ -49,8 +53,15 @@ var _btn_new_game: Button
 var _btn_retry: Button
 var _btn_exit: Button
 
-var _frames_ms: Array = []
-var _phys_ms: Array = []
+const DBG_RING_SIZE := 300
+var _frames_ms := PackedFloat32Array()
+var _phys_ms := PackedFloat32Array()
+var _ring_head: int = 0
+var _ring_count: int = 0
+var _ring_sort_buf: Array[float] = []
+var _stat_accum_dt: float = 0.2
+var _stat_last_eaten: int = -1
+var _stat_last_clones: int = -1
 var _prev_pframe := 0
 ## [rebuild, baked_points, set_points, cast, intersect, rest] totals at the last sample.
 var _prev_counts: Array = [0, 0, 0, 0, 0, 0]
@@ -82,6 +93,11 @@ func _ready() -> void:
 	_perf_line.text = "FPS --  ·  CPU --%"
 	_perf_pill = _perf_line.get_parent()
 	row.add_child(_perf_pill)
+
+	_env_line = _make_pill(Color("f4dca4"))
+	_env_line.text = "10:05 Day · Clear"
+	_env_pill = _env_line.get_parent()
+	row.add_child(_env_pill)
 
 	_hint = _make_pill(hint_color)
 	_hint.text = hint_text
@@ -347,9 +363,13 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if event.keycode == KEY_F3:
 		debug_posture = not debug_posture
 		_debug_pill.visible = debug_posture
+		_stat_accum_dt = 0.2
 		if not debug_posture and _dbg_im != null:
 			_dbg_im.clear_surfaces()
 		elif debug_posture:
+			_ring_head = 0
+			_ring_count = 0
+			_prev_pframe = Engine.get_physics_frames()
 			_ensure_debug_mesh()
 		accept_event()
 	elif event.keycode == KEY_ESCAPE:
@@ -411,12 +431,16 @@ func _ensure_debug_mesh() -> void:
 
 
 func _sample(delta: float) -> void:
-	_frames_ms.append(delta * 1000.0)
-	if _frames_ms.size() > 300:
-		_frames_ms.pop_front()
-	_phys_ms.append(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0)
-	if _phys_ms.size() > 300:
-		_phys_ms.pop_front()
+	if not debug_posture:
+		return
+	if _frames_ms.size() != DBG_RING_SIZE:
+		_frames_ms.resize(DBG_RING_SIZE)
+		_phys_ms.resize(DBG_RING_SIZE)
+	_frames_ms[_ring_head] = delta * 1000.0
+	_phys_ms[_ring_head] = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	_ring_head = (_ring_head + 1) % DBG_RING_SIZE
+	if _ring_count < DBG_RING_SIZE:
+		_ring_count += 1
 	var pf := Engine.get_physics_frames()
 	var df := pf - _prev_pframe
 	if df > 0:
@@ -434,13 +458,15 @@ func _sample(delta: float) -> void:
 			_prev_counts[i] = now[i]
 
 
-func _percentile(arr: Array, q: float) -> float:
-	if arr.is_empty():
+func _percentile(arr: PackedFloat32Array, q: float) -> float:
+	if _ring_count <= 0:
 		return 0.0
-	var a := arr.duplicate()
-	a.sort()
-	var idx := int(clampf(roundf(q * float(a.size() - 1)), 0.0, float(a.size() - 1)))
-	return float(a[idx])
+	_ring_sort_buf.resize(_ring_count)
+	for i in _ring_count:
+		_ring_sort_buf[i] = arr[i]
+	_ring_sort_buf.sort()
+	var idx := clampi(int(roundf(q * float(_ring_count - 1))), 0, _ring_count - 1)
+	return _ring_sort_buf[idx]
 
 
 func _update_debug_overlay() -> void:
@@ -528,42 +554,62 @@ func _process(_delta: float) -> void:
 	if slime == null or props == null:
 		return
 
-	# Authoritative volume and mass calculations
-	var mass := slime.get_volume()
+	# Authoritative volume and mass calculations (throttled to 10 Hz unless count/state changes)
 	var clone_count := maxi(0, props.registered_slimes.size() - 1)
-	var text := ""
-	if props.total() > 0:
-		text = "Eaten %d / %d  ·  Vol %.1f m³ (Scale %.2f×)" % [props.eaten, props.total(), mass, slime.target_scale]
-	else:
-		text = "Vol %.1f m³ (Scale %.2f×)" % [mass, slime.target_scale]
-	if clone_count > 0:
-		text += "  ·  Clones: %d" % clone_count
-
-	# Check active push-eating engulf front progress
-	var active_engulf_p = null
-	for p in props.props:
-		if p.last_presser == slime and p.engulf_front > 0.01:
-			active_engulf_p = p
-			break
-
-	if active_engulf_p != null:
-		var s_vol: float = slime.get_volume()
-		var vr: float = active_engulf_p.real_volume / maxf(1e-4, s_vol)
-		if vr >= 0.75:
-			text += "  ·  Engulfing %d%% [Heavy Resistance]" % int(active_engulf_p.engulf_front * 100.0)
-		elif vr >= 0.45:
-			text += "  ·  Engulfing %d%% [Resisting]" % int(active_engulf_p.engulf_front * 100.0)
+	_stat_accum_dt += _delta
+	var force_stat := (props.eaten != _stat_last_eaten) or (clone_count != _stat_last_clones) or (not slime.pressing_props.is_empty())
+	if force_stat or _stat_accum_dt >= 0.10:
+		_stat_accum_dt = 0.0
+		_stat_last_eaten = props.eaten
+		_stat_last_clones = clone_count
+		var mass := slime.get_volume()
+		var text := ""
+		if props.total() > 0:
+			text = "Eaten %d / %d  ·  Vol %.1f m³ (Scale %.2f×)" % [props.eaten, props.total(), mass, slime.target_scale]
 		else:
-			text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
+			text = "Vol %.1f m³ (Scale %.2f×)" % [mass, slime.target_scale]
+		if clone_count > 0:
+			text += "  ·  Clones: %d" % clone_count
+		var pos := slime.global_position
+		text += "  ·  Pos %.1f, %.1f, %.1f" % [pos.x, pos.y, pos.z]
 
-	if debug_posture and slime.model != null:
-		text += "  ·  h %.2f  sq %.2f  liq %.2f" % [slime.height_ratio, slime.squeeze_k, slime.liquid_amt]
-		if slime.expansion_blocked != "":
-			text += "  ·  %s" % slime.expansion_blocked
+		# Check active push-eating engulf front progress
+		var active_engulf_p = null
+		for p in slime.pressing_props:
+			if p != null and p.last_presser == slime and p.engulf_front > 0.01:
+				active_engulf_p = p
+				break
 
-	if text != _last:
-		_last = text
-		_stat.text = text
+		if active_engulf_p != null:
+			var s_vol: float = slime.get_volume()
+			var vr: float = active_engulf_p.real_volume / maxf(1e-4, s_vol)
+			if vr >= 0.75:
+				text += "  ·  Engulfing %d%% [Heavy Resistance]" % int(active_engulf_p.engulf_front * 100.0)
+			elif vr >= 0.45:
+				text += "  ·  Engulfing %d%% [Resisting]" % int(active_engulf_p.engulf_front * 100.0)
+			else:
+				text += "  ·  Engulfing %d%%" % int(active_engulf_p.engulf_front * 100.0)
+
+		if debug_posture and slime.model != null:
+			text += "  ·  h %.2f  sq %.2f  liq %.2f" % [slime.height_ratio, slime.squeeze_k, slime.liquid_amt]
+			if slime.expansion_blocked != "":
+				text += "  ·  %s" % slime.expansion_blocked
+
+		if text != _last:
+			_last = text
+			_stat.text = text
+
+		if _time_weather == null or not is_instance_valid(_time_weather):
+			_time_weather = get_tree().get_first_node_in_group("world_time_weather")
+		if _time_weather != null and _env_line != null:
+			var env_txt := "%s %s · %s" % [
+				_time_weather.get_hour_minute_string(),
+				_time_weather.get_phase_label(),
+				_time_weather.get_weather_label(),
+			]
+			if env_txt != _last_env:
+				_last_env = env_txt
+				_env_line.text = env_txt
 
 	if _dev_pill != null:
 		var show_dev := slime.dev_mode

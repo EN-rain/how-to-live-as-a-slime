@@ -1,0 +1,6 @@
+[gd_resource type="Resource" script_class="CaveWaterConfig" format=3]
+
+[ext_resource type="Script" path="res://terrain/cave/resources/cave_water_config.gd" id="1_anw6j"]
+
+[resource]
+script = ExtResource("1_anw6j")

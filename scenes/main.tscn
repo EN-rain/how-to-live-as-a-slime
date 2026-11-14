@@ -7,6 +7,8 @@
 [ext_resource type="Script" uid="uid://bsn3fclfde6cq" path="res://scripts/props.gd" id="6_props_script"]
 [ext_resource type="Script" uid="uid://b1jvytjt3j1k4" path="res://scripts/hud.gd" id="7_hud_script"]
 [ext_resource type="PackedScene" path="res://terrain/terrain.tscn" id="9_terrain_scene"]
+[ext_resource type="Script" path="res://scripts/world_time_weather.gd" id="10_time_weather"]
+[ext_resource type="Script" path="res://scripts/world_ecosystem.gd" id="11_world_ecosystem"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_world"]
 sky_top_color = Color(0.384, 0.635, 0.878, 1)
@@ -22,13 +24,14 @@ sky_material = SubResource("ProceduralSkyMaterial_world")
 background_mode = 2
 sky = SubResource("Sky_world")
 ambient_light_source = 3
-ambient_light_color = Color(0.859, 0.918, 0.996, 1)
-ambient_light_sky_contribution = 0.75
-ambient_light_energy = 0.9
+ambient_light_color = Color(0.76, 0.85, 0.98, 1)
+ambient_light_sky_contribution = 0.55
+ambient_light_energy = 0.56
 tonemap_mode = 2
+tonemap_exposure = 1.06
 glow_enabled = true
-glow_intensity = 0.5
-glow_bloom = 0.08
+glow_intensity = 0.65
+glow_bloom = 0.12
 fog_enabled = true
 fog_mode = 1
 fog_light_color = Color(0.70, 0.80, 0.88, 1)
@@ -115,7 +118,14 @@ environment = SubResource("Environment_studio")
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=13382104]
 transform = Transform3D(0.7809, -0.4877, 0.3904, 0, 0.625, 0.7807, -0.6247, -0.6096, 0.488, 4, 8, 5)
-light_energy = 0.9
+light_color = Color(1, 0.94, 0.84, 1)
+light_energy = 1.38
+shadow_enabled = true
+shadow_bias = 0.025
+shadow_normal_bias = 0.35
+shadow_opacity = 0.82
+directional_shadow_mode = 1
+directional_shadow_max_distance = 165.0
 
 [node name="Slime" parent="." instance=ExtResource("8_slime_scene") node_paths=PackedStringArray("camera", "floor_mesh", "props")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -101.71, 22.85, -84.55)
@@ -212,6 +222,7 @@ script = ExtResource("6_props_script")
 slime = NodePath("../Slime")
 floor_mesh = NodePath("../Floor")
 enable_test_structures = false
+enable_food_cubes = false
 
 [node name="HudLayer" type="CanvasLayer" parent="." unique_id=1288801345]
 
@@ -226,3 +237,9 @@ mouse_filter = 2
 script = ExtResource("7_hud_script")
 slime = NodePath("../../Slime")
 props = NodePath("../../Ecosystem")
+
+[node name="WorldTimeWeather" type="Node" parent="."]
+script = ExtResource("10_time_weather")
+
+[node name="WorldEcosystem" type="Node3D" parent="."]
+script = ExtResource("11_world_ecosystem")

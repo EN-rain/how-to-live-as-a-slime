@@ -130,6 +130,19 @@ extends Resource
 @export var breadcrumb_interval := 0.1
 @export var breadcrumb_limit := 120
 
+@export_group("Jump")
+@export var jump_min_height := 1.8
+@export var jump_max_height := 4.0
+@export var jump_charge_time := 0.50
+@export var jump_charge_move_mult := 0.55
+@export var jump_coyote_time := 0.12
+@export var jump_buffer_time := 0.12
+@export var jump_water_min_height := 1.4
+@export var jump_water_max_height := 2.8
+@export var jump_forward_min_speed := 8.0
+@export var jump_forward_max_speed := 15.0
+@export_range(0.05, 1.0, 0.05) var jump_air_control := 0.35
+
 @export_group("Camera")
 ## Camera starts following once the slime exceeds this speed (0..1 of walk_speed).
 @export var follow_speed_threshold := 0.01
@@ -150,6 +163,15 @@ func validate() -> void:
 	slide_iterations = maxi(slide_iterations, 1)
 	recovery_iterations = maxi(recovery_iterations, 1)
 	gravity = maxf(gravity, 0.0)
+	jump_min_height = maxf(jump_min_height, 0.1)
+	jump_max_height = maxf(jump_max_height, jump_min_height)
+	jump_charge_time = maxf(jump_charge_time, 0.05)
+	jump_charge_move_mult = clampf(jump_charge_move_mult, 0.0, 1.0)
+	jump_coyote_time = maxf(jump_coyote_time, 0.0)
+	jump_buffer_time = maxf(jump_buffer_time, 0.0)
+	jump_forward_min_speed = maxf(jump_forward_min_speed, 0.0)
+	jump_forward_max_speed = maxf(jump_forward_max_speed, jump_forward_min_speed)
+	jump_air_control = clampf(jump_air_control, 0.05, 1.0)
 	scale_response = maxf(scale_response, 0.1)
 	velocity_response = maxf(velocity_response, 0.1)
 	climb_reach = maxf(climb_reach, 0.0)

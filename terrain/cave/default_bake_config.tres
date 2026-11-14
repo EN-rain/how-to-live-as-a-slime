@@ -1,0 +1,6 @@
+[gd_resource type="Resource" script_class="CaveBakeConfig" format=3]
+
+[ext_resource type="Script" path="res://terrain/cave/resources/cave_bake_config.gd" id="1_0f5cg"]
+
+[resource]
+script = ExtResource("1_0f5cg")

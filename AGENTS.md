@@ -79,6 +79,9 @@ Execute headless tests using Godot console binary:
 # Dynamic Terrain & Slope Traversal Test
 & "C:\Users\LENOVO\Desktop\GodotGDScript\Godot_v4.6.1-stable_win64_console.exe" --headless --path d:\slime --script res://tests/test_dynamic_terrain_traversal.gd
 
+# AncientBigDoor Collar Geometry Verification (rock-sealed rim & side seams, arch clasp, zero grazing normals)
+& "C:\Users\LENOVO\Desktop\GodotGDScript\Godot_v4.6.1-stable_win64_console.exe" --headless --path d:\slime --script res://tests/test_door_wall_integration.gd
+
 # Script Compilation Check (Verifies all project scripts compile cleanly)
 & "C:\Users\LENOVO\Desktop\GodotGDScript\Godot_v4.6.1-stable_win64_console.exe" --headless --path d:\slime --script res://tests/test_compile_all_scripts.gd
 ```

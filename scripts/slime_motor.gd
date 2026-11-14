@@ -37,6 +37,7 @@ var on_ground := true
 var ground_body: Object = null
 var ground_normal := Vector3.UP
 var just_landed := false
+var just_jumped := false
 var landing_impact_speed := 0.0
 
 ## Hydrodynamic state updated from CaveSystem.sample_water_at() each tick.
@@ -63,7 +64,8 @@ var impact_speed := 0.0
 
 var _probe_shape: ConvexPolygonShape3D
 var _adhoc_shape: ConvexPolygonShape3D
-var _query_params: PhysicsShapeQueryParameters3D
+var _query_params_excluded: PhysicsShapeQueryParameters3D
+var _query_params_unexcluded: PhysicsShapeQueryParameters3D
 var _deep_ray_query: PhysicsRayQueryParameters3D
 var _exclude: Array[RID] = []
 
@@ -93,7 +95,13 @@ func setup(node: Node3D, shape_model: SlimeShapeModel, t: SlimeTuning) -> void:
 	support_y = t.floor_y
 	_probe_shape = ConvexPolygonShape3D.new()
 	_adhoc_shape = ConvexPolygonShape3D.new()
-	_query_params = PhysicsShapeQueryParameters3D.new()
+	_query_params_excluded = PhysicsShapeQueryParameters3D.new()
+	_query_params_excluded.collide_with_bodies = true
+	_query_params_excluded.collide_with_areas = false
+	_query_params_unexcluded = PhysicsShapeQueryParameters3D.new()
+	_query_params_unexcluded.collide_with_bodies = true
+	_query_params_unexcluded.collide_with_areas = false
+	_query_params_unexcluded.exclude = []
 	_deep_ray_query = PhysicsRayQueryParameters3D.new()
 	_core_sphere_shape = SphereShape3D.new()
 
@@ -120,14 +128,11 @@ func core_sphere_clear(at_center: Vector3, radius := -1.0) -> bool:
 func cast_core_sphere(from_center: Vector3, motion: Vector3, radius := -1.0) -> Array:
 	debug_cast_count += 1
 	var shape := core_sphere_shape(radius)
-	var q := _query_params
+	var q := _query_params_excluded
 	q.shape = shape
 	q.transform = Transform3D(Basis.IDENTITY, from_center)
 	q.motion = motion
 	q.collision_mask = LAYER_OBSTACLES
-	q.collide_with_bodies = true
-	q.collide_with_areas = false
-	q.exclude = _exclude
 	return _space().cast_motion(q)
 
 
@@ -142,7 +147,11 @@ func core_can_pass_ahead(fwd: Vector3) -> bool:
 
 
 func set_exclude(rids: Array[RID]) -> void:
+	if _exclude == rids:
+		return
 	_exclude = rids
+	if _query_params_excluded != null:
+		_query_params_excluded.exclude = _exclude
 
 
 func _space() -> PhysicsDirectSpaceState3D:
@@ -163,14 +172,11 @@ func core_sweep_origin() -> Vector3:
 ## and consumes the result synchronously, so a shared instance is safe and avoids
 ## an allocation per probe.
 func _query(at_foot: Vector3, probe: Shape3D = null, use_exclude := true, mask := LAYER_SOLID) -> PhysicsShapeQueryParameters3D:
-	var q := _query_params
+	var q := _query_params_excluded if use_exclude else _query_params_unexcluded
 	q.shape = probe if probe != null else model.shape
 	q.transform = Transform3D(Basis.IDENTITY, at_foot)
 	q.motion = Vector3.ZERO
 	q.collision_mask = mask
-	q.collide_with_bodies = true
-	q.collide_with_areas = false
-	q.exclude = _exclude if use_exclude else []
 	return q
 
 
@@ -190,6 +196,9 @@ func recover_overlap() -> void:
 		var grounded_floor := support_y > tuning.floor_y + 0.5 and model.foot.y <= support_y + model.core_sphere_radius() * 2.0 + 0.35
 		for orig in origins:
 			var q := _query(orig, sphere, true, LAYER_OBSTACLES)
+			debug_intersect_count += 1
+			if space.intersect_shape(q, 1).is_empty():
+				continue
 			debug_intersect_count += 1
 			var pairs := space.collide_shape(q, 16)
 			if pairs.size() >= 2:
@@ -351,6 +360,32 @@ func move_horizontal(motion: Vector3) -> void:
 							sum_n += d.normalized()
 					n = sum_n
 
+			var full_n := n.normalized() if n.length_squared() >= 1e-6 else Vector3.ZERO
+			# Walkable slope encountered by the lower foot sphere while the upper core center
+			# is not blocked: step up smoothly instead of treating the slope as a vertical wall.
+			if not use_center and full_n.y >= 0.48:
+				var rem_horiz := slid * maxf(1.0 - safe, 0.0)
+				var rem_len := rem_horiz.length()
+				if rem_len > 1e-5:
+					var horiz_n_len := Vector2(full_n.x, full_n.z).length()
+					var slope_rise := rem_len * (horiz_n_len / maxf(full_n.y, 0.25)) + 0.03
+					var max_climb := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
+					var step_up := clampf(slope_rise, 0.04, max_climb)
+					if ceiling_clearance_up(step_up, sphere) >= step_up - 1e-4:
+						var fr_up := _cast(core_sweep_origin() + Vector3(0.0, step_up, 0.0), rem_horiz, true, sphere)
+						var up_safe: float = fr_up[0]
+						var up_unsafe: float = fr_up[1]
+						if up_unsafe >= 0.999999:
+							owner_node.global_position += Vector3(0.0, step_up, 0.0) + rem_horiz
+							_sync_foot()
+							last_sweep_fraction = 1.0
+							break
+						elif up_safe > 1e-4:
+							owner_node.global_position += Vector3(0.0, step_up, 0.0) + rem_horiz * up_safe
+							_sync_foot()
+							slid = rem_horiz * (1.0 - up_safe)
+							continue
+
 			n = Vector3(n.x, 0.0, n.z)
 			if n.length_squared() < 1e-6:
 				break
@@ -435,12 +470,15 @@ func update_support() -> void:
 	var body: Object = null
 	var found := false
 
-	var fr := _cast(start, Vector3(0, -drop, 0), false, null, LAYER_TERRAIN | LAYER_OBSTACLES)
+	var wide_r := maxf(model.rest_max_radius * model.scale * 0.55, model.core_sphere_radius())
+	var wide_sph := core_sphere_shape(wide_r)
+	var wide_start := model.foot + Vector3(0, reach + wide_r, 0)
+	var fr := _cast(wide_start, Vector3(0, -drop, 0), false, wide_sph, LAYER_TERRAIN | LAYER_OBSTACLES)
 	var unsafe: float = fr[1]
 	if unsafe < 0.999999:
-		var at := start + Vector3(0, -drop, 0) * unsafe
+		var at := wide_start + Vector3(0, -drop, 0) * unsafe
 		debug_rest_count += 1
-		var rest := _space().get_rest_info(_query(at, null, false, LAYER_TERRAIN | LAYER_OBSTACLES))
+		var rest := _space().get_rest_info(_query(at, wide_sph, false, LAYER_TERRAIN | LAYER_OBSTACLES))
 		if not rest.is_empty() and rest.normal.y > 0.5:
 			var top: float = rest.point.y
 			if top <= model.foot.y + reach + tuning.skin and top > best:
@@ -563,11 +601,21 @@ func update_water_state(dt: float, is_subterranean: bool) -> void:
 		water_wetness = maxf(0.0, water_wetness - dt * 0.22)
 
 
+## Apply an instantaneous upward jump impulse (m/s) through the single motor writer.
+func jump(impulse_vy: float) -> void:
+	if impulse_vy <= 0.0:
+		return
+	vertical_vel = impulse_vy
+	on_ground = false
+	just_jumped = true
+
+
 ## Vertical integration anchored to support with speed-coupled hydrodynamics:
 ## walking (`W` or slower) / idle sinks gently down to the underwater floor;
 ## running (`Shift+W`) generates hydrodynamic lift and rises smoothly to the surface.
 func move_vertical(dt: float, target_scale: float) -> void:
 	just_landed = false
+	just_jumped = false
 	var target_foot := support_y + tuning.skin
 	var foot_y := owner_node.global_position.y - model.rest_half_height * model.scale
 	var shrinking := target_scale < model.scale - 0.01
@@ -577,7 +625,9 @@ func move_vertical(dt: float, target_scale: float) -> void:
 	var swim_spd := Vector2(velocity.x, velocity.z).length()
 	var is_run_swim := want_run_swim or swim_spd > tuning.walk_speed * 1.15
 	var deep_water := in_water and (water_y - target_foot) > buoy_depth
-	if deep_water and foot_y < water_y + 0.12 and not shrinking:
+	var max_step_down := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
+	var stick_to_slope := on_ground and vertical_vel <= 0.0 and support_y > tuning.floor_y + 0.5 and (foot_y - target_foot) <= max_step_down
+	if deep_water and foot_y < water_y + 0.12 and not shrinking and vertical_vel <= 0.0:
 		if is_run_swim:
 			var neutral_foot := maxf(target_foot, water_y - buoy_depth)
 			var b_phase := _water_bob_phase(foot_y) + owner_node.global_position.x * 0.55 + owner_node.global_position.z * 0.42
@@ -607,9 +657,9 @@ func move_vertical(dt: float, target_scale: float) -> void:
 					landing_impact_speed = absf(vertical_vel)
 				vertical_vel = 0.0
 				on_ground = true
-				var follow_rate := 36.0 if target_foot > foot_y else 16.0
+				var follow_rate := 120.0 if target_foot > foot_y else 16.0
 				desired = (target_foot - foot_y) * (1.0 - exp(-follow_rate * dt))
-	elif foot_y > target_foot + 0.02 and not shrinking:
+	elif ((foot_y > target_foot + 0.02 and not stick_to_slope) or vertical_vel > 0.0) and not shrinking:
 		on_ground = false
 		vertical_vel -= tuning.gravity * dt
 		desired = vertical_vel * dt
@@ -619,7 +669,7 @@ func move_vertical(dt: float, target_scale: float) -> void:
 			landing_impact_speed = absf(vertical_vel)
 		vertical_vel = 0.0
 		on_ground = true
-		var follow_rate := 36.0 if target_foot > foot_y else 16.0
+		var follow_rate := 120.0
 		desired = (target_foot - foot_y) * (1.0 - exp(-follow_rate * dt))
 	if absf(desired) <= 1e-7:
 		_sync_foot()

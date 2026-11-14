@@ -291,3 +291,55 @@ static func world_spawn_facing_yaw() -> float:
 	var b := to_world(SPAWN_LOOK_AT)
 	var d := b - a
 	return atan2(d.x, d.z)
+
+
+const ACTIVE_LAYOUT_PATH := "res://terrain/cave/cave_layout.tres"
+
+
+static func build_default_layout_data() -> CaveLayoutData:
+	var d := CaveLayoutData.new()
+	d.origin = ORIGIN
+	d.fwd_xz = FWD_XZ
+	d.right_xz = RIGHT_XZ
+	d.mountain_surface_over_hall = MOUNTAIN_SURFACE_OVER_HALL
+	d.tunnels = TUNNELS.duplicate(true)
+	d.tunnel_leans = {
+		"twilight_passage": -0.22,
+		"hall_throat": 0.18,
+		"stream_grotto": -0.20,
+		"deep_descent": -0.16,
+		"lake_tunnel": 0.14,
+		"door_tunnel": -0.12,
+	}
+	d.chambers = CHAMBERS.duplicate(true)
+	d.chamber_leans = {
+		"breakdown_fork": -0.15,
+		"collapse_hall": 0.14,
+		"geode_pocket": -0.10,
+		"abyssal_atrium": 0.08,
+		"underground_lake": -0.12,
+		"vault_sanctum": 0.0,
+	}
+	d.ledge_route.assign(LEDGE_ROUTE)
+	d.ledge_width = LEDGE_WIDTH
+	d.ledge_headroom = LEDGE_HEADROOM
+	d.stream_ctrl = STREAM_CTRL.duplicate()
+	d.mound = MOUND.duplicate(true)
+	d.rubble_crest = RUBBLE_CREST.duplicate(true)
+	d.pool = POOL.duplicate(true)
+	d.skylight = SKYLIGHT.duplicate(true)
+	d.waterfall = WATERFALL
+	d.underground_lake = UNDERGROUND_LAKE.duplicate(true)
+	d.lake_abyss_pit = LAKE_ABYSS_PIT.duplicate(true)
+	d.ancient_door = ANCIENT_DOOR.duplicate(true)
+	d.spawn = SPAWN
+	d.spawn_look_at = SPAWN_LOOK_AT
+	return d
+
+
+static func load_active_layout() -> CaveLayoutData:
+	if ResourceLoader.exists(ACTIVE_LAYOUT_PATH):
+		var loaded := ResourceLoader.load(ACTIVE_LAYOUT_PATH) as CaveLayoutData
+		if loaded != null:
+			return loaded
+	return build_default_layout_data()

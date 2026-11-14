@@ -1,6 +1,9 @@
 shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_disabled, diffuse_lambert_wrap, specular_schlick_ggx;
 
+global uniform float u_wind_strength;
+global uniform float u_weather_wetness;
+
 group_uniforms GrassTexture;
 uniform sampler2D grass_texture : source_color, filter_linear_mipmap;
 uniform float alpha_scissor_threshold : hint_range(0.1, 0.9, 0.05) = 0.40;
@@ -15,7 +18,9 @@ uniform float roughness : hint_range(0.0, 1.0, 0.01) = 0.75;
 
 group_uniforms SlimeInteraction;
 uniform vec3 slime_pos = vec3(0.0, 999.0, 0.0);
-uniform float slime_radius : hint_range(0.5, 5.0, 0.1) = 1.9;
+uniform float slime_radius : hint_range(0.5, 24.0, 0.1) = 2.45;
+uniform float slime_height : hint_range(0.5, 24.0, 0.1) = 2.8;
+uniform vec3 slime_vel = vec3(0.0, 0.0, 0.0);
 
 varying vec3 v_ground_root;
 varying float v_blade_height;
@@ -53,21 +58,37 @@ void vertex() {
 	float h = clamp(VERTEX.y * 1.35, 0.0, 1.0);
 	v_blade_height = h;
 
-	// Multi-frequency wind sway on upper blade
-	float breeze = sin(TIME * 2.2 + xz.x * 0.18 + xz.y * 0.14) * 0.08 * (h * h);
-	breeze += sin(TIME * 4.1 + xz.x * 0.45 - xz.y * 0.35) * 0.03 * (h * h);
+	// Multi-frequency wind sway on upper blade (amplified during gusts & rainstorms)
+	float wind_boost = 1.0 + u_wind_strength * 2.1;
+	float breeze = sin(TIME * (2.2 + u_wind_strength * 1.4) + xz.x * 0.18 + xz.y * 0.14) * 0.08 * wind_boost * (h * h);
+	breeze += sin(TIME * (4.1 + u_wind_strength * 1.8) + xz.x * 0.45 - xz.y * 0.35) * 0.03 * wind_boost * (h * h);
 	VERTEX.x += breeze;
 	VERTEX.z += breeze * 0.65;
 
-	// Dynamic Slime Collision Push: grass bends outward and down under slime body
+	// Dynamic Slime Body Push: full outer jelly dome parts & flattens grass in true world space
 	vec3 to_slime = world_pos - slime_pos;
 	float dist_slime_xz = length(to_slime.xz);
-	if (dist_slime_xz < slime_radius && abs(to_slime.y) < 2.0) {
-		float push = (1.0 - dist_slime_xz / slime_radius) * h;
-		vec2 push_dir = (dist_slime_xz > 0.01) ? (to_slime.xz / dist_slime_xz) : vec2(0.707, 0.707);
-		VERTEX.x += push_dir.x * push * 0.70;
-		VERTEX.z += push_dir.y * push * 0.70;
-		VERTEX.y -= push * 0.35;
+	float vert_gap = abs(to_slime.y);
+	float y_clearance = max(2.2, slime_height * 0.75 + slime_radius * 0.35);
+	if (dist_slime_xz < slime_radius && vert_gap < y_clearance) {
+		float radial = 1.0 - smoothstep(slime_radius * 0.15, slime_radius, dist_slime_xz);
+		float height_fade = 1.0 - smoothstep(y_clearance * 0.45, y_clearance, vert_gap);
+		float bend = radial * height_fade * (0.28 + 0.72 * h);
+		vec2 push_dir = (dist_slime_xz > 0.02) ? (to_slime.xz / dist_slime_xz) : vec2(0.707, 0.707);
+		vec2 vel_xz = slime_vel.xz;
+		float vel_spd = length(vel_xz);
+		if (vel_spd > 0.25) {
+			vec2 vel_dir = vel_xz / vel_spd;
+			float wake_mix = clamp(vel_spd / 10.0, 0.0, 0.42) * radial;
+			push_dir = normalize(mix(push_dir, vel_dir, wake_mix));
+		}
+		// Convert world-space push/flatten displacement back into randomly-rotated tuft local space
+		vec3 world_disp = vec3(
+			push_dir.x * bend * 1.45,
+			-bend * (0.58 * h + 0.18),
+			push_dir.y * bend * 1.45
+		);
+		VERTEX += (inverse(mat3(MODEL_MATRIX)) * world_disp);
 	}
 
 	// Normal aligns predominantly skyward with subtle lateral curve for soft Ghibli lighting
@@ -79,8 +100,6 @@ void fragment() {
 	if (tex.a < alpha_scissor_threshold) {
 		discard;
 	}
-	ALPHA = tex.a;
-	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
 
 	if (!FRONT_FACING) {
 		NORMAL = -NORMAL;
@@ -99,8 +118,8 @@ void fragment() {
 	// Vibrant sunny gradient towards blade tips
 	vec3 blade_col = mix(blade_base, tip_color, smoothstep(0.30, 1.0, v_blade_height) * 0.45);
 
-	ALBEDO = blade_col;
-	ROUGHNESS = roughness;
+	ALBEDO = blade_col * mix(1.0, 0.86, u_weather_wetness);
+	ROUGHNESS = mix(roughness, 0.48, u_weather_wetness);
 	SPECULAR = 0.20;
 	METALLIC = 0.0;
 }

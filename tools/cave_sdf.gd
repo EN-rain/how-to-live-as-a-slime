@@ -34,27 +34,32 @@ var _noise_macro: FastNoiseLite
 var _noise_fracture: FastNoiseLite
 
 
-func _init(seed_val: int = 1337) -> void:
+func _init(seed_val: int = 1337, config: CaveBakeConfig = null, layout_data: CaveLayoutData = null) -> void:
+	var s_val := config.seed_val if config != null else seed_val
 	_noise_macro = FastNoiseLite.new()
-	_noise_macro.seed = seed_val + 311
+	_noise_macro.seed = s_val + 311
 	_noise_macro.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	_noise_macro.frequency = 0.048
+	_noise_macro.frequency = config.macro_frequency if config != null else 0.048
 	_noise_macro.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_noise_macro.fractal_octaves = 2
+	_noise_macro.fractal_octaves = config.macro_octaves if config != null else 2
 
 	_noise_fracture = FastNoiseLite.new()
-	_noise_fracture.seed = seed_val + 887
+	_noise_fracture.seed = s_val + 887
 	_noise_fracture.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	_noise_fracture.frequency = 0.095
+	_noise_fracture.frequency = config.fracture_frequency if config != null else 0.095
 	_noise_fracture.fractal_type = FastNoiseLite.FRACTAL_RIDGED
-	_noise_fracture.fractal_octaves = 2
+	_noise_fracture.fractal_octaves = config.fracture_octaves if config != null else 2
 
-	_compile_primitives()
+	_compile_primitives(layout_data)
 
 
-func _compile_primitives() -> void:
+func _compile_primitives(layout_data: CaveLayoutData = null) -> void:
+	var tunnels_src: Dictionary = layout_data.tunnels if (layout_data != null and not layout_data.tunnels.is_empty()) else CaveLayout.TUNNELS
+	var chambers_src: Dictionary = layout_data.chambers if (layout_data != null and not layout_data.chambers.is_empty()) else CaveLayout.CHAMBERS
+	var ledge_src: Array = layout_data.ledge_route if (layout_data != null and not layout_data.ledge_route.is_empty()) else CaveLayout.LEDGE_ROUTE
+
 	# 1. Main navigable passages (with bedding-plane lean for non-tubular asymmetry)
-	var leans := {
+	var leans: Dictionary = layout_data.tunnel_leans if (layout_data != null and not layout_data.tunnel_leans.is_empty()) else {
 		"twilight_passage": -0.22,
 		"hall_throat": 0.18,
 		"stream_grotto": -0.20,
@@ -63,7 +68,9 @@ func _compile_primitives() -> void:
 		"door_tunnel": -0.12,
 	}
 	for tname: String in ["twilight_passage", "hall_throat", "stream_grotto", "deep_descent", "lake_tunnel", "lake_shoreline", "door_tunnel"]:
-		var nodes: Array = CaveLayout.TUNNELS[tname]
+		if not tunnels_src.has(tname):
+			continue
+		var nodes: Array = tunnels_src[tname]
 		var lean: float = float(leans.get(tname, 0.04))
 		for i in range(nodes.size() - 1):
 			var a: Dictionary = nodes[i]
@@ -76,19 +83,20 @@ func _compile_primitives() -> void:
 			_seg_count += 1
 
 	# 2. Calibrated Split-Slime Crawlway
-	var cnodes: Array = CaveLayout.TUNNELS["split_crawlway"]
-	for i in range(cnodes.size() - 1):
-		var a: Dictionary = cnodes[i]
-		var b: Dictionary = cnodes[i + 1]
-		var pa: Vector3 = a["p"]
-		var pb: Vector3 = b["p"]
-		var hw := 0.5 * (float(a["w"]) + float(b["w"])) * 0.5
-		var hh := 0.5 * (float(a["h"]) + float(b["h"]))
-		_crawl_data.append_array([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z, hw, hh])
-		_crawl_count += 1
+	if tunnels_src.has("split_crawlway"):
+		var cnodes: Array = tunnels_src["split_crawlway"]
+		for i in range(cnodes.size() - 1):
+			var a: Dictionary = cnodes[i]
+			var b: Dictionary = cnodes[i + 1]
+			var pa: Vector3 = a["p"]
+			var pb: Vector3 = b["p"]
+			var hw := 0.5 * (float(a["w"]) + float(b["w"])) * 0.5
+			var hh := 0.5 * (float(a["h"]) + float(b["h"]))
+			_crawl_data.append_array([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z, hw, hh])
+			_crawl_count += 1
 
 	# 3. Chambers
-	var ch_leans := {
+	var ch_leans: Dictionary = layout_data.chamber_leans if (layout_data != null and not layout_data.chamber_leans.is_empty()) else {
 		"breakdown_fork": -0.15,
 		"collapse_hall": 0.14,
 		"geode_pocket": -0.10,
@@ -96,8 +104,8 @@ func _compile_primitives() -> void:
 		"underground_lake": -0.12,
 		"vault_sanctum": 0.0,
 	}
-	for cname: String in CaveLayout.CHAMBERS:
-		var ch: Dictionary = CaveLayout.CHAMBERS[cname]
+	for cname: String in chambers_src:
+		var ch: Dictionary = chambers_src[cname]
 		var c: Vector3 = ch["c"]
 		_chamb_data.append_array([c.x, c.y, c.z, float(ch["rx"]), float(ch["rz"]), float(ch["h"]), float(ch_leans.get(cname, 0.0))])
 		_chamb_count += 1
@@ -123,21 +131,34 @@ func _compile_primitives() -> void:
 		[-31.0, 10.5, 139.0, 8.2, 5.2, 7.2],  # Expanded Underground Lake NNW grotto cove pocket
 		[-182.0, 5.2, 82.0, 9.0, 6.5, 8.5],  # Vault Sanctum north alcove
 	]
-	for alc: Array in alcoves:
-		_alcove_data.append_array([float(alc[0]), float(alc[1]), float(alc[2]), float(alc[3]), float(alc[4]), float(alc[5])])
-		_alcove_count += 1
+	if layout_data != null and not layout_data.alcoves.is_empty():
+		for alc_d in layout_data.alcoves:
+			if alc_d is Dictionary:
+				var ac: Vector3 = alc_d["c"]
+				_alcove_data.append_array([ac.x, ac.y, ac.z, float(alc_d["rx"]), float(alc_d["ry"]), float(alc_d["rz"])])
+				_alcove_count += 1
+	else:
+		for alc: Array in alcoves:
+			_alcove_data.append_array([float(alc[0]), float(alc[1]), float(alc[2]), float(alc[3]), float(alc[4]), float(alc[5])])
+			_alcove_count += 1
 
 	# 5. Solid Structural Buttresses framing the Collapse Hall nave
 	var pillars := [
 		[-35.0, 74.0, 17.0, 52.0, 4.4, 6.2], # East hall buttress framing Pool bay
 		[-36.5, 59.5, 17.0, 50.0, 4.2, 5.8], # South-east hall shoulder flanking throat (keeps west spiral ledge clear)
 	]
-	for pl: Array in pillars:
-		_pillar_data.append_array([float(pl[0]), float(pl[1]), float(pl[2]), float(pl[3]), float(pl[4]), float(pl[5])])
-		_pillar_count += 1
+	if layout_data != null and not layout_data.pillars.is_empty():
+		for pl_d in layout_data.pillars:
+			if pl_d is Dictionary:
+				_pillar_data.append_array([float(pl_d["u"]), float(pl_d["s"]), float(pl_d["y0"]), float(pl_d["y1"]), float(pl_d["r_bot"]), float(pl_d["r_top"])])
+				_pillar_count += 1
+	else:
+		for pl: Array in pillars:
+			_pillar_data.append_array([float(pl[0]), float(pl[1]), float(pl[2]), float(pl[3]), float(pl[4]), float(pl[5])])
+			_pillar_count += 1
 
 	# 6. Ledge route segments
-	var lpts := CaveLayout.LEDGE_ROUTE
+	var lpts := ledge_src
 	for i in range(lpts.size() - 1):
 		var a: Vector3 = lpts[i]
 		var b: Vector3 = lpts[i + 1]
@@ -183,11 +204,17 @@ static func eval_karst_hill_height(u: float, s: float, base_h: float) -> float:
 
 	# 3. Natural limestone portal brow above Entrance Mouth (thick solid overburden over s = 0..14
 	#    Twilight Passage ceiling before the hillside rises behind it).
-	var du_brow := u / 22.0
-	var ds_brow := (s - 8.5) / 14.0
+	#    Wide, bell-shaped shoulders whose front lip recedes with |u| and whose flanks fall off smoothly,
+	#    so the outcrop reads as one continuous hillside instead of a detached rectangular slab.
+	var du_brow := u / 38.0
+	var ds_brow := (s - 9.0) / 21.0
 	var d2_brow := du_brow * du_brow + ds_brow * ds_brow
 	if d2_brow < 1.0:
-		var brow_w := (1.0 - smoothstep(0.28, 1.0, d2_brow)) * smoothstep(-2.5, 2.5, s)
+		var bell := 1.0 - smoothstep(0.10, 1.0, d2_brow)
+		var lip_recede := smoothstep(4.0, 30.0, absf(u))
+		var front_start := -2.5 + 15.0 * lip_recede
+		var front_ramp := 5.0 + 11.0 * lip_recede
+		var brow_w := bell * smoothstep(front_start, front_start + front_ramp, s)
 		var mouth_opening := (1.0 - smoothstep(4.2, 6.8, absf(u))) * (1.0 - smoothstep(-3.5, 0.2, s))
 		brow_w *= (1.0 - mouth_opening)
 		var asym := 0.8 * sin(u * 0.25) * cos(s * 0.20)
@@ -213,14 +240,13 @@ static func is_quad_in_cave_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v11
 	if cl.x < -235.0 or cl.x > 85.0 or cl.z < -45.0 or cl.z > 245.0:
 		return false
 
-	# A. Entrance Mouth Arch cutout: matched to mouth surface patch boundary
-	if eval_mouth_patch_t(cl.x, cl.z) < 0.66:
+	# A. Skylight Rim + Spiral Ledge exit ramp cutout (matched to eval_sky_patch_t < 0.60)
+	if eval_sky_patch_t(cl.x, cl.z) < 0.60:
 		return true
 
-	# B. Skylight Rim cutout (radius < 10.7 m around (-62.8, 68.0) removes overhanging terrain sawteeth)
-	var sky_c_cut: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var ds: float = Vector2(cl.x - (sky_c_cut.x - 0.8), cl.z - sky_c_cut.z).length()
-	if ds < 10.7:
+	# B. Entrance Mouth Arch cutout: matched to mouth surface patch boundary (0.64)
+	# so uncut Terrain overlaps CaveShell's flush 0.62..0.74 collar with zero gap.
+	if eval_mouth_patch_t(cl.x, cl.z) < 0.64:
 		return true
 
 	return false
@@ -228,22 +254,38 @@ static func is_quad_in_cave_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v11
 
 static func is_in_overworld_scatter_exclusion(wx: float, wz: float, is_grass: bool = false) -> bool:
 	var p := CaveLayout.to_local(Vector3(wx, 0.0, wz))
-	# Keep random overworld trees/boulders/grass off the Entrance Outcrop rock & mouth plaza
-	if p.z > -18.0 and p.z < 28.0 and absf(p.x) < 22.0:
-		return true
-	# Clear a tapered rocky trail & camera sightline corridor in front of the mouth so grass frames the path cleanly
-	if p.z >= -38.0 and p.z <= -18.0:
-		var t_trail := clampf((-18.0 - p.z) / 20.0, 0.0, 1.0)
-		var half_w := lerpf(13.5, 8.5, t_trail) if is_grass else 9.0
-		if absf(p.x) < half_w:
+	if is_grass:
+		# Grass avoids the cave mouth rock floor and a narrow footpath leading in,
+		# while growing lushly right up to the rock arch flanks and brow!
+		if p.z >= -4.0 and p.z <= 10.0 and absf(p.x) < 5.0:
 			return true
+		if p.z >= -18.0 and p.z < -4.0 and absf(p.x) < 2.8:
+			return true
+	else:
+		# Keep random overworld trees/boulders off the Entrance Outcrop rock & mouth plaza.
+		var box_half_u := 22.0
+		var box_s_min := -18.0
+		var box_s_max := 28.0
+		if p.z > box_s_min and p.z < box_s_max and absf(p.x) < box_half_u:
+			return true
+		# Clear a narrow rocky trail in front of the mouth (trees/boulders keep a wider sightline corridor)
+		if p.z >= -38.0 and p.z <= box_s_min:
+			var t_trail := clampf((box_s_min - p.z) / (box_s_min + 38.0), 0.0, 1.0)
+			var half_w := 9.0
+			if absf(p.x) < half_w:
+				return true
+
 	# Keep random trees/grass/vegetation out of the Skylight opening, rock collar, and Spiral Ledge exit ramp
-	var sky_c_ex: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var ds: float = Vector2(p.x - sky_c_ex.x, p.z - sky_c_ex.z).length()
-	if ds < (13.8 if is_grass else 16.5):
-		return true
-	if p.x > -65.0 and p.x < -45.0 and p.z > 61.0 and p.z < 77.0:
-		return true
+	if is_grass:
+		if eval_sky_patch_t(p.x, p.z) < 0.60:
+			return true
+	else:
+		var sky_c_ex: Vector3 = CaveLayout.SKYLIGHT["c"]
+		var ds: float = Vector2(p.x - sky_c_ex.x, p.z - sky_c_ex.z).length()
+		if ds < 16.5:
+			return true
+		if p.x > -65.0 and p.x < -45.0 and p.z > 61.0 and p.z < 77.0:
+			return true
 	return false
 
 
@@ -564,8 +606,8 @@ func eval_cave_void_smooth(u: float, y: float, s: float) -> float:
 	# 6. Flared Cenote Skylight Chimney (punches from Collapse Hall dome straight through karst roof)
 	if y > 36.0:
 		var sky_c_ch: Vector3 = CaveLayout.SKYLIGHT["c"]
-		var sky_r: float = float(CaveLayout.SKYLIGHT["r"]) + smoothstep(46.0, 58.0, y) * 2.2
-		var sky_u: float = u - sky_c_ch.x + (y - 48.0) * 0.12
+		var sky_r: float = float(CaveLayout.SKYLIGHT["r"]) + smoothstep(46.0, 58.0, y) * 1.3
+		var sky_u: float = u - (sky_c_ch.x - 0.8 * smoothstep(46.0, 56.0, y)) + (y - 48.0) * 0.04
 		var sky_s: float = s - sky_c_ch.z
 		var d_sky_cyl := maxf(Vector2(sky_u, sky_s).length() - sky_r, 38.0 - y)
 		d = smin(d, d_sky_cyl, 2.4)
@@ -635,7 +677,9 @@ static func eval_mouth_patch_t(u: float, s: float) -> float:
 
 static func eval_sky_patch_t(u: float, s: float) -> float:
 	var sky_c_pt: Vector3 = CaveLayout.SKYLIGHT["c"]
-	return Vector2(u - (sky_c_pt.x - 0.8), s - sky_c_pt.z).length() / 18.0
+	var d_sky := Vector2(u - (sky_c_pt.x - 0.8), s - sky_c_pt.z).length() / 18.0
+	var d_exit := Vector2(u - (-53.0), s - 70.0).length() / 10.5
+	return minf(d_sky, d_exit)
 
 
 ## Normalized distance (< 1.0 inside the Entrance Outcrop or Skylight Rim surface patches).
@@ -649,12 +693,19 @@ func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 	var d_cave := eval_cave_void_smooth(u, y, s)
 
 	# Continuous union of subterranean cave air and open sky air at Entrance & Skylight surface patches.
-	# Stays 100% flush past cutout quad boundaries (patch_t <= 0.68), then tucks smoothly
-	# beneath uncut Terrain triangles (0.68..0.88). Zero discontinuous sky_off spikes!
+	# Holds a slight +0.04m collar across the cutout edge (0.56..0.70) so Terrain never hovers above CaveShell,
+	# then tucks cleanly beneath Terrain across 0.70..0.94.
 	var patch_t := eval_surface_patch_t(u, s)
-	var skirt_drop := smoothstep(0.68, 0.88, patch_t) * 3.80
+	var rim_collar := 0.04 * smoothstep(0.52, 0.60, patch_t) * (1.0 - smoothstep(0.68, 0.76, patch_t))
+	var skirt_drop := smoothstep(0.70, 0.94, patch_t) * 3.80 - rim_collar
 	var d_sky_air := (karst_h - skirt_drop) - y # < 0 above ground (air), > 0 underground (rock)
-	var d := smin(d_cave, d_sky_air, 2.0)
+	# Keep smin k tight around the entire Entrance Rim, mouth floor, and Skylight Rim so rims stay flush with terrain
+	var mouth_floor_w := (1.0 - smoothstep(-1.5, 2.5, s)) * (1.0 - smoothstep(28.0, 30.5, y))
+	var mouth_pt := eval_mouth_patch_t(u, s)
+	var mouth_rim_w := smoothstep(0.45, 0.58, mouth_pt) * (1.0 - smoothstep(0.72, 0.88, mouth_pt))
+	var sky_rim_w := smoothstep(44.0, 51.0, y) * (1.0 - smoothstep(0.42, 0.72, eval_sky_patch_t(u, s)))
+	var k_union := lerpf(2.0, 0.18, maxf(maxf(mouth_floor_w, mouth_rim_w), sky_rim_w * 0.92))
+	var d := smin(d_cave, d_sky_air, k_union)
 
 	# Skip expensive 3D noise far from the zero-isosurface
 	if absf(d) > 3.2:

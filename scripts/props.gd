@@ -49,6 +49,7 @@ var _rng := RandomNumberGenerator.new()
 var _prop_root: Node3D
 var _floor_mat: ShaderMaterial
 var _floor_body: StaticBody3D
+var _body_to_prop := {}
 ## Props currently being digested by a slime (typically 0-2). Uniform updates and
 ## the digestion pass only visit these instead of scanning the whole ecosystem.
 var active_eating_props: Array[PropData] = []
@@ -74,6 +75,10 @@ var _solid_dir_buf := PackedVector3Array()
 var _blob_pos_buf := PackedVector3Array()
 var _blob_scale_buf := PackedFloat32Array()
 var _floor_param_cache := {}
+var _nearby_scratch: Array[PropData] = []
+var _top_props: Array[PropData] = []
+var _top_dists: PackedFloat32Array = PackedFloat32Array()
+var _top_normals: PackedVector3Array = PackedVector3Array()
 
 
 class PropData extends RefCounted:
@@ -111,6 +116,10 @@ class PropData extends RefCounted:
 	var absorbed_mass := 0.0
 	var real_volume := 0.0
 	var engulf_front := 0.0
+	var duplicate_mat_on_eat := false
+	var no_passage_pair := false
+	var use_equiv_dim := false
+	var external_group := &""
 
 	func _poly_area(r: float) -> float:
 		if sides >= 3 and sides < 12:
@@ -152,9 +161,7 @@ func _ready() -> void:
 	if floor_mesh:
 		_floor_mat = floor_mesh.material_override as ShaderMaterial
 
-	_prop_root = Node3D.new()
-	_prop_root.name = "Generated"
-	add_child(_prop_root)
+	_ensure_prop_root()
 
 	_add_floor_collider()
 	# Test structures first so random props never block the gate or bridge.
@@ -547,6 +554,96 @@ func _attach_collider(p: PropData) -> void:
 	body.add_child(cs)
 	p.body = body
 	p.collider = cs
+	_body_to_prop[body] = p
+
+
+func _ensure_prop_root() -> Node3D:
+	if _prop_root == null or not is_instance_valid(_prop_root):
+		_prop_root = get_node_or_null("Generated") as Node3D
+		if _prop_root == null:
+			_prop_root = Node3D.new()
+			_prop_root.name = "Generated"
+			add_child(_prop_root)
+	return _prop_root
+
+
+func register_external_prop(
+	mi: MeshInstance3D,
+	mat: ShaderMaterial,
+	p_shape: int,
+	half_ext: Vector3,
+	p_base_r: float,
+	p_sides: int,
+	volume_override: float = -1.0,
+	add_to_total: bool = true,
+	group_tag: StringName = &"",
+	duplicate_mat_on_eat: bool = true,
+	equiv_dim: bool = true,
+	no_passage: bool = true
+) -> PropData:
+	if mi == null or not is_instance_valid(mi):
+		return null
+	var root := _ensure_prop_root()
+	if mi.get_parent() != root:
+		var saved_xf := mi.global_transform
+		if mi.get_parent() != null:
+			mi.get_parent().remove_child(mi)
+		root.add_child(mi)
+		mi.global_transform = saved_xf
+	var p := PropData.new()
+	p.is_static = false
+	p.shape = p_shape
+	p.half = half_ext
+	p.base_r = p_base_r
+	p.sides = p_sides
+	var sc := mi.scale
+	var h_w := half_ext * sc
+	p.radius = maxf(h_w.x, maxf(h_w.y, h_w.z))
+	p.fp = Vector2(h_w.x, h_w.z).length()
+	p.material = mat
+	p.duplicate_mat_on_eat = duplicate_mat_on_eat
+	p.no_passage_pair = no_passage
+	p.use_equiv_dim = equiv_dim
+	p.external_group = group_tag
+	p.mesh = mi
+	p.base_scale = mi.scale
+	if volume_override > 0.0:
+		p.real_volume = volume_override
+		p.total_mass = volume_override
+	else:
+		p.calc_real_volume()
+	_attach_collider(p)
+	props.append(p)
+	_grid_insert(p)
+	if add_to_total:
+		_spawned_total += 1
+	return p
+
+
+func clear_external_group(group_tag: StringName) -> void:
+	for i in range(props.size() - 1, -1, -1):
+		var p: PropData = props[i]
+		if p.external_group != group_tag:
+			continue
+		_grid_remove(p)
+		if p.body != null:
+			_body_to_prop.erase(p.body)
+		if p.eater != null and is_instance_valid(p.eater):
+			p.eater.inside_props.erase(p)
+		active_eating_props.erase(p)
+		for idx in range(_candidate_passage_pairs.size() - 1, -1, -1):
+			var pair: Dictionary = _candidate_passage_pairs[idx]
+			if pair["a"] == p or pair["b"] == p:
+				_candidate_passage_pairs.remove_at(idx)
+		if p.mesh != null and is_instance_valid(p.mesh):
+			p.mesh.queue_free()
+		p.mesh = null
+		p.body = null
+		p.collider = null
+		p.material = null
+		props.remove_at(i)
+		if p.state == STATE_IDLE and _spawned_total > 0:
+			_spawned_total -= 1
 
 
 func _set_prop_solid(p: PropData, solid: bool) -> void:
@@ -567,7 +664,7 @@ func rebuild_grid() -> void:
 func rebuild_passage_pairs() -> void:
 	var idle: Array[PropData] = []
 	for p in props:
-		if p.state == STATE_IDLE and p.mesh != null and is_instance_valid(p.mesh):
+		if p.state == STATE_IDLE and not p.no_passage_pair and p.mesh != null and is_instance_valid(p.mesh):
 			idle.append(p)
 	_candidate_passage_pairs.clear()
 	for i in idle.size():
@@ -607,9 +704,9 @@ func _grid_remove(p: PropData) -> void:
 		bucket.erase(p)
 
 
-## Idle props whose centre lies within `radius` of the given ground-plane point.
-func query_nearby_props(xz: Vector2, radius: float) -> Array[PropData]:
-	var out: Array[PropData] = []
+## Populates `out` with idle props whose centre lies within `radius` of `xz` without allocating.
+func query_nearby_props_into(xz: Vector2, radius: float, out: Array[PropData]) -> void:
+	out.clear()
 	var r2 := radius * radius
 	var x0 := floori((xz.x - radius) / GRID_CELL)
 	var x1 := floori((xz.x + radius) / GRID_CELL)
@@ -628,6 +725,12 @@ func query_nearby_props(xz: Vector2, radius: float) -> Array[PropData]:
 				var dz := m.global_position.z - xz.y
 				if dx * dx + dz * dz <= r2:
 					out.append(p)
+
+
+## Idle props whose centre lies within `radius` of the given ground-plane point.
+func query_nearby_props(xz: Vector2, radius: float) -> Array[PropData]:
+	var out: Array[PropData] = []
+	query_nearby_props_into(xz, radius, out)
 	return out
 
 
@@ -647,10 +750,9 @@ func rids_edible_by(s: Slime) -> Array[RID]:
 
 
 func _prop_of_body(body: Object) -> PropData:
-	for p in props:
-		if p.body == body:
-			return p
-	return null
+	if body == null:
+		return null
+	return _body_to_prop.get(body, null)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -882,6 +984,9 @@ func _prop_size_ratio(s: Slime, p: PropData) -> float:
 	var S := maxf(s.model.scale, 1e-4)
 	var he := _half_of(p)
 	var prop_max_dim := 2.0 * maxf(he.x, maxf(he.y, he.z))
+	if p.use_equiv_dim:
+		var eq_dim := 2.0 * pow(maxf(he.x * he.y * he.z, 1e-6), 1.0 / 3.0)
+		prop_max_dim = lerpf(eq_dim, prop_max_dim, 0.5)
 	var slime_h := s.model.rest_full_height * S
 	var dim_ratio := prop_max_dim / maxf(slime_h, 1e-4)
 	var vol_ratio := p.real_volume / maxf(1e-4, s.get_volume())
@@ -905,10 +1010,14 @@ func _begin_eating(p: PropData, s: Slime) -> void:
 	p.last_presser = null
 	p.base_scale = p.mesh.scale
 	p.t = 0.0
-	p.start = p.mesh.position
+	p.start = p.mesh.global_position
 	p.off = Vector3(_rng.randf() - 0.5, -0.1 + _rng.randf() * 0.3, _rng.randf() - 0.5)
 	p.total_mass = p.real_volume
 	p.absorbed_mass = 0.0
+	if p.duplicate_mat_on_eat and p.material != null and is_instance_valid(p.material):
+		p.material = p.material.duplicate() as ShaderMaterial
+		p.mesh.material_override = p.material
+		p.duplicate_mat_on_eat = false
 	_set_prop_solid(p, false)
 	active_eating_props.append(p)
 	_grid_remove(p)
@@ -1322,9 +1431,10 @@ func _update_digesting_props(dt: float) -> void:
 		var k := minf(p.t / tuning.eat_time, 1.0)
 		var e := k * k * (3.0 - 2.0 * k)
 		var dis := maxf(0.0, 1.0 - maxf(0.0, p.t - tuning.eat_time) / tuning.eat_linger)
-		var shrink := maxf(0.001, (1.0 - 0.35 * e) * (0.65 + 0.35 * dis))
 		if mesh_ok:
-			p.mesh.scale = p.base_scale * shrink
+			# Objects keep their full size while being absorbed (no scale shrink);
+			# they only travel into the belly and dissolve via uDissolve.
+			p.mesh.scale = p.base_scale
 			if p.material != null and is_instance_valid(p.material):
 				p.material.set_shader_parameter("uDissolve", 1.0 - dis)
 			p.mesh.rotation.y += dt * 0.4
@@ -1343,7 +1453,7 @@ func _update_digesting_props(dt: float) -> void:
 			if p.t < tuning.eat_time:
 				if mesh_ok:
 					var target_in_belly: Vector3 = s.model.center() + p.off * (s.model.scale * 0.70)
-					p.mesh.position = p.start.lerp(target_in_belly, e)
+					p.mesh.global_position = p.start.lerp(target_in_belly, e)
 				p.vel = Vector3.ZERO
 			else:
 				if not s.inside_props.has(p):
@@ -1356,6 +1466,8 @@ func _update_digesting_props(dt: float) -> void:
 				player_slime.inside_props.erase(p)
 			if p.mesh != null and is_instance_valid(p.mesh):
 				p.mesh.queue_free()
+			if p.body != null:
+				_body_to_prop.erase(p.body)
 			# Drop every reference now: the node is only freed at the end of the frame,
 			# and a state entry pointing at a freed mesh is worse than no entry at all.
 			p.mesh = null
@@ -1375,27 +1487,29 @@ func _update_inside_props(s: Slime, dt: float) -> void:
 			continue
 		p.vel.y -= 7.0 * dt
 		p.vel *= exp(-2.0 * dt)
-		p.mesh.position += p.vel * dt
-
 		var m: MeshInstance3D = p.mesh
+		m.global_position += p.vel * dt
+
 		var he: Vector3 = _half_of(p)
 		var rr: float = maxf(maxf(he.x, he.y), he.z) * 0.8
 		var rh: float = maxf(0.15, maxf(s.model.semi_a, s.model.semi_b) * 0.8 - rr)
 		var rv: float = maxf(0.15, s.model.full_height * 0.45 - rr)
-		var l: Vector3 = m.position - center
+		var l: Vector3 = m.global_position - center
 		var qx: float = l.x / rh
 		var qy: float = l.y / rv
 		var qz: float = l.z / rh
 		var ql: float = sqrt(qx * qx + qy * qy + qz * qz)
 		if ql > 1.0:
-			m.position = center + l / ql
+			m.global_position = center + l / ql
 			var n: Vector3 = Vector3(qx / rh, qy / rv, qz / rh).normalized()
 			var vn: float = p.vel.dot(n)
 			if vn > 0.0:
 				p.vel -= n * vn * 1.4
 
-		if m.position.y < tuning.floor_y + he.y:
-			m.position.y = tuning.floor_y + he.y
+		var floor_limit := maxf(tuning.floor_y, s.model.foot.y)
+		var belly_he_y := minf(he.y, s.model.full_height * 0.32)
+		if m.global_position.y < floor_limit + belly_he_y:
+			m.global_position.y = floor_limit + belly_he_y
 			if p.vel.y < 0.0:
 				p.vel.y *= -0.2
 
@@ -1406,28 +1520,33 @@ func _update_inside_props(s: Slime, dt: float) -> void:
 
 func _update_eat_uniforms(s: Slime, dt: float) -> void:
 	s.press_amt = lerpf(s.press_amt, 0.0, 1.0 - exp(-15.0 * dt))
-	s.set_shader_param("uPressAmt", s.press_amt)
+	s.set_shader_param(&"uPressAmt", s.press_amt)
 	s.calm = lerpf(s.calm, 0.0, 1.0 - exp(-12.0 * dt))
+
+
+func _ensure_solid_cand_buffers() -> void:
+	if _top_props.size() < 8:
+		_top_props.resize(8)
+		_top_dists.resize(8)
+		_top_normals.resize(8)
 
 
 func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 	if s.model == null:
 		return
+	if use_visual_body:
+		_update_solid_uniforms_visual(s)
+		return
+	_ensure_solid_cand_buffers()
 	var S := maxf(s.model.scale, 1e-4)
-	if use_visual_body and s.body != null:
-		S = maxf(s.slime_scale * s.body.scale.x, 1e-4)
-	var sp := s.body.global_position if (use_visual_body and s.body != null) else s.global_position
+	var sp := s.global_position
 	var foot_y := sp.y - s.model.rest_half_height * S
 	var top_y := foot_y + s.model.rest_full_height * S
-	for i in 8:
-		_solid_pos_buf[i] = Vector3.ZERO
-		_solid_param_buf[i] = Vector3.ZERO
-		_solid_half_buf[i] = Vector3(0.01, 0.01, 0.01)
-		_solid_dir_buf[i] = Vector3.ZERO
-
 	var vis_r := s.model.rest_max_radius * S * s.model.spread
-	var candidates: Array = []
-	for p in query_nearby_props(Vector2(sp.x, sp.z), vis_r + 5.0):
+
+	query_nearby_props_into(Vector2(sp.x, sp.z), vis_r + 5.0, _nearby_scratch)
+	var count := 0
+	for p in _nearby_scratch:
 		if p.state != STATE_IDLE or p.mesh == null or not is_instance_valid(p.mesh):
 			continue
 		var he := _half_of(p)
@@ -1437,35 +1556,79 @@ func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 		var cn := _closest_and_normal(p, Vector3(sp.x, m.y, sp.z))
 		var pt: Vector3 = cn["point"]
 		var surf_dist := Vector2(pt.x - sp.x, pt.z - sp.z).length()
-		if surf_dist <= vis_r + 0.12:
-			candidates.append({"prop": p, "dist": surf_dist, "cn": cn})
-
-	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["dist"]) < float(b["dist"]))
-	var count := mini(candidates.size(), 8)
-	for i in count:
-		var entry: Dictionary = candidates[i]
-		var p: PropData = entry["prop"]
-		var surf_dist: float = entry["dist"]
-		var cn: Dictionary = entry["cn"]
+		if surf_dist > vis_r + 0.12:
+			continue
 		var n_out: Vector3 = cn["normal"]
-		var m := p.mesh.global_position
-		_solid_pos_buf[i] = (m - sp) / S
-		_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
-		var weight := clampf((vis_r + 0.10 - surf_dist) / 0.10, 0.0, 1.0)
-		if is_edible_by_push(s, p) and p.last_presser == s and p.engulf_front > 0.01:
-			weight *= clampf(1.0 - pow(p.engulf_front, 1.5) * 0.85, 0.15, 1.0)
-		_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
-		_solid_half_buf[i] = _box_half(p, S)
+		if count < 8 or surf_dist < _top_dists[7]:
+			var ins := mini(count, 7)
+			while ins > 0 and surf_dist < _top_dists[ins - 1]:
+				_top_props[ins] = _top_props[ins - 1]
+				_top_dists[ins] = _top_dists[ins - 1]
+				_top_normals[ins] = _top_normals[ins - 1]
+				ins -= 1
+			_top_props[ins] = p
+			_top_dists[ins] = surf_dist
+			_top_normals[ins] = n_out
+			if count < 8:
+				count += 1
 
-	if s._mat != null:
-		s._mat.set_shader_parameter("uSolidPos", _solid_pos_buf)
-		s._mat.set_shader_parameter("uSolidParam", _solid_param_buf)
-		s._mat.set_shader_parameter("uSolidHalf", _solid_half_buf)
-		s._mat.set_shader_parameter("uSolidDir", _solid_dir_buf)
+	s._solid_dent_props.clear()
+	for i in count:
+		s._solid_dent_props.append(_top_props[i])
+
+	var had_solids := bool(s.get_meta(&"_solid_dirty", true))
+	if count == 0 and not had_solids:
+		return
+	s.set_meta(&"_solid_dirty", count > 0)
+	if s._mat == null:
+		return
+	s._mat.set_shader_parameter(&"uActiveSolidCount", count)
+	if count == 0:
+		return
+
+	for i in 8:
+		if i < count:
+			var p: PropData = _top_props[i]
+			var surf_dist: float = _top_dists[i]
+			var n_out: Vector3 = _top_normals[i]
+			var m := p.mesh.global_position
+			_solid_pos_buf[i] = (m - sp) / S
+			_solid_dir_buf[i] = Vector3(-n_out.x, 0.0, -n_out.z)
+			var weight := clampf((vis_r + 0.10 - surf_dist) / 0.10, 0.0, 1.0)
+			if is_edible_by_push(s, p) and p.last_presser == s and p.engulf_front > 0.01:
+				weight *= clampf(1.0 - pow(p.engulf_front, 1.5) * 0.85, 0.15, 1.0)
+			_solid_param_buf[i] = Vector3(float(p.shape) + p.sides * 0.01, weight, p.mesh.rotation.y + p.phase)
+			_solid_half_buf[i] = _box_half(p, S)
+		else:
+			_solid_pos_buf[i] = Vector3.ZERO
+			_solid_param_buf[i] = Vector3.ZERO
+			_solid_half_buf[i] = Vector3(0.01, 0.01, 0.01)
+			_solid_dir_buf[i] = Vector3.ZERO
+
+	s._mat.set_shader_parameter(&"uSolidPos", _solid_pos_buf)
+	s._mat.set_shader_parameter(&"uSolidParam", _solid_param_buf)
+	s._mat.set_shader_parameter(&"uSolidHalf", _solid_half_buf)
+	s._mat.set_shader_parameter(&"uSolidDir", _solid_dir_buf)
+
+
+func _update_solid_uniforms_visual(s: Slime) -> void:
+	if s.model == null or s._mat == null or s._solid_dent_props.is_empty():
+		return
+	var S := maxf(s.slime_scale * s.body.scale.x, 1e-4) if s.body != null else maxf(s.model.scale, 1e-4)
+	var sp := s.body.global_position if s.body != null else s.global_position
+	var count := mini(s._solid_dent_props.size(), 8)
+	var valid_count := 0
+	for i in count:
+		var p: PropData = s._solid_dent_props[i]
+		if p != null and p.state == STATE_IDLE and p.mesh != null and is_instance_valid(p.mesh):
+			_solid_pos_buf[valid_count] = (p.mesh.global_position - sp) / S
+			valid_count += 1
+	if valid_count > 0:
+		s._mat.set_shader_parameter(&"uSolidPos", _solid_pos_buf)
 
 
 func _update_floor_shadows() -> void:
-	if _floor_mat == null:
+	if _floor_mat == null or floor_mesh == null or not floor_mesh.visible:
 		return
 	var candidates: Array[Slime] = []
 	for s in registered_slimes:
@@ -1508,7 +1671,7 @@ func _set_floor_param(param: StringName, value: Variant) -> void:
 # ------------------------------------------------------------------------------------------------
 
 func _half_of(p: PropData) -> Vector3:
-	return p.half * p.mesh.scale.x
+	return p.half * p.mesh.scale
 
 
 func _poly_support_local(p: PropData, ux: float, uz: float) -> float:

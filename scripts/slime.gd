@@ -102,6 +102,15 @@ var contact_r := 2.15
 var impact_dir := Vector3(0.0, 0.0, 1.0)
 var press_amt := 0.0
 
+# Jump & charge-hold state.
+var is_charging_jump := false
+var jump_charge := 0.0
+var _coyote_timer := 0.0
+var _jump_buffer_timer := 0.0
+var _air_leap_active := false
+var _ai_hop_block_timer := 0.0
+var _ai_hop_cooldown := 0.0
+
 # Last passage hint from the ecosystem (hint only; posture is query-validated).
 var cur_gap_center := Vector2.ZERO
 var cur_gap_w := INF
@@ -114,9 +123,33 @@ var passage_state: PassageState = PassageState.OPEN
 var _passage_session: Dictionary = {}
 var _passage_cooldown := 0.0
 
+const SN_IMPULSE_TIME := &"uImpulseTime"
+const SN_IMPULSE2_TIME := &"uImpulse2Time"
+const SN_IMPULSE2_POS := &"uImpulse2Pos"
+const SN_IMPULSE2_VECTOR := &"uImpulse2Vector"
+const SN_MOVE_DIR := &"uMoveDir"
+const SN_MOVE_AMT := &"uMoveAmt"
+const SN_CRAWL := &"uCrawl"
+const SN_LEAN := &"uLean"
+const SN_SPLAT := &"uSplat"
+const SN_SPREAD := &"uSpread"
+const SN_RIPPLE_INTENSITY := &"uRippleIntensity"
+const SN_FACING := &"uFacing"
+const SN_BLINK := &"uBlink"
+const SN_LIQUID := &"uLiquid"
+const SN_LIQUID_HEIGHT := &"uLiquidHeight"
+const SN_LIQUID_SPREAD := &"uLiquidSpread"
+const SN_SQUEEZE_DIR := &"uSqueezeDir"
+const SN_SKIN_LOCAL := &"uSkinLocal"
+const SN_WATER_SUBMERSION := &"uWaterSubmersion"
+const SN_WATER_Y := &"uWaterY"
+const SN_WETNESS := &"uWetness"
+const SN_WATER_VEL := &"uWaterVel"
+
 # Engulf drape state.
 var engulf_target = null
 var engulf_progress := 0.0
+var _solid_dent_props: Array = []
 
 # ---- Fission (budding split) animation state ----
 var is_fissioning := false
@@ -556,6 +589,8 @@ static func _lod_mesh(level: int) -> SphereMesh:
 	return _lod_meshes[clampi(level, 0, _lod_meshes.size() - 1)]
 
 
+var force_low_lod: bool = false
+
 ## Clones far from the camera (or too small to matter) drop to the low-poly mesh
 ## and the cheap fragment path. Re-evaluated twice a second, not per tick.
 func _update_lod(dt: float) -> void:
@@ -566,7 +601,9 @@ func _update_lod(dt: float) -> void:
 		return
 	_lod_timer = 0.5
 	var level := 0
-	if role != Role.PLAYER:
+	if force_low_lod:
+		level = 1
+	elif role != Role.PLAYER:
 		var cam := get_viewport().get_camera_3d()
 		var far := cam == null or cam.global_position.distance_to(global_position) > lod_far_distance
 		if far or slime_scale < lod_small_scale:
@@ -623,19 +660,24 @@ func _reset_array_uniforms() -> void:
 	for i in 8:
 		zeros8.append(Vector3.ZERO)
 		small8.append(Vector3(0.01, 0.01, 0.01))
-	set_shader_param("uEatPos", zeros6)
-	set_shader_param("uEatParam", zeros6)
-	set_shader_param("uBoxHalf", small6)
-	set_shader_param("uSolidPos", zeros8)
-	set_shader_param("uSolidParam", zeros8)
-	set_shader_param("uSolidHalf", small8)
-	set_shader_param("uSolidDir", zeros8)
-	set_shader_param("uDrapeAmt", 0.0)
-	set_shader_param("uSplitAmt", 0.0)
-	set_shader_param("uSplitNeckRadius", 0.0)
-	set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
-	set_shader_param("uSqueeze", 0.0)
-	set_shader_param("uGapLocal", Vector3.ZERO)
+	set_shader_param(&"uEatPos", zeros6)
+	set_shader_param(&"uEatParam", zeros6)
+	set_shader_param(&"uBoxHalf", small6)
+	set_shader_param(&"uActiveEatCount", 0)
+	set_shader_param(&"uSolidPos", zeros8)
+	set_shader_param(&"uSolidParam", zeros8)
+	set_shader_param(&"uSolidHalf", small8)
+	set_shader_param(&"uSolidDir", zeros8)
+	set_shader_param(&"uActiveSolidCount", 0)
+	set_shader_param(&"uDrapeAmt", 0.0)
+	set_shader_param(&"uSplitAmt", 0.0)
+	set_shader_param(&"uSplitNeckRadius", 0.0)
+	set_shader_param(&"uSplitPartnerLocal", Vector3.ZERO)
+	set_shader_param(&"uSqueeze", 0.0)
+	set_shader_param(&"uSqueezeLat", 1.0)
+	set_shader_param(&"uSqueezeLong", 1.0)
+	set_shader_param(&"uSqueezeHeight", 1.0)
+	set_shader_param(&"uGapLocal", Vector3.ZERO)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -786,8 +828,8 @@ func trigger_poke(local_point: Vector3, impulse: Vector3) -> void:
 func trigger_poke2(local_point: Vector3, impulse: Vector3) -> void:
 	_impulse2_time = 0.001
 	if _mat:
-		set_shader_param("uImpulse2Pos", local_point)
-		set_shader_param("uImpulse2Vector", impulse)
+		set_shader_param(SN_IMPULSE2_POS, local_point)
+		set_shader_param(SN_IMPULSE2_VECTOR, impulse)
 
 
 ## Dirty-checked uniform write. Idle and walking frames re-send almost the same
@@ -886,8 +928,8 @@ func _process(_delta: float) -> void:
 	# The node already applies slime_scale; undo it on the child so the total visual
 	# scale is exactly the interpolated one and never compounds between ticks.
 	body.basis = Basis(rot_q).orthonormalized().scaled(Vector3.ONE * (s / maxf(slime_scale, 1e-4)))
-	if props != null and not _is_sleeping:
-		props._update_solid_uniforms(self, true)
+	if props != null and not _is_sleeping and not _solid_dent_props.is_empty():
+		props._update_solid_uniforms_visual(self)
 
 
 func _physics_process(delta: float) -> void:
@@ -899,8 +941,8 @@ func _physics_process(delta: float) -> void:
 
 	var dt := delta
 	_time += dt
-	_impulse_time += dt
-	_impulse2_time += dt
+	_impulse_time = minf(_impulse_time + dt, 4.0)
+	_impulse2_time = minf(_impulse2_time + dt, 4.0)
 	# Cleared once per tick so posture/growth reasons survive until presentation.
 	expansion_blocked = ""
 
@@ -955,13 +997,36 @@ func _physics_process(delta: float) -> void:
 		return
 	motor.want_run_swim = (role == Role.PLAYER and Input.is_action_pressed("run") and desired.length_squared() > 0.01)
 	motor.update_water_state(dt, _is_subterranean_for_water())
+	if motor.on_ground or motor.in_water:
+		_air_leap_active = false
+	if role == Role.PLAYER:
+		desired = _tick_player_jump(dt, desired)
 	if motor.water_submersion > 0.02:
 		desired *= lerpf(1.0, 0.78, motor.water_submersion)
 		desired += motor.water_flow_vel * clampf(motor.water_submersion * 1.4, 0.25, 1.0)
 	var v_resp := tuning.velocity_response
-	if motor.in_water:
-		v_resp = lerpf(v_resp, 5.2, motor.water_submersion)
-	motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
+	if motor.just_jumped:
+		pass
+	elif not motor.on_ground and not motor.in_water and _air_leap_active:
+		# Preserve ballistic arc momentum while airborne; allow gentle mid-air steering or reverse braking.
+		var cur_spd := Vector2(motor.velocity.x, motor.velocity.z).length()
+		if desired.length_squared() > 0.01 and cur_spd > 0.1:
+			var desired_h := Vector3(desired.x, 0.0, desired.z)
+			var cur_h := Vector3(motor.velocity.x, 0.0, motor.velocity.z)
+			if desired_h.dot(cur_h) < 0.0:
+				motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * tuning.jump_air_control * dt))
+			else:
+				var target_dir := desired_h.normalized()
+				var steered_dir := cur_h.normalized().lerp(target_dir, 1.0 - exp(-3.5 * tuning.jump_air_control * dt)).normalized()
+				var target_spd := maxf(cur_spd, desired_h.length())
+				motor.velocity.x = steered_dir.x * target_spd
+				motor.velocity.z = steered_dir.z * target_spd
+	else:
+		if motor.in_water:
+			v_resp = lerpf(v_resp, 5.2, motor.water_submersion)
+		elif not motor.on_ground:
+			v_resp *= tuning.jump_air_control
+		motor.velocity = motor.velocity.lerp(desired, 1.0 - exp(-v_resp * dt))
 	pre_move_velocity = motor.velocity
 	_update_scale(dt)
 	_resolve_posture(dt)
@@ -969,6 +1034,16 @@ func _physics_process(delta: float) -> void:
 
 	motor.recover_overlap()
 	motor.move_horizontal(Vector3(motor.velocity.x, 0.0, motor.velocity.z) * dt)
+	if role != Role.PLAYER:
+		_ai_hop_cooldown = maxf(0.0, _ai_hop_cooldown - dt)
+		if desired.length_squared() > 0.25 and motor.last_sweep_fraction < 0.25 and (motor.on_ground or motor.in_water):
+			_ai_hop_block_timer += dt
+			if _ai_hop_block_timer >= 0.18 and _ai_hop_cooldown <= 0.0:
+				_ai_hop_block_timer = 0.0
+				_ai_hop_cooldown = 1.2
+				_execute_jump(0.0, desired)
+		else:
+			_ai_hop_block_timer = 0.0
 	motor.update_support()
 	motor.move_vertical(dt, target_scale)
 	motor.recover_overlap()
@@ -1019,6 +1094,26 @@ func _tick_ocean_boundary(dt: float) -> void:
 			_sea_warned = false
 
 
+func apply_combat_hit(volume_loss: float, impulse: Vector3, attacker_name: String) -> void:
+	if is_dead:
+		return
+	if role == Role.PLAYER and is_dev_noclip_active():
+		return
+	var new_vol := maxf(0.05, get_volume() - maxf(0.0, volume_loss))
+	set_volume(new_vol)
+	if motor != null:
+		motor.velocity += Vector3(impulse.x, 0.0, impulse.z)
+		motor.vertical_vel += impulse.y
+		if impulse.y > 0.5:
+			motor.on_ground = false
+	var local_pt := Vector3(0.0, 0.3, 0.6)
+	if impulse.length_squared() > 1e-4 and body != null:
+		local_pt = (body.global_transform.basis.inverse() * (-impulse.normalized() * 0.7)).limit_length(1.1)
+	trigger_poke(local_pt, impulse * 0.45)
+	if target_scale <= 0.36:
+		trigger_death("You were overwhelmed by %s" % attacker_name)
+
+
 func trigger_death(reason: String = "You were killed by an unknown creature") -> void:
 	if is_dead:
 		return
@@ -1034,6 +1129,8 @@ func trigger_death(reason: String = "You were killed by an unknown creature") ->
 func revive_at_safe_pos() -> void:
 	var fallback := Vector3(0.0, 22.0, 0.0)
 	var safe := _last_safe_pos if _last_safe_pos.length_squared() > 0.001 else fallback
+	target_scale = maxf(target_scale, start_scale)
+	slime_scale = maxf(slime_scale, start_scale)
 	if _terrain_ref != null and _terrain_ref.has_method("sample_height"):
 		var ground_h := float(_terrain_ref.sample_height(safe.x, safe.z))
 		var half_h := (model.rest_half_height if model != null else 1.28) * slime_scale
@@ -1316,6 +1413,80 @@ func _process_player_input() -> Vector3:
 	return desired
 
 
+## Compute vertical launch speed (m/s) for a target apex height, scaling gently with sqrt(slime_scale).
+func jump_impulse_for_height(height_m: float) -> float:
+	return sqrt(maxf(0.0, 2.0 * tuning.gravity * height_m * sqrt(maxf(slime_scale, 0.1))))
+
+
+func _execute_jump(charge: float, move_dir: Vector3 = Vector3.ZERO) -> void:
+	var c := clampf(charge, 0.0, 1.0)
+	var min_h := tuning.jump_water_min_height if motor.in_water else tuning.jump_min_height
+	var max_h := tuning.jump_water_max_height if motor.in_water else tuning.jump_max_height
+	var target_h := lerpf(min_h, max_h, pow(c, 0.85))
+	motor.jump(jump_impulse_for_height(target_h))
+
+	var horiz_dir := Vector3(move_dir.x, 0.0, move_dir.z)
+	if horiz_dir.length_squared() > 0.01:
+		horiz_dir = horiz_dir.normalized()
+		var scale_boost := pow(maxf(slime_scale, 0.1), 0.25)
+		var leap_speed := lerpf(tuning.jump_forward_min_speed, tuning.jump_forward_max_speed, pow(c, 0.85)) * scale_boost
+		var cur_horiz_speed := Vector2(motor.velocity.x, motor.velocity.z).length()
+		var final_speed := maxf(cur_horiz_speed, leap_speed)
+		motor.velocity.x = horiz_dir.x * final_speed
+		motor.velocity.z = horiz_dir.z * final_speed
+		_air_leap_active = true
+	else:
+		_air_leap_active = false
+
+	is_charging_jump = false
+	jump_charge = 0.0
+	_coyote_timer = 0.0
+	_jump_buffer_timer = 0.0
+	splat_x = minf(splat_x, -0.18)
+	splat_v -= 6.8 + 4.5 * c
+	spread_v -= 3.6 + 2.2 * c
+	var poke_dir := Vector3(0.0, 1.05 + 0.85 * c, 0.0) + horiz_dir * (0.55 + 0.50 * c)
+	trigger_poke(Vector3(0.0, -0.65 * tuning.reference_radius, 0.0), poke_dir)
+	if role == Role.PLAYER and has_node("/root/SettingsManager"):
+		get_node("/root/SettingsManager").play_ui_sound("jump")
+
+
+func _tick_player_jump(dt: float, desired: Vector3) -> Vector3:
+	var raw_desired := desired
+	var can_jump_now := motor.on_ground or motor.in_water
+	if can_jump_now:
+		_coyote_timer = tuning.jump_coyote_time
+	else:
+		_coyote_timer = maxf(0.0, _coyote_timer - dt)
+	_jump_buffer_timer = maxf(0.0, _jump_buffer_timer - dt)
+
+	var jump_pressed := Input.is_action_pressed("jump")
+	var jump_just_pressed := Input.is_action_just_pressed("jump")
+
+	if jump_just_pressed:
+		if _coyote_timer > 0.0:
+			is_charging_jump = true
+			jump_charge = 0.0
+		else:
+			_jump_buffer_timer = tuning.jump_buffer_time
+
+	if is_charging_jump:
+		if jump_pressed and (_coyote_timer > 0.0 or can_jump_now):
+			jump_charge = minf(1.0, jump_charge + dt / maxf(tuning.jump_charge_time, 0.05))
+			desired *= tuning.jump_charge_move_mult
+		else:
+			_execute_jump(jump_charge, raw_desired)
+	elif _jump_buffer_timer > 0.0 and can_jump_now:
+		_jump_buffer_timer = 0.0
+		if jump_pressed:
+			is_charging_jump = true
+			jump_charge = 0.0
+		else:
+			_execute_jump(0.0, raw_desired)
+
+	return desired
+
+
 func _tick_dev_movement(dt: float) -> void:
 	var desired_horiz := _process_player_input()
 	var in_y := 0.0
@@ -1525,6 +1696,9 @@ func _update_presentation(dt: float) -> void:
 	_crawl_phase += speed * dt * tuning.crawl_rate * crawl_strain
 
 	var lean_target := Vector3(motor.velocity.x * tuning.lean_gain * (1.0 - calm), 0.0, motor.velocity.z * tuning.lean_gain * (1.0 - calm)) - _lean
+	if not motor.on_ground and not motor.in_water:
+		var arc_lean := Vector3(motor.velocity.x, 0.0, motor.velocity.z) * clampf(motor.vertical_vel / 14.0, -0.8, 1.2) * 0.16
+		lean_target = arc_lean - _lean
 	var sdt := minf(dt, 1.0 / 30.0)
 	_lean_vel += lean_target * tuning.lean_stiffness * sdt
 	_lean_vel += _lean_vel * (-tuning.lean_damping * sdt)
@@ -1534,11 +1708,11 @@ func _update_presentation(dt: float) -> void:
 		_lean *= exp(-14.0 * dt)
 
 	if motor.just_landed:
-		var imp := clampf(motor.landing_impact_speed / 16.0, 0.18, 1.35)
-		splat_v += imp * 5.8
-		spread_v += imp * 4.2
-		trigger_poke(Vector3(0.0, 0.85 * tuning.reference_radius, 0.0), Vector3(0.0, -imp * 1.4, 0.0))
-		trigger_poke2(Vector3(0.0, -0.45 * tuning.reference_radius, 0.0), Vector3(0.0, imp * 0.85, 0.0))
+		var imp := clampf(motor.landing_impact_speed / 15.0, 0.22, 1.45)
+		splat_v += imp * 7.5
+		spread_v += imp * 5.2
+		trigger_poke(Vector3(0.0, 0.85 * tuning.reference_radius, 0.0), Vector3(0.0, -imp * 1.65, 0.0))
+		trigger_poke2(Vector3(0.0, -0.45 * tuning.reference_radius, 0.0), Vector3(0.0, imp * 1.05, 0.0))
 
 	if motor.just_splashed:
 		var simp := clampf(absf(motor.vertical_vel) * 0.12 + speed * 0.08, 0.24, 1.15)
@@ -1554,11 +1728,13 @@ func _update_presentation(dt: float) -> void:
 	else:
 		_swim_ripple_timer = 0.34
 
-	var splat_target := -clampf((-motor.vertical_vel - 1.2) / 20.0, 0.0, 0.26) if not motor.on_ground else 0.0
-	splat_v += (splat_target - splat_x) * 44.0 * sdt - splat_v * 9.0 * sdt
-	splat_x = clampf(splat_x + splat_v * sdt, -0.28, 0.62)
-	spread_v += (0.0 - spread_x) * 30.0 * sdt - spread_v * 7.5 * sdt
-	spread_x = clampf(spread_x + spread_v * sdt, -0.18, 0.52)
+	var air_stretch := clampf((absf(motor.vertical_vel) - 0.8) / 14.0, 0.0, 0.42) if (not motor.on_ground and not motor.in_water) else 0.0
+	var splat_target := 0.56 * jump_charge if is_charging_jump else -air_stretch
+	splat_v += (splat_target - splat_x) * 48.0 * sdt - splat_v * 8.5 * sdt
+	splat_x = clampf(splat_x + splat_v * sdt, -0.44, 0.68)
+	var spread_target := 0.36 * jump_charge if is_charging_jump else (-0.14 * (air_stretch / 0.42))
+	spread_v += (spread_target - spread_x) * 34.0 * sdt - spread_v * 7.2 * sdt
+	spread_x = clampf(spread_x + spread_v * sdt, -0.24, 0.58)
 
 	if speed > tuning.moving_threshold:
 		var diff := atan2(_crawl_dir.x, _crawl_dir.z) - _facing_yaw
@@ -1567,31 +1743,28 @@ func _update_presentation(dt: float) -> void:
 	var blink := tuning.blink_closed_amount if fmod(_time, tuning.blink_period) > tuning.blink_start else 1.0
 
 	if _mat:
-		set_shader_param("uImpulseTime", _impulse_time)
-		set_shader_param("uImpulse2Time", _impulse2_time)
-		set_shader_param("uMoveDir", _crawl_dir)
-		set_shader_param("uMoveAmt", speed01 * (1.0 - 0.95 * calm))
-		set_shader_param("uCrawl", _crawl_phase)
-		set_shader_param("uLean", _lean)
-		set_shader_param("uSplat", splat_x)
-		set_shader_param("uSpread", spread_x)
-		set_shader_param("uRippleIntensity", tuning.ripple_base + tuning.ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28 + absf(splat_x) * 0.35)
-		set_shader_param("uFacing", _facing_yaw)
-		set_shader_param("uBlink", blink)
-		set_shader_param("uLiquid", liquid_amt)
-		set_shader_param("uLiquidHeight", height_ratio)
-		set_shader_param("uLiquidSpread", model.spread)
-		set_shader_param("uSqueeze", 0.0)
-		set_shader_param("uSqueezeDir", sq_dir)
-		set_shader_param("uSqueezeLat", 1.0)
-		set_shader_param("uSqueezeLong", 1.0)
-		set_shader_param("uSqueezeHeight", 1.0)
-		set_shader_param("uSkinLocal", tuning.skin / maxf(slime_scale * model.spread, 1e-3))
-		set_shader_param("uGapLocal", Vector3.ZERO)
-		set_shader_param("uWaterSubmersion", motor.water_submersion)
-		set_shader_param("uWaterY", motor.water_y if motor.in_water else -9999.0)
-		set_shader_param("uWetness", motor.water_wetness)
-		set_shader_param("uWaterVel", Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
+		var air_crawl_mult := 0.15 if (not motor.on_ground and not motor.in_water) else 1.0
+		var charge_tremble := 0.25 * jump_charge if is_charging_jump else 0.0
+		set_shader_param(SN_IMPULSE_TIME, _impulse_time)
+		set_shader_param(SN_IMPULSE2_TIME, _impulse2_time)
+		set_shader_param(SN_MOVE_DIR, _crawl_dir)
+		set_shader_param(SN_MOVE_AMT, speed01 * (1.0 - 0.95 * calm) * air_crawl_mult)
+		set_shader_param(SN_CRAWL, _crawl_phase)
+		set_shader_param(SN_LEAN, _lean)
+		set_shader_param(SN_SPLAT, splat_x)
+		set_shader_param(SN_SPREAD, spread_x)
+		set_shader_param(SN_RIPPLE_INTENSITY, tuning.ripple_base + tuning.ripple_per_speed * speed01 + liquid_amt * 0.15 + press_amt * 0.28 + absf(splat_x) * 0.35 + charge_tremble)
+		set_shader_param(SN_FACING, _facing_yaw)
+		set_shader_param(SN_BLINK, blink)
+		set_shader_param(SN_LIQUID, liquid_amt)
+		set_shader_param(SN_LIQUID_HEIGHT, height_ratio)
+		set_shader_param(SN_LIQUID_SPREAD, model.spread)
+		set_shader_param(SN_SQUEEZE_DIR, sq_dir)
+		set_shader_param(SN_SKIN_LOCAL, tuning.skin / maxf(slime_scale * model.spread, 1e-3))
+		set_shader_param(SN_WATER_SUBMERSION, motor.water_submersion)
+		set_shader_param(SN_WATER_Y, motor.water_y if motor.in_water else -9999.0)
+		set_shader_param(SN_WETNESS, motor.water_wetness)
+		set_shader_param(SN_WATER_VEL, Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
 
 	if role == Role.PLAYER:
 		_breadcrumb_timer += dt

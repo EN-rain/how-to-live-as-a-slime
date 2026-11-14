@@ -123,6 +123,8 @@ uniform float uWaterSubmersion = 0.0;
 uniform float uWaterY = -9999.0;
 uniform float uWetness = 0.0;
 uniform vec3 uWaterVel = vec3(0.0);
+uniform int uActiveEatCount = 6;
+uniform int uActiveSolidCount = 8;
 
 uniform sampler2D tRefraction : hint_screen_texture, repeat_disable, filter_linear;
 
@@ -132,6 +134,21 @@ varying vec3 vNormal;
 varying vec3 vWorldNormal;
 varying vec3 vLocalPos;
 varying float vRippleMask;
+varying flat vec3 vCausticA;
+varying flat vec3 vCausticB;
+varying flat vec3 vShallowTint;
+varying flat vec3 vDeepTint;
+varying flat vec3 vRimColor;
+varying flat vec3 vBubbleColor;
+varying flat vec3 vEyeColor;
+varying flat vec3 vOutlineColor;
+
+vec3 lin2srgb(vec3 c) {
+	c = max(c, vec3(0.0));
+	vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - vec3(0.055);
+	vec3 lo = c * 12.92;
+	return mix(hi, lo, step(c, vec3(0.0031308)));
+}
 
 // ------------------------------------------------------------------------------------------------
 // Vertex: deformation
@@ -345,7 +362,7 @@ float smin_neck(float a, float b, float k) {
 	return mix(b, a, h) - k * h * (1.0 - h);
 }
 
-vec3 deformSlime(vec3 pos, vec3 norm, float t) {
+vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, float imp1Bounce, float imp2Osc, float crawlWave, vec2 moveDirXZ, float drapeCy, float drapeSy, float waterHSpd) {
 	vec3 p = pos;
 
 	float height01 = clamp((p.y / uRefRadius + 1.0) * 0.5, 0.0, 1.0);
@@ -413,7 +430,6 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 		}
 	}
 
-	float breathe = sin(t * 2.0) * 0.022 * uJiggleStrength;
 	p.y *= (1.0 + breathe);
 	p.xz *= (1.0 - breathe * 0.45);
 
@@ -422,8 +438,8 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 
 	if (abs(uSplat) > 0.001 || abs(uSpread) > 0.001) {
 		float hRel = max(p.y - groundFloor, 0.0);
-		float yScale = clamp(1.0 - uSplat * 0.42, 0.58, 1.32);
-		float xzScale = clamp(1.0 + (uSplat * 0.24 + uSpread * 0.16) * (1.0 - 0.35 * height01), 0.84, 1.38);
+		float yScale = clamp(1.0 - uSplat * 0.42, 0.52, 1.42);
+		float xzScale = clamp(1.0 + (uSplat * 0.24 + uSpread * 0.16) * (1.0 - 0.35 * height01), 0.78, 1.45);
 		p.y = groundFloor + hRel * yScale;
 		p.xz *= xzScale;
 	}
@@ -432,11 +448,9 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	if (uImpulseTime < 3.5) {
 		float distToPoke = distance(pos, uImpulsePos);
 		float pokeInfluence = exp(-distToPoke * 1.15);
-		float springOsc = sin(uImpulseTime * 14.0) * exp(-uImpulseTime * 3.0);
-		impulseOffset = uImpulseVector * pokeInfluence * springOsc * uJiggleStrength;
+		impulseOffset = uImpulseVector * pokeInfluence * imp1Osc * uJiggleStrength;
 
-		float globalBounce = sin(uImpulseTime * 11.0) * exp(-uImpulseTime * 2.6) * length(uImpulseVector) * 0.32 * uJiggleStrength;
-		globalBounce = clamp(globalBounce, -uSkinLocal, uSkinLocal) * (1.0 - uLiquid);
+		float globalBounce = clamp(imp1Bounce, -uSkinLocal, uSkinLocal) * (1.0 - uLiquid);
 		p.y += globalBounce * (height01 - 0.15);
 		float bounceRadial = globalBounce * 0.38 * (1.0 - height01 * 0.5);
 		float radialCap = uSkinLocal / max(length(p.xz), 0.1);
@@ -447,13 +461,13 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	if (uImpulse2Time < 3.5) {
 		float distToPoke2 = distance(pos, uImpulse2Pos);
 		float pokeInfluence2 = exp(-distToPoke2 * 1.15);
-		float springOsc2 = sin(uImpulse2Time * 14.0) * exp(-uImpulse2Time * 3.0);
-		impulseOffset2 = uImpulse2Vector * pokeInfluence2 * springOsc2 * uJiggleStrength;
+		impulseOffset2 = uImpulse2Vector * pokeInfluence2 * imp2Osc * uJiggleStrength;
 	}
 
 	p += (impulseOffset + impulseOffset2) * smoothstep(0.02, 0.25, height01);
 
-	for (int i = 0; i < 6; i++) {
+	int eatCount = min(uActiveEatCount, 6);
+	for (int i = 0; i < eatCount; i++) {
 		if (uEatParam[i].y > 0.001) {
 			p += dentPush(p, uEatPos[i], uEatParam[i].x, uBoxHalf[i], uEatParam[i].z, 0.26, vec3(0.0)) * uEatParam[i].y;
 		}
@@ -472,27 +486,23 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 	p.y = max(p.y, groundFloor);
 
-	float wave = 0.5 + 0.5 * sin(uCrawl);
-	float sy = 1.0 + uMoveAmt * (0.10 * wave - 0.04);
+	float sy = 1.0 + uMoveAmt * (0.10 * crawlWave - 0.04);
 	p.xz *= 1.0 / sqrt(sy);
 	p.y = groundFloor + (p.y - groundFloor) * sy;
-	vec2 d = normalize(uMoveDir.xz + vec2(0.0001));
 	// Lean is a shear that moves the apex sideways, which leaves the hull immediately;
 	// fade it out in liquid and bound it to the skin.
 	vec2 leanOff = uLean.xz * (height01 - 0.2) * 0.38 * (1.0 - uLiquid);
 	float leanLen = length(leanOff);
 	if (leanLen > uSkinLocal) leanOff *= uSkinLocal / leanLen;
 	p.xz -= leanOff;
-	float tw = sin(uCrawl - dot(pos.xz, d) * 2.8);
+	float tw = sin(uCrawl - dot(pos.xz, moveDirXZ) * 2.8);
 	float twMask = smoothstep(0.1, 0.6, height01);
 	p.y += uMoveAmt * 0.07 * tw * twMask;
 	p.xz += norm.xz * uMoveAmt * 0.03 * tw * twMask;
 
 	if (uDrapeAmt > 0.001) {
-		float cy = cos(uDrapeYaw);
-		float sy = sin(uDrapeYaw);
 		vec3 dv = p - uDrapePos;
-		vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
+		vec3 q = vec3(dv.x * drapeCy - dv.z * drapeSy, dv.y, dv.x * drapeSy + dv.z * drapeCy);
 		vec2 topReach = max(uDrapeHalf.xz * 1.18, vec2(0.2));
 		p.xz = mix(p.xz, normalize(p.xz + vec2(0.0001)) * length(topReach), uDrapeAmt * 0.65);
 		if (dv.y < 0.0) {
@@ -501,7 +511,8 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	}
 
 	// Final authoritative obstacle conforming across up to 8 nearby objects.
-	for (int i = 0; i < 8; i++) {
+	int solidCount = min(uActiveSolidCount, 8);
+	for (int i = 0; i < solidCount; i++) {
 		float solidAmt = uSolidParam[i].y;
 		if (solidAmt > 0.001) {
 			vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
@@ -511,13 +522,12 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t) {
 	// Gentle hydrostatic waterline ripple & buoyant belly tuck (strictly bounded within uSkinLocal)
 	if (uWaterSubmersion > 0.01) {
 		float h01 = clamp((p.y / uRefRadius + 1.0) * 0.5, 0.0, 1.0);
-		float h_spd = length(uWaterVel.xz);
 		float swim_rip = sin(pos.x * 3.4 + t * 4.8) * cos(pos.z * 3.4 - t * 4.1);
 		float tuck = smoothstep(0.32, 0.0, h01) * 0.045 * uWaterSubmersion;
 		p.y += min(tuck, uSkinLocal * 0.55);
 		float d_lip = (h01 - 0.36) / 0.16;
 		float lip_band = exp(-(d_lip * d_lip));
-		float radial_wobble = min(lip_band * (0.022 + 0.014 * swim_rip * clamp(h_spd * 0.25, 0.2, 1.0)) * uWaterSubmersion, uSkinLocal * 0.45);
+		float radial_wobble = min(lip_band * (0.022 + 0.014 * swim_rip * clamp(waterHSpd * 0.25, 0.2, 1.0)) * uWaterSubmersion, uSkinLocal * 0.45);
 		p.xz += normalize(p.xz + vec2(0.0001)) * radial_wobble;
 	}
 	p.y = max(p.y, groundFloor);
@@ -530,13 +540,39 @@ void vertex() {
 	vec3 nrm = NORMAL;
 	vLocalPos = position;
 
+	// Hoist constant/uniform-only math out of the 3x finite-difference deformSlime calls and fragment()
+	float breathe = sin(TIME * 2.0) * 0.022 * uJiggleStrength;
+	float imp1Osc = 0.0;
+	float imp1Bounce = 0.0;
+	float imp1Decay = 0.0;
+	if (uImpulseTime < 3.5) {
+		imp1Osc = sin(uImpulseTime * 14.0) * exp(-uImpulseTime * 3.0);
+		imp1Bounce = sin(uImpulseTime * 11.0) * exp(-uImpulseTime * 2.6) * length(uImpulseVector) * 0.32 * uJiggleStrength;
+		imp1Decay = exp(-uImpulseTime * 2.5);
+	}
+	float imp2Osc = 0.0;
+	float imp2Decay = 0.0;
+	if (uImpulse2Time < 3.5) {
+		imp2Osc = sin(uImpulse2Time * 14.0) * exp(-uImpulse2Time * 3.0);
+		imp2Decay = exp(-uImpulse2Time * 2.5);
+	}
+	float crawlWave = 0.5 + 0.5 * sin(uCrawl);
+	vec2 moveDirXZ = normalize(uMoveDir.xz + vec2(0.0001));
+	float drapeCy = 1.0;
+	float drapeSy = 0.0;
+	if (uDrapeAmt > 0.001) {
+		drapeCy = cos(uDrapeYaw);
+		drapeSy = sin(uDrapeYaw);
+	}
+	float waterHSpd = (uWaterSubmersion > 0.01) ? length(uWaterVel.xz) : 0.0;
+
 	vec3 tangent = normalize(cross(nrm, vec3(0.0, 1.0, 0.1)));
 	vec3 bitangent = normalize(cross(nrm, tangent));
 	float eps = 0.025;
 
-	vec3 p0 = deformSlime(position, nrm, TIME);
-	vec3 p1 = deformSlime(position + tangent * eps, normalize(position + tangent * eps), TIME);
-	vec3 p2 = deformSlime(position + bitangent * eps, normalize(position + bitangent * eps), TIME);
+	vec3 p0 = deformSlime(position, nrm, TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
+	vec3 p1 = deformSlime(position + tangent * eps, normalize(position + tangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
+	vec3 p2 = deformSlime(position + bitangent * eps, normalize(position + bitangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
 
 	vec3 deformedNormal = normalize(cross(p1 - p0, p2 - p0) + nrm * 1e-4);
 
@@ -551,7 +587,16 @@ void vertex() {
 
 	float distToPoke = distance(position, uImpulsePos);
 	float distToPoke2 = distance(position, uImpulse2Pos);
-	vRippleMask = exp(-distToPoke * 1.5) * exp(-uImpulseTime * 2.5) + exp(-distToPoke2 * 1.5) * exp(-uImpulse2Time * 2.5);
+	vRippleMask = exp(-distToPoke * 1.5) * imp1Decay + exp(-distToPoke2 * 1.5) * imp2Decay;
+
+	vCausticA = lin2srgb(uCausticA);
+	vCausticB = lin2srgb(uCausticB);
+	vShallowTint = mix(lin2srgb(uDayShallow), lin2srgb(uNightShallow), uNightMode);
+	vDeepTint = mix(lin2srgb(uDayDeep), lin2srgb(uNightDeep), uNightMode);
+	vRimColor = mix(lin2srgb(uRimDay), lin2srgb(uRimNight), uNightMode);
+	vBubbleColor = lin2srgb(uBubbleColor) * uBubbleBoost;
+	vEyeColor = lin2srgb(uEyeColor);
+	vOutlineColor = mix(lin2srgb(uOutlineDay), lin2srgb(uOutlineNight), uNightMode);
 
 	VERTEX = p0;
 	NORMAL = deformedNormal;
@@ -565,13 +610,6 @@ vec3 srgb2lin(vec3 c) {
 	vec3 hi = pow((c + vec3(0.055)) / 1.055, vec3(2.4));
 	vec3 lo = c / 12.92;
 	return mix(hi, lo, step(c, vec3(0.04045)));
-}
-
-vec3 lin2srgb(vec3 c) {
-	c = max(c, vec3(0.0));
-	vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - vec3(0.055);
-	vec3 lo = c * 12.92;
-	return mix(hi, lo, step(c, vec3(0.0031308)));
 }
 
 vec4 permute(vec4 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
@@ -663,18 +701,15 @@ void fragment() {
 	vec3 refractedColor = vec3(sR.r, sG.g, sB.b);
 
 	float edgeDelta = clamp(length(sG - sB) * 1.5, 0.0, 0.45);
-	vec3 greenCyanCaustic = mix(lin2srgb(uCausticA), lin2srgb(uCausticB), n1 * 0.5 + 0.5);
+	vec3 greenCyanCaustic = mix(vCausticA, vCausticB, n1 * 0.5 + 0.5);
 	float basalMask = smoothstep(0.05, -0.72, vLocalPos.y) * smoothstep(0.1, 0.85, 1.0 - ndotv);
 	refractedColor += greenCyanCaustic * edgeDelta * 0.45 * uDispersion;
 	refractedColor = mix(refractedColor, greenCyanCaustic * 0.92, basalMask * 0.28 * clamp(uDispersion, 0.0, 1.4));
 
 	float fresnel = pow(1.0 - ndotv, 2.6);
 
-	vec3 shallowTint = mix(lin2srgb(uDayShallow), lin2srgb(uNightShallow), uNightMode);
-	vec3 deepTint = mix(lin2srgb(uDayDeep), lin2srgb(uNightDeep), uNightMode);
-
 	float thickness = pow(ndotv, 0.65);
-	vec3 jellyTint = mix(shallowTint, deepTint, thickness);
+	vec3 jellyTint = mix(vShallowTint, vDeepTint, thickness);
 
 	float effectiveOpacity = clamp(uOpacity * (0.72 + 0.48 * thickness), 0.05, 0.95);
 	vec3 color = mix(refractedColor, jellyTint, effectiveOpacity);
@@ -683,19 +718,17 @@ void fragment() {
 	color += uTopGlow * topGradient * (1.0 - uNightMode * 0.4);
 
 	float innerRim = smoothstep(0.38, 0.82, fresnel) * uRimStrength;
-	vec3 rimColor = mix(lin2srgb(uRimDay), lin2srgb(uRimNight), uNightMode);
-	color = mix(color, rimColor, clamp(innerRim * 0.78, 0.0, 0.92));
+	color = mix(color, vRimColor, clamp(innerRim * 0.78, 0.0, 0.92));
 
 	vec3 localP = vLocalPos * uBubbleNoiseScale + vec3(0.0, t * 0.6, 0.0);
 	float bubbleField = 0.0;
 	if (uShaderLOD < 0.5) {
 		float bubbleNoise1 = snoise(localP);
-		float bubbleNoise2 = snoise(localP * 2.2 - vec3(0.0, t * 1.1, 0.0));
+		float bubbleNoise2 = 0.5 + 0.5 * (sin(localP.x * 7.3 + localP.y * 5.1 + n1 * 4.2) * cos(localP.z * 7.9 - t * 2.4));
 		bubbleField = smoothstep(0.55, 0.72, bubbleNoise1) * smoothstep(0.4, 0.6, bubbleNoise2);
 	}
 	float depthFactor = smoothstep(-0.8, 0.6, vLocalPos.y);
-	vec3 bubbleColor = lin2srgb(uBubbleColor) * uBubbleBoost;
-	color = mix(color, bubbleColor, bubbleField * depthFactor * 0.55 * clamp(uRippleIntensity * 2.0, 0.2, 1.5));
+	color = mix(color, vBubbleColor, bubbleField * depthFactor * 0.55 * clamp(uRippleIntensity * 2.0, 0.2, 1.5));
 
 	vec3 lp = normalize(vLocalPos);
 	float eyeYaw = atan(lp.x, lp.z) - uFacing;
@@ -705,7 +738,7 @@ void fragment() {
 	vec2 eyeSz = mix(uEyeSize, vec2(uEyeSize.x * 1.3, uEyeSize.y * 0.9), uLiquid);
 	vec2 eq = vec2((abs(eyeYaw) - uEyeSeparation) / eyeSz.x, (eyeElev - targetElev) / (eyeSz.y * uBlink));
 	float eyeMask = 1.0 - smoothstep(0.82, 1.0, length(eq));
-	color = mix(color, lin2srgb(uEyeColor), eyeMask * 0.97);
+	color = mix(color, vEyeColor, eyeMask * 0.97);
 
 	// Water-slime surface interaction: refractive submerged caustics, thin glinting meniscus lip & glossy wet sheen
 	if (uWaterSubmersion > 0.005 && uWaterY > -9000.0) {
@@ -714,9 +747,9 @@ void fragment() {
 		float distFromWater = vWorldPosition.y - waveY;
 		float underMask = 1.0 - smoothstep(-0.04, 0.03, distFromWater);
 
-		// Soft volumetric underwater refraction glow (clean translucent jelly scattering — zero curly contour lines)
+		// Soft volumetric underwater refraction glow (reuses n1 for zero extra simplex calls)
 		float submergedDepth = clamp(-distFromWater, 0.0, 1.2);
-		float bokehGlow = pow(clamp(0.5 + 0.5 * snoise(vWorldPosition * 1.35 + vec3(t * 0.42, -t * 0.34, t * 0.28)), 1e-4, 1.0), 3.0);
+		float bokehGlow = pow(clamp(0.5 + 0.5 * (sin(vWorldPosition.x * 2.3 + n1 * 2.5 + t * 0.8) * cos(vWorldPosition.z * 2.1 - t * 0.7)), 1e-4, 1.0), 3.0);
 		color = mix(
 			color,
 			mix(vec3(0.06, 0.38, 0.62), vec3(0.38, 0.86, 0.96), bokehGlow * 0.55),
@@ -732,13 +765,13 @@ void fragment() {
 	if (uWetness > 0.01) {
 		float wetRim = pow(max(1.0 - ndotv, 1e-4), 1.9) * 0.58 + pow(max(worldNormal.y, 1e-4), 2.8) * 0.34;
 		float wetSpec = smoothstep(0.72, 0.97, n1 * 0.24 + 0.76 * max(0.0, dot(reflect(-viewDir, normal), normalize(vec3(0.42, 0.86, 0.34)))));
-		float droplets = smoothstep(0.78, 0.93, snoise(vLocalPos * 6.5 + vec3(0.0, t * 0.45, 0.0))) * smoothstep(-0.1, 0.7, worldNormal.y);
+		float dropSparkle = 0.5 + 0.5 * sin(vLocalPos.x * 16.0 + n2 * 4.5) * cos(vLocalPos.z * 17.0 - vLocalPos.y * 12.0 + t * 1.1);
+		float droplets = smoothstep(0.84, 0.97, dropSparkle) * smoothstep(-0.1, 0.7, worldNormal.y);
 		color += vec3(0.36, 0.80, 0.98) * (wetRim * 0.22 + wetSpec * 0.42 + droplets * 0.28) * uWetness;
 	}
 
 	float celOutline = smoothstep(0.84, 0.95, 1.0 - ndotv);
-	vec3 outlineColor = mix(lin2srgb(uOutlineDay), lin2srgb(uOutlineNight), uNightMode);
-	color = mix(color, outlineColor, celOutline * 0.55 * clamp(uRimStrength, 0.0, 1.5));
+	color = mix(color, vOutlineColor, celOutline * 0.55 * clamp(uRimStrength, 0.0, 1.5));
 
 	ALBEDO = srgb2lin(clamp(color, vec3(0.0), vec3(1.0)));
 }
