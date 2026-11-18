@@ -1,5 +1,7 @@
 class_name Slime
 extends Node3D
+
+const WorldLandmarks = preload("res://scripts/world_landmarks.gd")
 ## One jelly slime. Intent -> validated posture -> motor movement -> derived visuals.
 ##
 ## This script never writes its own position: SlimeMotor owns the transform, support
@@ -145,6 +147,16 @@ const SN_WATER_SUBMERSION := &"uWaterSubmersion"
 const SN_WATER_Y := &"uWaterY"
 const SN_WETNESS := &"uWetness"
 const SN_WATER_VEL := &"uWaterVel"
+const SN_REF_RADIUS := &"uRefRadius"
+const SN_MELT := &"uMelt"
+const SN_SHADER_LOD := &"uShaderLOD"
+const SN_IMPULSE_POS := &"uImpulsePos"
+const SN_IMPULSE_VECTOR := &"uImpulseVector"
+const SN_DRAPE_AMT := &"uDrapeAmt"
+const SN_SPLIT_AMT := &"uSplitAmt"
+const SN_SPLIT_DIR := &"uSplitDir"
+const SN_SPLIT_NECK_RADIUS := &"uSplitNeckRadius"
+const SN_SPLIT_PARTNER_LOCAL := &"uSplitPartnerLocal"
 
 # Engulf drape state.
 var engulf_target = null
@@ -255,6 +267,7 @@ var death_reason := ""
 var _last_safe_pos := Vector3.ZERO
 var _terrain_ref: Node = null
 var _sea_warned := false
+var _last_web_toast_t := -999.0
 
 var time: float:
 	get:
@@ -403,10 +416,10 @@ func _activate_from_pool() -> void:
 
 	_shader_param_cache.clear()
 	_reset_array_uniforms()
-	set_shader_param("uRefRadius", tuning.reference_radius)
-	set_shader_param("uSplitAmt", 0.0)
-	set_shader_param("uSplitNeckRadius", 0.0)
-	set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
+	set_shader_param(SN_REF_RADIUS, tuning.reference_radius)
+	set_shader_param(SN_SPLIT_AMT, 0.0)
+	set_shader_param(SN_SPLIT_NECK_RADIUS, 0.0)
+	set_shader_param(SN_SPLIT_PARTNER_LOCAL, Vector3.ZERO)
 
 
 func get_active_camera() -> Camera3D:
@@ -438,8 +451,8 @@ func _ready() -> void:
 	if body and body.material_override is ShaderMaterial:
 		_mat = body.material_override.duplicate() as ShaderMaterial
 		body.material_override = _mat
-		set_shader_param("uMelt", tuning.melt)
-		set_shader_param("uRefRadius", tuning.reference_radius)
+		set_shader_param(SN_MELT, tuning.melt)
+		set_shader_param(SN_REF_RADIUS, tuning.reference_radius)
 		_reset_array_uniforms()
 
 	if not is_budding:
@@ -612,7 +625,7 @@ func _update_lod(dt: float) -> void:
 		return
 	_lod_level = level
 	body.mesh = _lod_mesh(level)
-	set_shader_param("uShaderLOD", 1.0 if level == 1 else 0.0)
+	set_shader_param(SN_SHADER_LOD, 1.0 if level == 1 else 0.0)
 
 
 ## Own proxy + exempt partners + props this slime may pass through. Rebuilt before
@@ -820,8 +833,8 @@ func _try_poke(screen_pos: Vector2) -> void:
 func trigger_poke(local_point: Vector3, impulse: Vector3) -> void:
 	_impulse_time = 0.001
 	if _mat:
-		set_shader_param("uImpulsePos", local_point)
-		set_shader_param("uImpulseVector", impulse)
+		set_shader_param(SN_IMPULSE_POS, local_point)
+		set_shader_param(SN_IMPULSE_VECTOR, impulse)
 	poked.emit(local_point, impulse)
 
 
@@ -1004,6 +1017,24 @@ func _physics_process(delta: float) -> void:
 	if motor.water_submersion > 0.02:
 		desired *= lerpf(1.0, 0.78, motor.water_submersion)
 		desired += motor.water_flow_vel * clampf(motor.water_submersion * 1.4, 0.25, 1.0)
+	var in_sticky := false
+	if role == Role.PLAYER and motor.on_ground and not motor.in_water:
+		var t_node := get_tree().get_first_node_in_group("terrain")
+		if t_node == null and get_parent() != null:
+			t_node = get_parent().get_node_or_null("TerrainScene")
+		if t_node != null and t_node.has_method("get_webwood_region"):
+			var wreg = t_node.call("get_webwood_region")
+			if wreg != null and wreg.has_method("is_in_sticky_web"):
+				in_sticky = bool(wreg.call("is_in_sticky_web", global_position))
+		else:
+			in_sticky = WorldLandmarks.is_in_sticky_web(global_position)
+	if in_sticky:
+		desired *= tuning.sticky_web_speed_mult
+		if _time - _last_web_toast_t > 6.5:
+			_last_web_toast_t = _time
+			var web_hud := get_tree().get_first_node_in_group("hud")
+			if web_hud != null and web_hud.has_method("show_toast"):
+				web_hud.call("show_toast", "Sticky Spider Webs! (Jump to break free)", Color(0.92, 0.88, 0.98), 2.2)
 	var v_resp := tuning.velocity_response
 	if motor.just_jumped:
 		pass
@@ -1073,24 +1104,27 @@ func _tick_ocean_boundary(dt: float) -> void:
 		return
 
 	var coast_dist := float(_terrain_ref.sample_coast_distance(global_position.x, global_position.z))
-	if not motor.in_water and motor.on_ground and coast_dist < -20.0 and global_position.y >= 0.6:
+	var sl := float(_terrain_ref.get("sea_level"))
+	if not motor.in_water and motor.on_ground and coast_dist < -20.0 and global_position.y >= sl + 0.6:
 		_last_safe_pos = global_position
 
-	var in_ocean_zone := motor.in_water or global_position.y < 14.0
-	if in_ocean_zone and coast_dist >= 80.0 and not _sea_warned:
+	var warn_d := tuning.ocean_warning_distance
+	var lethal_d := tuning.get_validated_ocean_lethal_distance()
+	var in_ocean_zone := motor.in_water or global_position.y < sl + 14.0
+	if in_ocean_zone and coast_dist >= warn_d and not _sea_warned:
 		_sea_warned = true
 		var hud := get_tree().get_first_node_in_group("hud")
 		if hud != null and hud.has_method("show_toast"):
 			hud.show_toast("Something stirs in the abyssal sea... turn back!", Color(1.0, 0.52, 0.48), 4.0)
 
-	if in_ocean_zone and coast_dist >= 130.0:
-		var darken_rate := clampf(0.18 + (coast_dist - 130.0) * 0.0014, 0.18, 0.42)
+	if in_ocean_zone and coast_dist >= lethal_d:
+		var darken_rate := clampf(0.18 + (coast_dist - lethal_d) * 0.0014, 0.18, 0.42)
 		sea_darkness = clampf(sea_darkness + darken_rate * dt, 0.0, 1.0)
 		if sea_darkness >= 1.0:
 			trigger_death("You were killed by an unknown creature")
 	else:
 		sea_darkness = maxf(0.0, sea_darkness - dt * 0.48)
-		if coast_dist < 55.0:
+		if coast_dist < maxf(warn_d - 25.0, 5.0):
 			_sea_warned = false
 
 
@@ -1110,7 +1144,7 @@ func apply_combat_hit(volume_loss: float, impulse: Vector3, attacker_name: Strin
 	if impulse.length_squared() > 1e-4 and body != null:
 		local_pt = (body.global_transform.basis.inverse() * (-impulse.normalized() * 0.7)).limit_length(1.1)
 	trigger_poke(local_pt, impulse * 0.45)
-	if target_scale <= 0.36:
+	if target_scale <= tuning.lethal_scale_threshold:
 		trigger_death("You were overwhelmed by %s" % attacker_name)
 
 
@@ -1552,10 +1586,10 @@ func _tick_dev_movement(dt: float) -> void:
 	else:
 		motor.update_water_state(dt, _is_subterranean_for_water())
 	if _mat:
-		set_shader_param("uWaterSubmersion", motor.water_submersion)
-		set_shader_param("uWaterY", motor.water_y if motor.in_water else -9999.0)
-		set_shader_param("uWetness", motor.water_wetness)
-		set_shader_param("uWaterVel", Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
+		set_shader_param(SN_WATER_SUBMERSION, motor.water_submersion)
+		set_shader_param(SN_WATER_Y, motor.water_y if motor.in_water else -9999.0)
+		set_shader_param(SN_WETNESS, motor.water_wetness)
+		set_shader_param(SN_WATER_VEL, Vector3(motor.velocity.x, motor.vertical_vel, motor.velocity.z))
 
 	_apply_transform()
 	_verify_posture_after_move()
@@ -1803,11 +1837,11 @@ func _update_engulf(dt: float) -> void:
 
 	if engulf_progress > 0.0:
 		engulf_progress = maxf(0.0, engulf_progress - dt * 2.0)
-		set_shader_param("uDrapeAmt", engulf_progress)
+		set_shader_param(SN_DRAPE_AMT, engulf_progress)
 		if engulf_progress <= 0.001:
 			engulf_progress = 0.0
 			engulf_target = null
-			set_shader_param("uDrapeAmt", 0.0)
+			set_shader_param(SN_DRAPE_AMT, 0.0)
 	else:
 		engulf_target = null
 
@@ -1857,7 +1891,7 @@ func _tick_fission(dt: float) -> void:
 		# Phase 1: tension stretch and neck formation against the separating half.
 		var stretch_k := k / split_snap
 		var e := sin(stretch_k * PI * 0.5)
-		set_shader_param("uSplitAmt", e * 0.95)
+		set_shader_param(SN_SPLIT_AMT, e * 0.95)
 	else:
 		# Phase 2: the bridge snaps, and the body recoils with an elastic jiggle.
 		if not _fission_snapped:
@@ -1867,14 +1901,14 @@ func _tick_fission(dt: float) -> void:
 
 		var snap_k := (k - split_snap) / (1.0 - split_snap)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
-		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
+		set_shader_param(SN_SPLIT_AMT, maxf(0.0, snap_decay * 0.85))
 
 	_update_split_neck(k, clone)
 
 	motor.update_support()
 	motor.move_vertical(dt, target_scale)
 	_apply_transform()
-	set_shader_param("uSplitDir", fission_fwd)
+	set_shader_param(SN_SPLIT_DIR, fission_fwd)
 
 	if k >= 1.0:
 		is_fissioning = false
@@ -1884,9 +1918,9 @@ func _tick_fission(dt: float) -> void:
 		_set_scale_anchored(fission_target_scale)
 		_resolve_model(0.0, 1.0, 1.0)
 		_apply_transform()
-		set_shader_param("uSplitAmt", 0.0)
-		set_shader_param("uSplitNeckRadius", 0.0)
-		set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
+		set_shader_param(SN_SPLIT_AMT, 0.0)
+		set_shader_param(SN_SPLIT_NECK_RADIUS, 0.0)
+		set_shader_param(SN_SPLIT_PARTNER_LOCAL, Vector3.ZERO)
 	_sync_proxy()
 
 
@@ -1908,16 +1942,16 @@ func _parent_scale_for(k: float) -> float:
 ## the instant they separate.
 func _update_split_neck(k: float, partner: Slime) -> void:
 	if not tuning.use_coupled_split or partner == null or not is_instance_valid(partner) or k >= split_snap:
-		set_shader_param("uSplitNeckRadius", 0.0)
-		set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
+		set_shader_param(SN_SPLIT_NECK_RADIUS, 0.0)
+		set_shader_param(SN_SPLIT_PARTNER_LOCAL, Vector3.ZERO)
 		return
 	var ramp := sin(clampf((k - 0.15) / (split_snap - 0.15), 0.0, 1.0) * PI)
 	var r_self := model.rest_max_radius * slime_scale
 	var r_partner := partner.model.rest_max_radius * partner.slime_scale
 	var neck_world := minf(r_self, r_partner) * split_neck_ratio * ramp
 	var local_radius := neck_world / maxf(slime_scale * model.spread, 1e-4)
-	set_shader_param("uSplitPartnerLocal", model.mesh_local(partner.global_position - global_position))
-	set_shader_param("uSplitNeckRadius", local_radius)
+	set_shader_param(SN_SPLIT_PARTNER_LOCAL, model.mesh_local(partner.global_position - global_position))
+	set_shader_param(SN_SPLIT_NECK_RADIUS, local_radius)
 
 
 ## The clone's share of the pre-split volume at shared progress `k`, as a scale.
@@ -1943,9 +1977,9 @@ func _finish_budding() -> void:
 	_set_scale_anchored(bud_target_scale)
 	_resolve_model(0.0, 1.0, 1.0)
 	_apply_transform()
-	set_shader_param("uSplitAmt", 0.0)
-	set_shader_param("uSplitNeckRadius", 0.0)
-	set_shader_param("uSplitPartnerLocal", Vector3.ZERO)
+	set_shader_param(SN_SPLIT_AMT, 0.0)
+	set_shader_param(SN_SPLIT_NECK_RADIUS, 0.0)
+	set_shader_param(SN_SPLIT_PARTNER_LOCAL, Vector3.ZERO)
 	_sync_proxy()
 
 
@@ -1971,7 +2005,7 @@ func _tick_budding(dt: float) -> void:
 		# Phase 1: the droplet clings to the parent and is drawn out under tension.
 		var stretch_k := k / split_snap
 		var e := sin(stretch_k * PI * 0.5)
-		set_shader_param("uSplitAmt", e * 0.95)
+		set_shader_param(SN_SPLIT_AMT, e * 0.95)
 		if bud_parent and is_instance_valid(bud_parent):
 			if coupled:
 				_bud_separation_step(dt, lerpf(bud_d0, bud_d_snap, progress))
@@ -1988,7 +2022,7 @@ func _tick_budding(dt: float) -> void:
 		var snap_k := (k - split_snap) / (1.0 - split_snap)
 		var snap_e := sin(snap_k * PI * 0.5)
 		var snap_decay := exp(-snap_k * 5.5) * cos(snap_k * PI * 2.5)
-		set_shader_param("uSplitAmt", maxf(0.0, snap_decay * 0.85))
+		set_shader_param(SN_SPLIT_AMT, maxf(0.0, snap_decay * 0.85))
 		if bud_parent and is_instance_valid(bud_parent):
 			if coupled:
 				_bud_separation_step(dt, bud_d_snap + 0.10 * snap_e)
@@ -2005,7 +2039,7 @@ func _tick_budding(dt: float) -> void:
 	motor.update_support()
 	motor.move_vertical(dt, target_scale)
 	_apply_transform()
-	set_shader_param("uSplitDir", -bud_fwd)
+	set_shader_param(SN_SPLIT_DIR, -bud_fwd)
 
 	if k >= 1.0:
 		_finish_budding()
@@ -2307,7 +2341,7 @@ func merge_nearby_clones() -> void:
 		s.merge_timer = 0.0
 		s.merge_source_scale = s.target_scale
 		s.velocity = Vector3.ZERO
-		s.set_shader_param("uDrapeAmt", 0.0)
+		s.set_shader_param(SN_DRAPE_AMT, 0.0)
 
 	trigger_poke(Vector3(0.0, 0.3, 0.0), Vector3(0.0, -0.6, 0.0))
 

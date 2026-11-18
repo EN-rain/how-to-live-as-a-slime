@@ -11,10 +11,13 @@ enum WeatherState {
 	CLEARING = 4,
 }
 
+const WeatherProfile = preload("res://resources/weather_profile.gd")
+
 @export var cycle_duration_sec: float = 720.0  # 12 real minutes = 24 in-game hours
 @export_range(0.0, 1.0) var time_of_day: float = 0.42  # Starts ~10:05 AM bright morning
 @export var paused_time: bool = false
 @export var time_mode: String = "dynamic"  # dynamic | day | night | dawn | dusk
+@export var weather_profile: WeatherProfile = preload("res://resources/default_weather_profile.tres")
 
 var weather_state: WeatherState = WeatherState.CLEAR
 var weather_timer: float = 115.0
@@ -35,6 +38,15 @@ var _rain_audio: AudioStreamPlayer
 var _last_village_push: float = -1.0
 var _last_wetness_push: float = -1.0
 var _rain_streak_mat: StandardMaterial3D
+var _last_lit_tod: float = -10.0
+var _last_lit_wet: float = -10.0
+var _last_lit_rain: float = -10.0
+var _last_lit_wind: float = -10.0
+var _last_rain_alpha: float = -1.0
+var _last_rain_wind: float = -10.0
+var _audio_muted: bool = false
+var _audio_master_v: float = 0.8
+var _audio_sfx_v: float = 0.8
 
 
 func _ready() -> void:
@@ -51,12 +63,20 @@ func _ready() -> void:
 		set_time_mode(saved_mode)
 		if _settings.has_signal("settings_changed"):
 			_settings.connect("settings_changed", Callable(self, "_on_settings_changed"))
+	_sync_audio_prefs()
 
 	_apply_sky_shader()
 	_build_rain_particles()
 	_build_rain_audio()
 	_resolve_scene_refs()
 	_apply_lighting_and_globals(true)
+
+
+func _sync_audio_prefs() -> void:
+	if _settings != null and _settings.has_method("get_value"):
+		_audio_muted = bool(_settings.get_value("audio", "muted", false))
+		_audio_master_v = float(_settings.get_value("audio", "master_volume", 0.8))
+		_audio_sfx_v = float(_settings.get_value("audio", "sfx_volume", 0.8))
 
 
 func _on_settings_changed(_category: String, key: String, value: Variant) -> void:
@@ -67,6 +87,7 @@ func _on_settings_changed(_category: String, key: String, value: Variant) -> voi
 	elif key == "quality_preset":
 		_update_rain_quality_budget()
 	elif key == "sfx_volume" or key == "master_volume" or key == "muted":
+		_sync_audio_prefs()
 		_update_rain_audio(0.0)
 
 
@@ -146,55 +167,65 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	var newly_resolved := false
 	if _cave_atm == null or _village_root == null:
-		_resolve_scene_refs()
+		newly_resolved = _resolve_scene_refs()
 
 	if not paused_time and cycle_duration_sec > 1.0:
 		time_of_day = fposmod(time_of_day + delta / cycle_duration_sec, 1.0)
 
 	_tick_weather(delta)
-	_apply_lighting_and_globals(false)
+	_apply_lighting_and_globals(newly_resolved)
 	_update_rain_particles()
 	_update_rain_audio(delta)
 
 
-func _resolve_scene_refs() -> void:
+func _resolve_scene_refs() -> bool:
+	var resolved_now := false
 	if _terrain != null:
 		if _village_root == null or not is_instance_valid(_village_root):
 			_village_root = _terrain.get_node_or_null("Village")
+			if _village_root != null:
+				resolved_now = true
 		if _cave_atm == null or not is_instance_valid(_cave_atm):
-			var cave_sys := _terrain.get_node_or_null("CaveSystem")
+			var cave_sys := _terrain.get_node_or_null("Cave")
+			if cave_sys == null:
+				cave_sys = _terrain.get_node_or_null("CaveSystem")
 			if cave_sys != null:
 				_cave_atm = cave_sys.get_node_or_null("CaveAtmosphere")
+				if _cave_atm != null:
+					resolved_now = true
+	return resolved_now
 
 
 func _tick_weather(delta: float) -> void:
 	weather_timer -= delta
 	if weather_timer <= 0.0:
+		var wp := weather_profile if weather_profile != null else WeatherProfile.new()
 		match weather_state:
 			WeatherState.CLEAR:
 				weather_state = WeatherState.CLOUDY
-				weather_timer = randf_range(35.0, 55.0)
+				weather_timer = randf_range(wp.cloudy_duration_range.x, wp.cloudy_duration_range.y)
 			WeatherState.CLOUDY:
-				if randf() < 0.65:
+				if randf() < wp.cloudy_to_rain_chance:
 					weather_state = WeatherState.LIGHT_RAIN
-					weather_timer = randf_range(40.0, 75.0)
+					weather_timer = randf_range(wp.light_rain_duration_range.x, wp.light_rain_duration_range.y)
 				else:
 					weather_state = WeatherState.CLEAR
-					weather_timer = randf_range(95.0, 165.0)
+					weather_timer = randf_range(wp.clear_duration_range.x, wp.clear_duration_range.y)
 			WeatherState.LIGHT_RAIN:
-				if randf() < 0.45:
+				if randf() < wp.light_to_heavy_chance:
 					weather_state = WeatherState.HEAVY_RAIN
-					weather_timer = randf_range(30.0, 55.0)
+					weather_timer = randf_range(wp.heavy_rain_duration_range.x, wp.heavy_rain_duration_range.y)
 				else:
 					weather_state = WeatherState.CLEARING
-					weather_timer = randf_range(25.0, 40.0)
+					weather_timer = randf_range(wp.clearing_duration_range.x, wp.clearing_duration_range.y)
 			WeatherState.HEAVY_RAIN:
 				weather_state = WeatherState.CLEARING
-				weather_timer = randf_range(28.0, 45.0)
+				weather_timer = randf_range(wp.clearing_duration_range.x + 3.0, wp.clearing_duration_range.y + 5.0)
 			WeatherState.CLEARING:
 				weather_state = WeatherState.CLEAR
-				weather_timer = randf_range(110.0, 190.0)
+				weather_timer = randf_range(wp.clear_duration_range.x + 15.0, wp.clear_duration_range.y + 25.0)
 
 	var target_cloud := 0.0
 	var target_rain := 0.0
@@ -229,6 +260,15 @@ func _tick_weather(delta: float) -> void:
 
 
 func _apply_lighting_and_globals(force: bool) -> void:
+	if not force:
+		var dtod := absf(fposmod(time_of_day - _last_lit_tod + 0.5, 1.0) - 0.5)
+		if dtod < 0.00015 and absf(weather_wetness - _last_lit_wet) < 0.002 and absf(rain_intensity - _last_lit_rain) < 0.002 and absf(wind_strength - _last_lit_wind) < 0.002:
+			return
+	_last_lit_tod = time_of_day
+	_last_lit_wet = weather_wetness
+	_last_lit_rain = rain_intensity
+	_last_lit_wind = wind_strength
+
 	RenderingServer.global_shader_parameter_set(&"u_time_of_day", time_of_day)
 	RenderingServer.global_shader_parameter_set(&"u_weather_wetness", weather_wetness)
 	RenderingServer.global_shader_parameter_set(&"u_wind_strength", wind_strength)
@@ -325,6 +365,7 @@ func _apply_sky_shader() -> void:
 	var sky := Sky.new()
 	sky.sky_material = mat
 	sky.radiance_size = Sky.RADIANCE_SIZE_128
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
 	_world_env.environment.sky = sky
 	_world_env.environment.background_mode = Environment.BG_SKY
 
@@ -392,12 +433,17 @@ func _update_rain_particles() -> void:
 			cave_f = maxf(float(v), 0.0)
 	var eff_rain := rain_intensity * (1.0 - smoothstep(0.18, 0.55, cave_f))
 	if eff_rain <= 0.03:
-		_rain_particles.emitting = false
+		if _rain_particles.emitting:
+			_rain_particles.emitting = false
 		return
-	_rain_particles.emitting = true
+	if not _rain_particles.emitting:
+		_rain_particles.emitting = true
 	_rain_particles.amount_ratio = clampf(eff_rain, 0.05, 1.0)
 	if _rain_streak_mat != null:
-		_rain_streak_mat.albedo_color.a = lerpf(0.14, 0.38, eff_rain)
+		var target_a := lerpf(0.14, 0.38, eff_rain)
+		if absf(target_a - _last_rain_alpha) > 0.004:
+			_last_rain_alpha = target_a
+			_rain_streak_mat.albedo_color.a = target_a
 
 	var vp := get_viewport()
 	var cam := vp.get_camera_3d() if vp != null else null
@@ -409,9 +455,11 @@ func _update_rain_particles() -> void:
 		else:
 			fwd = Vector3.FORWARD
 		_rain_particles.global_position = cam.global_position + fwd * 12.0 + Vector3(0.0, 14.0, 0.0)
-	var pmat := _rain_particles.process_material as ParticleProcessMaterial
-	if pmat != null:
-		pmat.direction = Vector3(0.28 * wind_strength, -1.0, 0.14 * wind_strength).normalized()
+	if absf(wind_strength - _last_rain_wind) > 0.004:
+		_last_rain_wind = wind_strength
+		var pmat := _rain_particles.process_material as ParticleProcessMaterial
+		if pmat != null:
+			pmat.direction = Vector3(0.28 * wind_strength, -1.0, 0.14 * wind_strength).normalized()
 
 
 func _build_rain_audio() -> void:
@@ -464,20 +512,17 @@ func _build_rain_audio() -> void:
 func _update_rain_audio(_delta: float) -> void:
 	if _rain_audio == null:
 		return
-	var muted := false
-	var master_v := 0.8
-	var sfx_v := 0.8
-	if _settings != null and _settings.has_method("get_value"):
-		muted = bool(_settings.get_value("audio", "muted", false))
-		master_v = float(_settings.get_value("audio", "master_volume", 0.8))
-		sfx_v = float(_settings.get_value("audio", "sfx_volume", 0.8))
+	if rain_intensity <= 0.001 or _audio_muted:
+		if _rain_audio.playing:
+			_rain_audio.stop()
+		return
 	var cave_f := 0.0
 	if _cave_atm != null and "get" in _cave_atm:
 		var v: Variant = _cave_atm.get("_cave_factor")
 		if v != null:
 			cave_f = maxf(float(v), 0.0)
-	var eff := rain_intensity * (1.0 - cave_f * 0.72) * master_v * sfx_v
-	if muted or eff <= 0.02:
+	var eff := rain_intensity * (1.0 - cave_f * 0.72) * _audio_master_v * _audio_sfx_v
+	if eff <= 0.02:
 		if _rain_audio.playing:
 			_rain_audio.stop()
 		return

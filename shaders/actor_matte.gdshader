@@ -12,20 +12,34 @@ uniform float base_specular : hint_range(0.0, 0.5) = 0.08;
 // Per-instance hit flash without duplicating materials
 instance uniform vec4 hit_flash : source_color = vec4(0.0, 0.0, 0.0, 0.0);
 
+varying float v_wet_mul;
+varying float v_rough;
+varying float v_spec;
+varying float v_flash;
+varying vec3 v_flash_rgb;
+varying vec3 v_flash_emit;
+
+void vertex() {
+	float wet = clamp(u_weather_wetness, 0.0, 1.0);
+	v_wet_mul = mix(1.0, 0.88, wet);
+	v_rough = mix(base_roughness, 0.54, wet);
+	v_spec = mix(base_specular, 0.22, wet);
+	v_flash = clamp(hit_flash.a, 0.0, 1.0);
+	v_flash_rgb = hit_flash.rgb;
+	v_flash_emit = v_flash_rgb * v_flash * 0.65;
+}
+
 void fragment() {
 	vec3 col = albedo_color.rgb;
 	if (use_tex) {
 		col *= texture(albedo_tex, UV).rgb;
 	}
-	float wet = clamp(u_weather_wetness, 0.0, 1.0);
-	col *= mix(1.0, 0.88, wet);
-
-	float flash = clamp(hit_flash.a, 0.0, 1.0);
-	col = mix(col, hit_flash.rgb, flash);
+	col *= v_wet_mul;
+	col = mix(col, v_flash_rgb, v_flash);
 
 	ALBEDO = col;
 	METALLIC = 0.0;
-	ROUGHNESS = mix(base_roughness, 0.54, wet);
-	SPECULAR = mix(base_specular, 0.22, wet);
-	EMISSION = hit_flash.rgb * flash * 0.65;
+	ROUGHNESS = v_rough;
+	SPECULAR = v_spec;
+	EMISSION = v_flash_emit;
 }

@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ActorArchetype" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://resources/actors/actor_archetype.gd" id="1_arch"]
+
+[resource]
+script = ExtResource("1_arch")
+archetype_name = "Webwood Weaver"
+glb_path = "res://assets/mobs/Spider.glb"
+scale_factor = 0.34
+max_hp = 92.0
+attack_damage = 14.0
+walk_speed = 3.0
+run_speed = 7.4
+aggro_radius = 22.0
+territory_radius = 42.0
+leash_radius = 96.0
+hp_bar_height = 1.10
+body_radius = 0.64

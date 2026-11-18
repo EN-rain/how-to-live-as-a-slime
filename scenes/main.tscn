@@ -9,6 +9,7 @@
 [ext_resource type="PackedScene" path="res://terrain/terrain.tscn" id="9_terrain_scene"]
 [ext_resource type="Script" path="res://scripts/world_time_weather.gd" id="10_time_weather"]
 [ext_resource type="Script" path="res://scripts/world_ecosystem.gd" id="11_world_ecosystem"]
+[ext_resource type="Script" path="res://scripts/ambient_bgm.gd" id="12_ambient_bgm"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_world"]
 sky_top_color = Color(0.384, 0.635, 0.878, 1)
@@ -243,3 +244,6 @@ script = ExtResource("10_time_weather")
 
 [node name="WorldEcosystem" type="Node3D" parent="."]
 script = ExtResource("11_world_ecosystem")
+
+[node name="AmbientBgm" type="Node" parent="."]
+script = ExtResource("12_ambient_bgm")

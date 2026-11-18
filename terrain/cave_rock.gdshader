@@ -8,7 +8,7 @@ uniform sampler2D floor_texture : source_color, filter_linear_mipmap, repeat_ena
 uniform vec3 clay_base_color : source_color = vec3(0.60, 0.58, 0.55);
 uniform vec3 rock_warm_tint : source_color = vec3(0.82, 0.76, 0.68);
 uniform vec3 rock_cool_tint : source_color = vec3(0.54, 0.59, 0.68);
-uniform vec3 moss_tint : source_color = vec3(0.36, 0.70, 0.24);
+uniform vec3 moss_tint : source_color = vec3(0.18, 0.36, 0.13);
 uniform float triplanar_scale : hint_range(0.02, 0.8, 0.01) = 0.26;
 uniform float normal_bump_strength : hint_range(0.0, 2.5, 0.05) = 1.15;
 
@@ -17,9 +17,9 @@ uniform vec2 cave_origin_xz = vec2(-24.0, -52.0);
 uniform vec2 cave_fwd_xz = vec2(-0.425105, -0.905144);
 uniform vec2 cave_right_xz = vec2(0.905144, -0.425105);
 uniform vec2 skylight_local_xz = vec2(-62.0, 68.0);
-uniform vec3 grass_sun_color : source_color = vec3(0.48, 0.84, 0.28);
-uniform vec3 grass_mid_color : source_color = vec3(0.36, 0.72, 0.22);
-uniform vec3 grass_deep_color : source_color = vec3(0.28, 0.62, 0.18);
+uniform vec3 grass_sun_color : source_color = vec3(0.32, 0.56, 0.20);
+uniform vec3 grass_mid_color : source_color = vec3(0.23, 0.44, 0.15);
+uniform vec3 grass_deep_color : source_color = vec3(0.15, 0.32, 0.11);
 uniform vec3 terrain_rock_light : source_color = vec3(0.58, 0.60, 0.64);
 uniform vec3 terrain_rock_dark : source_color = vec3(0.38, 0.40, 0.44);
 
@@ -30,6 +30,8 @@ varying vec2 v_local_us;
 varying float v_macro_pat;
 varying float v_med_pat;
 varying float v_flow_streak;
+varying float v_geo_mask;
+varying float v_patch_mask;
 varying float v_ext_hint;
 
 float hash21(vec2 p) {
@@ -144,6 +146,8 @@ void vertex() {
 	v_macro_pat = fbm2(v_world_pos.xz * 0.025);
 	v_med_pat = fbm2(v_world_pos.xz * 0.25 + vec2(5.2, -8.7));
 	v_flow_streak = fbm2(v_local_us * 0.14 + vec2(3.7, -5.1));
+	v_geo_mask = fbm2(v_world_pos.xz * 0.09 + vec2(v_world_pos.y * 0.17, -v_world_pos.y * 0.13));
+	v_patch_mask = fbm2(v_local_us * 0.065 + vec2(13.4, -8.2));
 	v_ext_hint = (v_local_us.y < 10.0 || v_world_pos.y > 35.0 || v_baked.g > 0.25) ? 1.0 : 0.0;
 }
 
@@ -177,9 +181,9 @@ void fragment() {
 		float cam_dist = max(-VERTEX.z, 0.0);
 
 		if (ext_meadow < 0.9999) {
-			// 3D geological noise masks for non-repeating texture blending, strata, and crevices
-			float geo_mask = fbm2(v_world_pos.xz * 0.09 + vec2(v_world_pos.y * 0.17, -v_world_pos.y * 0.13));
-			float patch_mask = fbm2(v_local_us * 0.065 + vec2(13.4, -8.2));
+			// 3D geological noise masks interpolated from vertex() (11-15m wavelength, sub-meter mesh)
+			float geo_mask = v_geo_mask;
+			float patch_mask = v_patch_mask;
 
 			vec3 rock_sample = sample_triplanar_nonrepeating(rock_texture, v_world_pos, wn, triplanar_scale, geo_mask);
 			vec3 micro_sample = rock_sample;
@@ -192,7 +196,7 @@ void fragment() {
 			vec3 floor_sample = rock_sample;
 			// Mask floor gravel by low-frequency sediment patches so it never tiles across the floor
 			float sediment_mask = smoothstep(0.32, 0.72, patch_mask);
-			if (floor_blend > 0.02 && cam_dist < 62.0) {
+			if (floor_blend > 0.02 && sediment_mask > 0.005 && cam_dist < 62.0) {
 				floor_sample = sample_triplanar_nonrepeating(floor_texture, v_world_pos, wn, triplanar_scale * 1.15, patch_mask);
 			}
 

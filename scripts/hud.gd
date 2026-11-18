@@ -2,6 +2,8 @@ class_name SlimeHud
 extends Control
 ## HUD display for eaten stats, mass/volume, clone count, active status, and controls hints.
 
+const WorldLandmarks = preload("res://scripts/world_landmarks.gd")
+
 @export var slime: Slime
 @export var props: SlimeProps
 @export var hint_text := "WASD move · Space jump (hold) · Shift run · E split · Q roam · M merge · T time · Y weather · F5-F8 quality · F4 dev · Esc menu"
@@ -38,6 +40,7 @@ var _last_env := ""
 var _last_dev := ""
 var _last_dbg := ""
 var _time_weather: Node
+var _terrain_node: Node
 
 var _perf_accum_dt: float = 0.0
 var _perf_accum_frames: int = 0
@@ -198,6 +201,25 @@ func _build_death_ui() -> void:
 	_dark_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_dark_overlay.visible = false
 	add_child(_dark_overlay)
+
+	var death_ps := load("res://ui/death_overlay.tscn") as PackedScene
+	if death_ps != null:
+		var center := death_ps.instantiate() as CenterContainer
+		center.visible = false
+		add_child(center)
+		_death_backdrop = center
+		_death_title_label = center.get_node_or_null("DeathCard/VBox/TitleLabel") as Label
+		_death_reason_label = center.get_node_or_null("DeathCard/VBox/ReasonLabel") as Label
+		_btn_new_game = center.get_node_or_null("DeathCard/VBox/ButtonsRow/BtnNewGame") as Button
+		_btn_retry = center.get_node_or_null("DeathCard/VBox/ButtonsRow/BtnRetry") as Button
+		_btn_exit = center.get_node_or_null("DeathCard/VBox/ButtonsRow/BtnExit") as Button
+		if _btn_new_game != null:
+			_btn_new_game.pressed.connect(_on_new_game_pressed)
+		if _btn_retry != null:
+			_btn_retry.pressed.connect(_on_retry_pressed)
+		if _btn_exit != null:
+			_btn_exit.pressed.connect(_on_exit_pressed)
+		return
 
 	var center := CenterContainer.new()
 	center.name = "DeathPanelBackdrop"
@@ -602,11 +624,24 @@ func _process(_delta: float) -> void:
 		if _time_weather == null or not is_instance_valid(_time_weather):
 			_time_weather = get_tree().get_first_node_in_group("world_time_weather")
 		if _time_weather != null and _env_line != null:
+			var over_h := slime.global_position.y + 4.0
+			if _terrain_node == null or not is_instance_valid(_terrain_node):
+				_terrain_node = get_tree().get_first_node_in_group("terrain")
+				if _terrain_node == null and get_tree().current_scene != null:
+					_terrain_node = get_tree().current_scene.get_node_or_null("TerrainScene")
+			if _terrain_node != null and _terrain_node.has_method("sample_height"):
+				over_h = float(_terrain_node.sample_height(slime.global_position.x, slime.global_position.z))
+			var web_c := WorldLandmarks.SPIDER_FOREST_CENTER
+			if _terrain_node != null and _terrain_node.has_method("get_webwood_center"):
+				web_c = _terrain_node.call("get_webwood_center")
+			var zone_label := WorldLandmarks.describe_zone(slime.global_position, over_h, web_c)
 			var env_txt := "%s %s · %s" % [
 				_time_weather.get_hour_minute_string(),
 				_time_weather.get_phase_label(),
 				_time_weather.get_weather_label(),
 			]
+			if zone_label != "":
+				env_txt += "  |  " + zone_label
 			if env_txt != _last_env:
 				_last_env = env_txt
 				_env_line.text = env_txt

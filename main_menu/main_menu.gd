@@ -120,8 +120,7 @@ var _active_settings_tab := 0
 var _rebind_buttons: Dictionary = {}
 var _awaiting_rebind_action := ""
 
-# Compatibility dummy references for tests
-var _mascot = null
+# Menu stage state
 var _night_target := 0.0
 
 # Aliases for verify_menu.gd backwards compatibility
@@ -131,18 +130,6 @@ var _gate_width_val_lbl: Label:
 	get: return gate_width_val_lbl
 
 
-class DummyMascot:
-	var poke_count := 0
-	var show_core_xray := false
-	var mood_state = 0
-	var reduce_motion := false
-	var jiggle_strength := 1.0
-	var night_mode := 0.0
-
-	func poke_all() -> void:
-		poke_count += 1
-
-
 # Loading Screen State
 var _is_loading: bool = false
 var _loading_elapsed: float = 0.0
@@ -150,7 +137,6 @@ var _display_progress: float = 0.0
 
 
 func _ready() -> void:
-	_mascot = DummyMascot.new()
 	_settings = SlimeSettings.get_or_create()
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 
@@ -640,15 +626,6 @@ func _toggle_atmosphere() -> void:
 	_night_target = 1.0 if _night_target < 0.5 else 0.0
 	if _settings:
 		_settings.set_value("gameplay", "night_mode", _night_target > 0.5)
-
-
-func _toggle_core_xray() -> void:
-	pass
-
-
-func _poke_all_slimes() -> void:
-	if _mascot:
-		_mascot.poke_all()
 
 
 # Settings synchronization

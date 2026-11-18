@@ -1,6 +1,6 @@
 # UI, Settings, Audio Synthesis & HUD
 
-> **Context**: Deep technical architecture reference for [`autoload/settings_manager.gd`](file:///d:/slime/autoload/settings_manager.gd), [`scripts/hud.gd`](file:///d:/slime/scripts/hud.gd), [`main_menu/main_menu.gd`](file:///d:/slime/main_menu/main_menu.gd), [`main_menu/jelly_mascot_2d.gd`](file:///d:/slime/main_menu/jelly_mascot_2d.gd), and [`main_menu/core_rule_diagram_2d.gd`](file:///d:/slime/main_menu/core_rule_diagram_2d.gd).
+> **Context**: Deep technical architecture reference for [`autoload/settings_manager.gd`](file:///d:/slime/autoload/settings_manager.gd), [`scripts/hud.gd`](file:///d:/slime/scripts/hud.gd), [`main_menu/main_menu.gd`](file:///d:/slime/main_menu/main_menu.gd), and [`main_menu/core_rule_diagram_2d.gd`](file:///d:/slime/main_menu/core_rule_diagram_2d.gd).
 
 ---
 
@@ -16,7 +16,6 @@
          ├──► [MainMenu (2D Menu Stage)]
          │      ├── Threaded Scene Loading (ResourceLoader)
          │      ├── Sliding Sheet Sub-menus (Guide, Settings, Credits)
-         │      ├── JellyMascot2D (Interactive 2D spring-damper mascot)
          │      └── CoreRuleDiagram2D (Animated vector Core Sphere schematic)
          │
          └──► [SlimeHud (3D In-Game HUD)]
@@ -78,13 +77,6 @@ Rather than depending on external audio files, `SettingsManager` synthesizes cle
 * **Sub-Menu Sheets**:
   * Slide-out glass cards for **Guide**, **Settings**, and **Credits**.
   * Input rebinding capture modal with conflict detection.
-
-### [`jelly_mascot_2d.gd`](file:///d:/slime/main_menu/jelly_mascot_2d.gd)
-* Pure 2D interactive vector jelly stage:
-  * Features Hero Slime, Follower blob, and Roamer blob.
-  * 2D spring-damper physics for vertical squash/stretch ($\omega_n^2 = 68.0$, $2\zeta\omega_n = 6.8$) and horizontal shear/tilt ($\omega_n^2 = 54.0$, $2\zeta\omega_n = 6.2$).
-  * Eye tracking following the mouse cursor with smooth exponential easing.
-  * Floating background ambient bubbles and click ripple rings.
 
 ### [`core_rule_diagram_2d.gd`](file:///d:/slime/main_menu/core_rule_diagram_2d.gd)
 * Vector canvas schematic demonstrating the **Core Sphere clearance rule**:

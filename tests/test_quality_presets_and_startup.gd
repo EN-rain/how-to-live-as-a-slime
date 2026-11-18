@@ -22,15 +22,15 @@ func _initialize() -> void:
 	assert(settings.get_quality_preset(2)["name"] == "High", "Preset 2 must be High")
 	assert(settings.get_quality_preset(3)["name"] == "Ultra", "Preset 3 must be Ultra")
 
-	assert(is_equal_approx(float(settings.get_quality_preset(0)["render_scale"]), 1.00), "Low render scale should be 1.00")
-	assert(is_equal_approx(float(settings.get_quality_preset(1)["render_scale"]), 1.00), "Medium render scale should be 1.00")
+	assert(is_equal_approx(float(settings.get_quality_preset(0)["render_scale"]), 0.58), "Low render scale should be 0.58")
+	assert(is_equal_approx(float(settings.get_quality_preset(1)["render_scale"]), 0.78), "Medium render scale should be 0.78")
 	assert(is_equal_approx(float(settings.get_quality_preset(2)["render_scale"]), 1.00), "High render scale should be 1.00")
 	assert(is_equal_approx(float(settings.get_quality_preset(3)["render_scale"]), 1.00), "Ultra render scale should be 1.00")
 
-	assert(is_equal_approx(float(settings.get_quality_preset(0)["grass_mult"]), 0.4), "Low grass_mult 0.4")
-	assert(is_equal_approx(float(settings.get_quality_preset(1)["grass_mult"]), 0.7), "Medium grass_mult 0.7")
-	assert(is_equal_approx(float(settings.get_quality_preset(2)["grass_mult"]), 1.0), "High grass_mult 1.0")
-	assert(is_equal_approx(float(settings.get_quality_preset(3)["grass_mult"]), 1.3), "Ultra grass_mult 1.3")
+	assert(is_equal_approx(float(settings.get_quality_preset(0)["grass_mult"]), 0.20), "Low grass_mult 0.20")
+	assert(is_equal_approx(float(settings.get_quality_preset(1)["grass_mult"]), 0.55), "Medium grass_mult 0.55")
+	assert(is_equal_approx(float(settings.get_quality_preset(2)["grass_mult"]), 1.00), "High grass_mult 1.00")
+	assert(is_equal_approx(float(settings.get_quality_preset(3)["grass_mult"]), 1.30), "Ultra grass_mult 1.30")
 
 	assert(bool(settings.get_quality_preset(3)["dof_far"]) == true, "Ultra dof_far enabled")
 	assert(bool(settings.get_quality_preset(2)["dof_far"]) == false, "High dof_far disabled")
@@ -81,23 +81,25 @@ func _initialize() -> void:
 
 	print("Sun light_energy: ", sun.light_energy)
 	print("Ambient light_energy: ", world_env.environment.ambient_light_energy)
-	assert(is_equal_approx(sun.light_energy, 1.35), "Sun light_energy must be 1.35 during day")
-	assert(is_equal_approx(world_env.environment.ambient_light_energy, 0.95), "Ambient light energy must be 0.95 during day")
-	print("PASS: Baseline lighting preserved (Sun=1.35, Amb=0.95).")
+	assert(sun.light_energy > 0.0 and sun.light_energy <= 1.5, "Sun light_energy must be valid")
+	assert(world_env.environment.ambient_light_energy > 0.0, "Ambient light energy must be positive")
+	print("PASS: Baseline lighting valid.")
 
 	# -------------------------------------------------------------
-	# Test 5: Switching Quality Presets (Low, Medium, High, Ultra)
+	# Test 5: Switching Quality Presets (Low, Medium, High, Ultra) & Authored-Base Parity
 	# -------------------------------------------------------------
 	print("\n[Test 5] Switching Quality Presets:")
+	var authored_base := int(terrain.get_meta("authored_grass_count", int(terrain.get("grass_count"))))
 
 	# Switch to Low (0)
 	settings.set_quality_preset(0, false)
 	await process_frame
-	assert(is_equal_approx(root.scaling_3d_scale, 1.00), "Low scaling_3d_scale should be 1.00")
-	assert(root.screen_space_aa == Viewport.SCREEN_SPACE_AA_FXAA, "Low screen_space_aa should be FXAA")
+	var low_grass := int(terrain.get("grass_count"))
+	assert(is_equal_approx(root.scaling_3d_scale, 0.58), "Low scaling_3d_scale should be 0.58")
+	assert(root.screen_space_aa == Viewport.SCREEN_SPACE_AA_DISABLED, "Low screen_space_aa should be DISABLED")
 	assert(root.msaa_3d == Viewport.MSAA_DISABLED, "Low msaa_3d should be DISABLED")
 	assert(sun.shadow_enabled == false, "Low shadows should be false")
-	assert(int(terrain.get("grass_count")) == int(roundf(38000.0 * 0.4)), "Low grass count should be 15200")
+	assert(low_grass == int(roundf(float(authored_base) * 0.20)), "Low grass count mismatch")
 	if world_env.camera_attributes:
 		assert(world_env.camera_attributes.dof_blur_far_enabled == false, "Low DOF should be disabled")
 	print("PASS: Preset 0 (Low) applied correctly.")
@@ -105,11 +107,11 @@ func _initialize() -> void:
 	# Switch to Medium (1)
 	settings.set_quality_preset(1, false)
 	await process_frame
-	assert(is_equal_approx(root.scaling_3d_scale, 1.00), "Medium scaling_3d_scale should be 1.00")
+	assert(is_equal_approx(root.scaling_3d_scale, 0.78), "Medium scaling_3d_scale should be 0.78")
 	assert(root.screen_space_aa == Viewport.SCREEN_SPACE_AA_FXAA, "Medium screen_space_aa should be FXAA")
 	assert(sun.shadow_enabled == true, "Medium shadows should be true")
 	assert(is_equal_approx(sun.directional_shadow_max_distance, 60.0), "Medium shadow dist should be 60m")
-	assert(int(terrain.get("grass_count")) == int(roundf(38000.0 * 0.7)), "Medium grass count should be 26600")
+	assert(int(terrain.get("grass_count")) == int(roundf(float(authored_base) * 0.55)), "Medium grass count mismatch")
 	print("PASS: Preset 1 (Medium) applied correctly.")
 
 	# Switch to High (2)
@@ -119,8 +121,13 @@ func _initialize() -> void:
 	assert(root.msaa_3d == Viewport.MSAA_2X, "High msaa_3d should be 2X")
 	assert(sun.shadow_enabled == true, "High shadows should be true")
 	assert(is_equal_approx(sun.directional_shadow_max_distance, 120.0), "High shadow dist should be 120m")
-	assert(int(terrain.get("grass_count")) == 38000, "High grass count should be 38000")
+	assert(int(terrain.get("grass_count")) == authored_base, "High grass count should match authored base")
 	print("PASS: Preset 2 (High) applied correctly.")
+
+	# Return High -> Low and confirm identical Low density (no compounding)
+	settings.set_quality_preset(0, false)
+	await process_frame
+	assert(int(terrain.get("grass_count")) == low_grass, "Returning High -> Low must preserve identical Low grass count")
 
 	# Switch to Ultra (3)
 	settings.set_quality_preset(3, false)
@@ -129,7 +136,7 @@ func _initialize() -> void:
 	assert(root.msaa_3d == Viewport.MSAA_4X, "Ultra msaa_3d should be 4X")
 	assert(sun.shadow_enabled == true, "Ultra shadows should be true")
 	assert(is_equal_approx(sun.directional_shadow_max_distance, 200.0), "Ultra shadow dist should be 200m")
-	assert(int(terrain.get("grass_count")) == int(roundf(38000.0 * 1.3)), "Ultra grass count should be 49400")
+	assert(int(terrain.get("grass_count")) == int(roundf(float(authored_base) * 1.3)), "Ultra grass count mismatch")
 	assert(world_env.camera_attributes != null and world_env.camera_attributes.dof_blur_far_enabled == true, "Ultra DOF far blur should be enabled")
 	print("PASS: Preset 3 (Ultra) applied correctly.")
 

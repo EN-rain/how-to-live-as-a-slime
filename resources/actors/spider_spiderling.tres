@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ActorArchetype" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://resources/actors/actor_archetype.gd" id="1_arch"]
+
+[resource]
+script = ExtResource("1_arch")
+archetype_name = "Brood Spiderling"
+glb_path = "res://assets/mobs/Spider.glb"
+scale_factor = 0.19
+max_hp = 36.0
+attack_damage = 7.5
+walk_speed = 3.0
+run_speed = 8.4
+aggro_radius = 22.0
+territory_radius = 28.0
+leash_radius = 115.0
+hp_bar_height = 0.65
+body_radius = 0.42

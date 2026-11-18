@@ -60,9 +60,6 @@ extends Resource
 @export_range(0.05, 1.0, 0.01) var min_normal_squeeze := 0.18
 ## Minimum legal lateral squeeze for liquid posture, as a fraction of rest width.
 @export_range(0.05, 1.0, 0.01) var min_liquid_squeeze := 0.12
-## Inner clearance sphere radius ratio relative to the legal minimum squeeze.
-## Represents the invisible core: if an area fits this sphere, the slime's body conforms and goes through.
-@export var core_sphere_radius_ratio := 0.95
 ## Minimum legal liquid height ratio under overhead compression.
 @export_range(0.02, 1.0, 0.01) var min_liquid_height_ratio := 0.22
 ## Permit normal (non-liquid) posture to compress vertically under a low ceiling.
@@ -146,6 +143,16 @@ extends Resource
 @export_group("Camera")
 ## Camera starts following once the slime exceeds this speed (0..1 of walk_speed).
 @export var follow_speed_threshold := 0.01
+
+@export_group("Hazards & Ocean")
+@export_range(0.1, 1.0, 0.02) var sticky_web_speed_mult := 0.56
+@export_range(10.0, 300.0, 5.0) var ocean_warning_distance := 80.0
+@export_range(20.0, 400.0, 5.0) var ocean_lethal_distance := 130.0
+@export_range(0.15, 0.60, 0.01) var lethal_scale_threshold := 0.36
+
+
+func get_validated_ocean_lethal_distance() -> float:
+	return maxf(ocean_lethal_distance, ocean_warning_distance + 10.0)
 
 
 func volume_per_scale_cubed() -> float:

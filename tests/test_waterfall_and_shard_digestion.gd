@@ -140,12 +140,23 @@ func _run() -> void:
 				cluster_shards += 1
 			elif p.mesh.name.begins_with("CaveAbyssalCrystalShard_"):
 				abyss_shards += 1
-	var stones_mmi := cave.get_node_or_null("CaveCrystalStones") as MultiMeshInstance3D
+	var stones_node := cave.get_node_or_null("CaveCrystalStones")
+	var count_stones := func(n: Node) -> int:
+		if n == null:
+			return -1
+		if n is MultiMeshInstance3D and (n as MultiMeshInstance3D).multimesh != null:
+			return (n as MultiMeshInstance3D).multimesh.instance_count
+		var total := 0
+		for ch in n.get_children():
+			if ch is MultiMeshInstance3D and (ch as MultiMeshInstance3D).multimesh != null:
+				total += (ch as MultiMeshInstance3D).multimesh.instance_count
+		return total if total > 0 else -1
+	var stones_count: int = count_stones.call(stones_node)
 	var abyss_stone := cave.get_node_or_null("CaveAbyssalShards") as MeshInstance3D
 	print("Registered crystal props: cluster=%d abyss=%d | stone_cradles=%d" % [
-		cluster_shards, abyss_shards, stones_mmi.multimesh.instance_count if stones_mmi else -1
+		cluster_shards, abyss_shards, stones_count
 	])
-	if cluster_shards == 0 or abyss_shards != 20 or stones_mmi == null or abyss_stone == null:
+	if cluster_shards == 0 or abyss_shards != 20 or stones_count <= 0 or abyss_stone == null:
 		print("FAIL: Crystal shards or stone bases missing!")
 		quit(5)
 		return
@@ -156,11 +167,11 @@ func _run() -> void:
 		print("FAIL: Could not find any edible CaveCrystalShard_ prop!")
 		quit(6)
 		return
-	var stones_before := stones_mmi.multimesh.instance_count
+	var stones_before := stones_count
 	if not _test_absorb_prop(slime, eco, c_prop, "CaveClusterShard", false):
 		quit(7)
 		return
-	if not is_instance_valid(stones_mmi) or stones_mmi.multimesh.instance_count != stones_before:
+	if not is_instance_valid(stones_node) or int(count_stones.call(stones_node)) != stones_before:
 		print("FAIL: CaveCrystalStones changed or removed after shard digestion!")
 		quit(8)
 		return

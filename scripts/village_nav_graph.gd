@@ -104,24 +104,38 @@ func build(village_root: Node) -> void:
 		_off(-32.0, -72.0), _off(32.0, -72.0),
 	]
 
-	# Market Stalls & Civic Hangouts (connected to Plaza)
+	# Market Stalls & Civic Hangouts (aligned with Stall counters & Plaza props)
 	var stalls := [
-		{"pos": _off(-11.0, -9.0), "yaw": 0.4},
-		{"pos": _off(11.0, -9.0), "yaw": -0.4},
-		{"pos": _off(-11.0, 9.0), "yaw": 2.7},
-		{"pos": _off(11.0, 9.0), "yaw": -2.7},
+		{"pos": _off(-10.4, -8.6), "yaw": PI * 0.5},
+		{"pos": _off(-10.4, -4.6), "yaw": PI * 0.5},
+		{"pos": _off(-10.4, 4.6), "yaw": PI * 0.5},
+		{"pos": _off(10.4, -4.6), "yaw": -PI * 0.5},
+		{"pos": _off(10.4, 4.6), "yaw": -PI * 0.5},
+		{"pos": _off(10.4, -8.6), "yaw": -PI * 0.5},
 	]
 	for st in stalls:
 		_stall_spots.append(st)
 		_shelter_spots.append(st["pos"])
 
 	_social_spots = [
-		{"pos": _off(-6.0, -20.0), "yaw": 0.0, "anim": "Sit_Chair_Idle"},
-		{"pos": _off(15.0, -22.0), "yaw": 0.3, "anim": "Cheer"},
-		{"pos": _off(-22.0, 14.0), "yaw": 1.2, "anim": "Interact"},
-		{"pos": _off(22.0, 14.0), "yaw": -1.2, "anim": "Use_Item"},
-		{"pos": _off(-4.2, 4.2), "yaw": -0.8, "anim": "Idle"},
-		{"pos": _off(4.2, -4.2), "yaw": 2.3, "anim": "PickUp"},
+		# Market stall shopper fronts (facing into counters)
+		{"pos": _off(-6.3, -8.6), "yaw": -PI * 0.5, "anim": "Interact"},
+		{"pos": _off(-6.3, -4.6), "yaw": -PI * 0.5, "anim": "Cheer"},
+		{"pos": _off(-6.3, 4.6), "yaw": -PI * 0.5, "anim": "PickUp"},
+		{"pos": _off(6.3, -8.6), "yaw": PI * 0.5, "anim": "Interact"},
+		{"pos": _off(6.3, -4.6), "yaw": PI * 0.5, "anim": "Use_Item"},
+		{"pos": _off(6.3, 4.6), "yaw": PI * 0.5, "anim": "Cheer"},
+		# Central well gathering spots
+		{"pos": _off(-2.8, 2.8), "yaw": -0.8, "anim": "Cheer"},
+		{"pos": _off(2.8, -2.8), "yaw": 2.3, "anim": "Interact"},
+		{"pos": _off(0.0, 3.2), "yaw": 0.1, "anim": "PickUp"},
+		# Inn terrace & bakery seating
+		{"pos": _off(-13.1, -9.8), "yaw": -PI * 0.5, "anim": "Sit_Chair_Idle"},
+		{"pos": _off(-13.1, -5.8), "yaw": -PI * 0.5, "anim": "Use_Item"},
+		{"pos": _off(-13.1, 6.2), "yaw": -PI * 0.5, "anim": "Sit_Chair_Idle"},
+		# Guildhall steps & Blacksmith anvil courtyard
+		{"pos": _off(-5.2, -13.8), "yaw": 0.2, "anim": "Use_Item"},
+		{"pos": _off(7.5, 14.2), "yaw": -0.6, "anim": "Interact"},
 	]
 	_shelter_spots.append_array([_off(-14.0, -21.0), _off(16.0, -22.0), _off(25.0, 12.0), _off(-25.0, 12.0)])
 
@@ -136,8 +150,8 @@ func build(village_root: Node) -> void:
 
 	var fwd_dock := Vector2(sin(dock_yaw), cos(dock_yaw)).normalized()
 	var gate_s_xz := _off(0.0, 55.0)
-	var entry_xz := shore_xy - fwd_dock * 30.6
-	var ctrl_xz := Vector2(entry_xz.x - fwd_dock.x * 58.0, lerpf(gate_s_xz.y, entry_xz.y, 0.52))
+	var entry_xz := shore_xy - fwd_dock * 10.35
+	var ctrl_xz := entry_xz - fwd_dock * 64.0
 	var prev_pier_id := _gate_out_ids[1]
 	for t_step: float in [0.25, 0.50, 0.75, 1.0]:
 		var omt: float = 1.0 - t_step
@@ -146,8 +160,8 @@ func build(village_root: Node) -> void:
 		_connect(prev_pier_id, pid)
 		_fisherman_route.append(pt)
 		prev_pier_id = pid
-	var wharf_pt := shore_xy - fwd_dock * 8.35
-	var pier_end_pt := shore_xy + fwd_dock * 17.5
+	var wharf_pt := shore_xy - fwd_dock * 6.0
+	var pier_end_pt := shore_xy + fwd_dock * 18.8
 	var cottage_pt := cottage_xy - Vector2(-fwd_dock.y, fwd_dock.x) * 3.8
 	var wid := _add_pt(wharf_pt)
 	var peid := _add_pt(pier_end_pt)

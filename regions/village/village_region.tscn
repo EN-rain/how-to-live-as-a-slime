@@ -1,0 +1,25 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://regions/village/village_region.gd" id="1_reg"]
+[ext_resource type="Resource" path="res://regions/village/village_default_profile.tres" id="2_prof"]
+
+[node name="VillageRegion" type="Node3D"]
+script = ExtResource("1_reg")
+profile = ExtResource("2_prof")
+
+[node name="PlazaMarker" type="Marker3D" parent="."]
+
+[node name="GateNorth" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -52.5)
+
+[node name="GateSouth" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 52.5)
+
+[node name="GateWest" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -58.5, 0, 0)
+
+[node name="GateEast" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 58.5, 0, 0)
+
+[node name="HarborDockMarker" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 290)

@@ -53,6 +53,9 @@ var _cave_boulder_shapes: Array[Shape3D] = []
 var _slime_ref: Node3D = null
 var _pool_water_mat: ShaderMaterial = null
 var _lake_water_mat: ShaderMaterial = null
+var _surface_sea_level: float = 0.0
+static var _active_sea_level: float = 0.0
+static var _active_water_config: CaveWaterConfig = null
 var _stream_water_mat: ShaderMaterial = null
 var _ocean_water_mat: ShaderMaterial = null
 
@@ -68,9 +71,22 @@ var _door_awaken_val: float = 0.18
 var _door_astrolabe_outer: Node3D = null
 var _door_astrolabe_inner: Node3D = null
 var _door_relief_mat: ShaderMaterial = null
+const SN_SLIME_POS := &"slime_pos"
+const SN_SLIME_RADIUS := &"slime_radius"
+const SN_SLIME_HEIGHT := &"slime_height"
+const SN_SLIME_VEL := &"slime_vel"
+const SN_SLIME_SUBMERSION := &"slime_submersion"
+const SN_ACTIVE_WAKE_COUNT := &"active_wake_count"
+const SN_WAKE_POINTS := &"wake_points"
+const SN_AWAKEN_AMOUNT := &"awaken_amount"
+
 var _torch_flame_mats: Array[ShaderMaterial] = []
 var _torch_card_mats: Array[ShaderMaterial] = []
 var _torch_haze_mats: Array[ShaderMaterial] = []
+var _door_haze_meshes: Array[MeshInstance3D] = []
+var _door_particles: Array[GPUParticles3D] = []
+var _door_vfx_active: bool = true
+var _last_pushed_awaken: float = -1.0
 var _vault_door_omni: OmniLight3D = null
 var _vault_door_omni_base_pos: Vector3 = Vector3.ZERO
 var _reverb_bus_idx: int = -1
@@ -272,7 +288,13 @@ static func _local_dir_to_world_xz(du: float, ds: float) -> Vector3:
 
 ## Unified query for all water domains (Collapse Pool, Outflow Stream, Organic Underground Lake,
 ## and Overworld Ocean). Returns {in_water: bool, water_y: float, flow_vel: Vector3}.
-static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean: bool) -> Dictionary:
+func sample_world_water_at(world_pos: Vector3, ground_y: float, is_subterranean: bool) -> Dictionary:
+	return sample_water_at(world_pos, ground_y, is_subterranean, water_config, _surface_sea_level)
+
+
+static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean: bool, water_cfg: CaveWaterConfig = null, sea_level: float = NAN) -> Dictionary:
+	var eff_wcfg := water_cfg if water_cfg != null else _active_water_config
+	var sl := sea_level if not is_nan(sea_level) else _active_sea_level
 	var cl := CaveLayout.to_local(world_pos)
 	var in_cave_box := cl.z > -4.0 and cl.z < 245.0 and cl.x > -225.0 and cl.x < 80.0 and world_pos.y < 52.0
 
@@ -281,7 +303,7 @@ static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean
 		var pool_c: Vector3 = CaveLayout.POOL["c"]
 		var pool_rx: float = float(CaveLayout.POOL["rx"]) + 0.42
 		var pool_rz: float = float(CaveLayout.POOL["rz"]) + 0.42
-		var p_wy: float = float(CaveLayout.POOL["water_y"])
+		var p_wy: float = eff_wcfg.pool_water_y if eff_wcfg != null else float(CaveLayout.POOL["water_y"])
 		var pu := (cl.x - pool_c.x) / pool_rx
 		var ps := (cl.z - pool_c.z) / pool_rz
 		if pu * pu + ps * ps <= 1.0 and ground_y < p_wy + 0.04:
@@ -303,7 +325,7 @@ static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean
 		var lake_c: Vector3 = CaveLayout.UNDERGROUND_LAKE["c"]
 		var lake_rx: float = float(CaveLayout.UNDERGROUND_LAKE["rx"])
 		var lake_rz: float = float(CaveLayout.UNDERGROUND_LAKE["rz"])
-		var l_wy: float = float(CaveLayout.UNDERGROUND_LAKE["water_y"])
+		var l_wy: float = eff_wcfg.lake_water_y if eff_wcfg != null else float(CaveLayout.UNDERGROUND_LAKE["water_y"])
 		var lu := (cl.x - lake_c.x) / lake_rx
 		var ls := (cl.z - lake_c.z) / lake_rz
 		var l_raw := sqrt(lu * lu + ls * ls)
@@ -339,19 +361,24 @@ static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean
 				best_dir = Vector2(abx, abz).normalized()
 		if best_wy > -9000.0 and ground_y < best_wy + 0.16:
 			var eff_wy := maxf(best_wy, ground_y + 0.06)
+			var flow_spd: float = eff_wcfg.stream_flow_speed if eff_wcfg != null else 1.45
 			return {
 				"in_water": true,
 				"water_y": eff_wy,
-				"flow_vel": _local_dir_to_world_xz(best_dir.x * 1.45, best_dir.y * 1.45),
+				"flow_vel": _local_dir_to_world_xz(best_dir.x * flow_spd, best_dir.y * flow_spd),
 			}
 
 		return {"in_water": false, "water_y": -9999.0, "flow_vel": Vector3.ZERO}
 
-	# 4. Overworld Continental Coastline & Ocean (sea_level = 0.0)
-	if not in_cave_box and world_pos.y >= -48.0 and world_pos.y < 5.0 and ground_y < 0.04:
+	# 4. Overworld Continental Coastline & Ocean (shared sea_level) and Sunken Rat Swamp Lagoon
+	if not in_cave_box and world_pos.y >= sl - 48.0 and world_pos.y < sl + 5.0 and ground_y < sl + 0.04:
 		var r2_ow := world_pos.x * world_pos.x + world_pos.z * world_pos.z
 		if r2_ow > 1500.0 * 1500.0:
-			return {"in_water": true, "water_y": 0.0, "flow_vel": Vector3.ZERO}
+			return {"in_water": true, "water_y": sl, "flow_vel": Vector3.ZERO}
+	if not is_subterranean and world_pos.z > 416.0 and world_pos.z < 556.0 and world_pos.x > -330.0 and world_pos.x < -140.0:
+		var sw_y := WorldLandmarks.RAT_SWAMP_WATER_Y
+		if ground_y < sw_y + 0.03 and world_pos.y < sw_y + 1.8:
+			return {"in_water": true, "water_y": sw_y, "flow_vel": Vector3.ZERO}
 
 	return {"in_water": false, "water_y": -9999.0, "flow_vel": Vector3.ZERO}
 
@@ -369,6 +396,9 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	_stream_water_mat = null
 	_ocean_water_mat = null
 	if terrain_scene != null:
+		_surface_sea_level = float(terrain_scene.get("sea_level"))
+		_active_sea_level = _surface_sea_level
+		_active_water_config = water_config
 		var ow_water := terrain_scene.get_node_or_null("Water") as MeshInstance3D
 		if ow_water != null and ow_water.material_override is ShaderMaterial:
 			_ocean_water_mat = ow_water.material_override as ShaderMaterial
@@ -410,7 +440,7 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	shell.name = "CaveShell"
 	shell.mesh = cave_mesh
 	shell.layers = 0
-	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	shell.custom_aabb = AABB(Vector3(-345.0, -5.0, -325.0), Vector3(425.0, 85.0, 420.0))
 	add_child(shell)
 	_build_chunked_cave_shell(shell, cave_mesh, _get_cave_rock_material())
@@ -542,11 +572,12 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 	var d_skylight_2d := Vector2(cl.x - sky_c.x, cl.z - sky_c.z).length()
 	var d_mouth_2d := Vector2(cl.x, cl.z).length()
 
-	# Mode: 1 = far outdoors (hide deep cave interiors & lights); 2 = deep subterranean (hide overworld foliage/ocean/terrain); 0 = twilight/skylight transition
+	# Mode: 1 = far outdoors (hide deep cave interiors & lights); 2 = deep subterranean inside Crystal Cave (hide overworld foliage/ocean/terrain); 0 = twilight/skylight transition
+	var in_crystal_xy := absf(cl.x) < 190.0 and cl.z < 260.0
 	var target_mode := 0
-	if cave_factor < 0.03 and (cl.z < -8.0 or (cl.y > 41.0 and d_skylight_2d > 42.0 and d_mouth_2d > 54.0)):
+	if cave_factor < 0.03 and (not in_crystal_xy or cl.z < -8.0 or (cl.y > 41.0 and d_skylight_2d > 42.0 and d_mouth_2d > 54.0)):
 		target_mode = 1
-	elif cave_factor > 0.85 and cl.z > 44.0 and cl.y < 36.0 and d_skylight_2d > 48.0 and d_mouth_2d > 56.0:
+	elif in_crystal_xy and cave_factor > 0.85 and cl.z > 44.0 and cl.y < 36.0 and d_skylight_2d > 48.0 and d_mouth_2d > 56.0:
 		target_mode = 2
 
 	var show_cave_interior := (target_mode != 1)
@@ -622,9 +653,40 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 			for chunk_mi in _cave_shell_chunks:
 				if chunk_mi != null and is_instance_valid(chunk_mi):
 					chunk_mi.cast_shadow = target_shadow
-		var want_shell_vis := not (target_mode == 1 and d_mouth_2d > 110.0 and d_skylight_2d > 85.0 and cl.z < -22.0)
+		var want_shell_vis := not (target_mode == 1 and d_mouth_2d > 125.0 and d_skylight_2d > 85.0)
 		if _cave_shell.visible != want_shell_vis:
 			_cave_shell.visible = want_shell_vis
+		if want_shell_vis:
+			for chunk_mi in _cave_shell_chunks:
+				if chunk_mi == null or not is_instance_valid(chunk_mi):
+					continue
+				var zid := int(chunk_mi.get_meta("zid", 0))
+				var cvis := true
+				if target_mode == 1:
+					match zid:
+						0:
+							cvis = (d_mouth_2d <= 125.0)
+						1:
+							cvis = (d_mouth_2d <= 78.0) or (d_skylight_2d <= 72.0)
+						2:
+							cvis = (d_skylight_2d <= 85.0)
+						_:
+							cvis = false
+				if chunk_mi.visible != cvis:
+					chunk_mi.visible = cvis
+
+	# Gate deep vault brazier particles & heat-haze backbuffer copy behind cavern bend (cl.z < 62m or outdoors)
+	var want_vault_vfx := show_cave_interior and cl.z >= 62.0
+	if _door_vfx_active != want_vault_vfx:
+		_door_vfx_active = want_vault_vfx
+		for gp in _door_particles:
+			if gp != null and is_instance_valid(gp):
+				gp.emitting = want_vault_vfx
+				gp.visible = want_vault_vfx
+		if not want_vault_vfx:
+			for hmi in _door_haze_meshes:
+				if hmi != null and is_instance_valid(hmi):
+					hmi.visible = false
 
 
 func _load_or_compute_props(terrain_scene: Node3D, seed_val: int = 1337) -> Dictionary:
@@ -678,10 +740,10 @@ func _process(delta: float) -> void:
 		if "motor" in _slime_ref and _slime_ref.motor != null and "velocity" in _slime_ref.motor:
 			g_vel = _slime_ref.motor.velocity
 		_last_grass_slime_pos = g_belly
-		_grass_shader_mat.set_shader_parameter("slime_pos", g_belly)
-		_grass_shader_mat.set_shader_parameter("slime_radius", g_rad)
-		_grass_shader_mat.set_shader_parameter("slime_height", g_h)
-		_grass_shader_mat.set_shader_parameter("slime_vel", g_vel)
+		_grass_shader_mat.set_shader_parameter(SN_SLIME_POS, g_belly)
+		_grass_shader_mat.set_shader_parameter(SN_SLIME_RADIUS, g_rad)
+		_grass_shader_mat.set_shader_parameter(SN_SLIME_HEIGHT, g_h)
+		_grass_shader_mat.set_shader_parameter(SN_SLIME_VEL, g_vel)
 
 	var active_water_slime: Node3D = _slime_ref
 	if active_water_slime != null:
@@ -771,13 +833,13 @@ func _process(delta: float) -> void:
 		_water_uniforms_dirty = water_active
 		for wmat: ShaderMaterial in [_pool_water_mat, _lake_water_mat, _stream_water_mat, _ocean_water_mat]:
 			if wmat != null:
-				wmat.set_shader_parameter("slime_pos", s_pos)
-				wmat.set_shader_parameter("slime_vel", s_vel)
-				wmat.set_shader_parameter("slime_radius", s_rad)
-				wmat.set_shader_parameter("slime_submersion", _water_ripple_submersion)
-				wmat.set_shader_parameter("active_wake_count", active_wakes)
+				wmat.set_shader_parameter(SN_SLIME_POS, s_pos)
+				wmat.set_shader_parameter(SN_SLIME_VEL, s_vel)
+				wmat.set_shader_parameter(SN_SLIME_RADIUS, s_rad)
+				wmat.set_shader_parameter(SN_SLIME_SUBMERSION, _water_ripple_submersion)
+				wmat.set_shader_parameter(SN_ACTIVE_WAKE_COUNT, active_wakes)
 				if active_wakes > 0 or not water_active:
-					wmat.set_shader_parameter("wake_points", _wake_points)
+					wmat.set_shader_parameter(SN_WAKE_POINTS, _wake_points)
 
 	if not _geode_reward_collected and (_geode_reward_node == null or _geode_reward_node.visible) and _geode_reward_mesh != null and is_instance_valid(_geode_reward_mesh):
 		_geode_spin_t += delta
@@ -806,15 +868,25 @@ func _process(delta: float) -> void:
 		_door_anim_t += delta * speed_mult
 		_fire_flicker_t += delta
 
-		for mat: ShaderMaterial in _torch_flame_mats:
-			if mat != null:
-				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
-		for mat: ShaderMaterial in _torch_card_mats:
-			if mat != null:
-				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
-		for mat: ShaderMaterial in _torch_haze_mats:
-			if mat != null:
-				mat.set_shader_parameter("awaken_amount", _door_awaken_val)
+		if absf(_door_awaken_val - _last_pushed_awaken) > 1e-4:
+			_last_pushed_awaken = _door_awaken_val
+			for mat: ShaderMaterial in _torch_flame_mats:
+				if mat != null:
+					mat.set_shader_parameter(SN_AWAKEN_AMOUNT, _door_awaken_val)
+			for mat: ShaderMaterial in _torch_card_mats:
+				if mat != null:
+					mat.set_shader_parameter(SN_AWAKEN_AMOUNT, _door_awaken_val)
+			for mat: ShaderMaterial in _torch_haze_mats:
+				if mat != null:
+					mat.set_shader_parameter(SN_AWAKEN_AMOUNT, _door_awaken_val)
+
+		var vp := get_viewport()
+		var cam := vp.get_camera_3d() if vp != null else null
+		var cam_d_door := cam.global_position.distance_to(_door_node.global_position) if cam != null else (_slime_ref.global_position.distance_to(_door_node.global_position) if (_slime_ref != null and is_instance_valid(_slime_ref)) else 999.0)
+		var show_haze := _door_vfx_active and cam_d_door <= 38.0
+		for hmi in _door_haze_meshes:
+			if hmi != null and is_instance_valid(hmi) and hmi.visible != show_haze:
+				hmi.visible = show_haze
 
 		if _vault_door_omni != null and is_instance_valid(_vault_door_omni) and _vault_door_omni.visible:
 			var ft := _fire_flicker_t
@@ -838,8 +910,8 @@ func _process(delta: float) -> void:
 			_vault_door_omni.light_color = ember_c.lerp(flame_gold_c, color_t)
 
 
-func _physics_process(delta: float) -> void:
-	if Engine.is_editor_hint():
+func _physics_process(_delta: float) -> void:
+	if Engine.is_editor_hint() or _geode_reward_collected or _zone_cull_mode == 1 or _geode_reward_node == null:
 		return
 	var candidates: Array = []
 	var parent := get_parent()
@@ -852,18 +924,17 @@ func _physics_process(delta: float) -> void:
 		if direct_slime != null and not candidates.has(direct_slime):
 			candidates.append(direct_slime)
 
-	if not _geode_reward_collected and _geode_reward_node != null:
-		var rpos := _geode_reward_node.global_position
-		for s in candidates:
-			if not is_instance_valid(s):
-				continue
-			var sp: Vector3 = (s as Node3D).global_position
-			var dx := sp.x - rpos.x
-			var dz := sp.z - rpos.z
-			var dy := absf(sp.y - rpos.y)
-			if (dx * dx + dz * dz) <= 7.84 and dy <= 3.5:
-				_collect_geode_reward(s)
-				break
+	var rpos := _geode_reward_node.global_position
+	for s in candidates:
+		if not is_instance_valid(s):
+			continue
+		var sp: Vector3 = (s as Node3D).global_position
+		var dx := sp.x - rpos.x
+		var dz := sp.z - rpos.z
+		var dy := absf(sp.y - rpos.y)
+		if (dx * dx + dz * dz) <= 7.84 and dy <= 3.5:
+			_collect_geode_reward(s)
+			break
 
 
 func _register_crystal_props_deferred() -> void:
@@ -900,6 +971,7 @@ func _collect_geode_reward(collector: Variant) -> void:
 	if _geode_reward_collected:
 		return
 	_geode_reward_collected = true
+	set_physics_process(false)
 
 	var target_slime: Variant = collector
 	if collector != null and collector is Object and "role" in collector:
@@ -1101,6 +1173,7 @@ func _build_chunked_cave_shell(shell: MeshInstance3D, cave_mesh: ArrayMesh, mat:
 		c_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrs)
 		var chunk_mi := MeshInstance3D.new()
 		chunk_mi.name = "CaveShellChunk_%d" % zid
+		chunk_mi.set_meta("zid", zid)
 		chunk_mi.mesh = c_mesh
 		chunk_mi.material_override = mat
 		chunk_mi.cast_shadow = shell.cast_shadow
@@ -2813,8 +2886,10 @@ func _build_water_features() -> void:
 	wf_mat.set_shader_parameter("is_waterfall", true)
 
 	var lake_mat := pool_mat.duplicate() as ShaderMaterial
-	lake_mat.set_shader_parameter("shallow_color", Vector3(0.10, 0.48, 0.55))
-	lake_mat.set_shader_parameter("deep_color", Vector3(0.02, 0.08, 0.18))
+	var lake_sc: Color = water_config.lake_shallow_color if water_config != null else Color(0.10, 0.48, 0.55, 1.0)
+	var lake_dc: Color = water_config.lake_deep_color if water_config != null else Color(0.02, 0.08, 0.18, 1.0)
+	lake_mat.set_shader_parameter("shallow_color", Vector3(lake_sc.r, lake_sc.g, lake_sc.b))
+	lake_mat.set_shader_parameter("deep_color", Vector3(lake_dc.r, lake_dc.g, lake_dc.b))
 	lake_mat.set_shader_parameter("foam_color", Vector3(0.72, 0.92, 1.0))
 
 	var stream_mat := pool_mat.duplicate() as ShaderMaterial
@@ -3412,6 +3487,8 @@ func _build_pebbles(_rng: RandomNumberGenerator = null, props_data: Dictionary =
 		props_data = _load_or_compute_props(null)
 	var p_data: Dictionary = props_data.get("pebbles", {})
 	var xforms: Array = p_data.get("xforms", [])
+	if scatter_config != null and scatter_config.pebble_count < xforms.size():
+		xforms = xforms.slice(0, maxi(scatter_config.pebble_count, 0))
 	if xforms.is_empty():
 		return
 	var pmesh := _get_pebble_mesh()
@@ -4910,7 +4987,11 @@ func _attach_brazier_fire_vfx(
 	haze_mi.material_override = haze_mat
 	haze_mi.position = Vector3(0.0, 1.18, 0.0)
 	haze_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	haze_mi.visibility_range_end = 36.0
+	haze_mi.visibility_range_end_margin = 4.0
+	haze_mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	torch_pivot.add_child(haze_mi)
+	_door_haze_meshes.append(haze_mi)
 
 	# Supporting Effect: Rising soot/smoke billboard particles
 	var smoke_mat := ShaderMaterial.new()
@@ -4964,6 +5045,7 @@ func _attach_brazier_fire_vfx(
 	smoke_gp.position = Vector3(0.0, 0.92, 0.0)
 	smoke_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	torch_pivot.add_child(smoke_gp)
+	_door_particles.append(smoke_gp)
 
 	# Layer 2: Shader-driven crossed flame cards at the fire core
 	var card_mat := ShaderMaterial.new()
@@ -5035,6 +5117,7 @@ func _attach_brazier_fire_vfx(
 	fp_gp.position = Vector3(0.0, 0.08, 0.0)
 	fp_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	torch_pivot.add_child(fp_gp)
+	_door_particles.append(fp_gp)
 
 	# Supporting Effect: Rising spiraling ember/spark particles
 	var ember_mat := ShaderMaterial.new()
@@ -5087,6 +5170,7 @@ func _attach_brazier_fire_vfx(
 	ember_gp.position = Vector3(0.0, 0.04, 0.0)
 	ember_gp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	torch_pivot.add_child(ember_gp)
+	_door_particles.append(ember_gp)
 
 
 static func _round_arch_y_at_x(x_abs: float, half_span: float = 3.55, spring_y: float = 6.20) -> float:

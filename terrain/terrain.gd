@@ -10,6 +10,23 @@ extends Node3D
 ## - Pre-allocated index buffers for terrain and contour-hugging annular ocean.
 
 const VillageBuilder = preload("res://terrain/village_builder.gd")
+const WorldLandmarks = preload("res://scripts/world_landmarks.gd")
+const DungeonCaveBuilder = preload("res://scripts/dungeon_cave_builder.gd")
+const TerritoryBuilder = preload("res://scripts/territory_builder.gd")
+const WebwoodRegion = preload("res://regions/webwood/webwood_region.gd")
+const WebwoodProfile = preload("res://regions/webwood/webwood_profile.gd")
+const RegionalScatterProfile = preload("res://terrain/resources/regional_scatter_profile.gd")
+
+@export_group("Regions")
+@export var webwood_scene: PackedScene = preload("res://regions/webwood/webwood_region.tscn")
+@export var webwood_profile_override: WebwoodProfile = null
+@export var wolf_crag_scene: PackedScene = preload("res://regions/wolf_crag/wolf_crag_region.tscn")
+@export var waystones_scene: PackedScene = preload("res://regions/waystones/waystones_region.tscn")
+@export var rat_warren_scene: PackedScene = preload("res://regions/rat_warren/rat_warren_region.tscn")
+@export var skeleton_crypt_scene: PackedScene = preload("res://regions/skeleton_crypt/skeleton_crypt_region.tscn")
+@export var village_scene: PackedScene = preload("res://regions/village/village_region.tscn")
+@export var regional_scatter: RegionalScatterProfile = preload("res://terrain/resources/default_regional_scatter.tres")
+var _webwood_layout: Dictionary = {}
 
 @export_group("Continent & Terrain")
 @export var terrain_size: float = 7200.0:
@@ -150,6 +167,29 @@ const VillageBuilder = preload("res://terrain/village_builder.gd")
 @export_range(0.0, 0.6, 0.02) var grass_slope_gravity_blend: float = 0.18:
 	set(v):
 		grass_slope_gravity_blend = clampf(v, 0.0, 1.0)
+		_rebuild_if_ready()
+
+@export_group("Grass Map (Terrain Mask)")
+## Painted RGB terrain grass map texture (R=density, G=height multiplier, B=species bias).
+## When null, a multi-channel procedural grass map is generated automatically.
+@export var grass_map_override: Texture2D = null:
+	set(v):
+		grass_map_override = v
+		_grass_map_image = null
+		_grass_map_tex = null
+		_grass_map_rgba = PackedByteArray()
+		_rebuild_if_ready()
+## World-space coverage rect (X, Z origin and width, depth) mapped by grass_map UV [0..1].
+@export var grass_map_bounds: Rect2 = Rect2(-1200.0, -900.0, 2600.0, 3800.0)
+## Minimum height scale when the grass map G channel is 0.0 (cropped meadow lawns).
+@export_range(0.15, 1.0, 0.02) var grass_height_map_min: float = 0.36:
+	set(v):
+		grass_height_map_min = v
+		_rebuild_if_ready()
+## Maximum height scale when the grass map G channel is 1.0 (tall wildgrass swells).
+@export_range(1.0, 3.5, 0.05) var grass_height_map_max: float = 1.65:
+	set(v):
+		grass_height_map_max = v
 		_rebuild_if_ready()
 
 @export_group("Collision")
@@ -415,11 +455,59 @@ func _deferred_rebuild() -> void:
 	rebuild()
 
 
+func get_webwood_region() -> WebwoodRegion:
+	var reg := get_node_or_null("WebwoodRegion") as WebwoodRegion
+	if reg == null and webwood_scene != null:
+		reg = webwood_scene.instantiate() as WebwoodRegion
+		if reg != null:
+			reg.name = "WebwoodRegion"
+			add_child(reg)
+	if reg != null and webwood_profile_override != null:
+		reg.set("profile", webwood_profile_override)
+	return reg
+
+
+func get_webwood_layout() -> Dictionary:
+	var reg := get_webwood_region()
+	if reg != null:
+		return reg.get_effective_layout()
+	return {}
+
+
+func get_webwood_center() -> Vector2:
+	if not _webwood_layout.is_empty():
+		return _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+	var reg := get_node_or_null("WebwoodRegion") as WebwoodRegion
+	if reg != null:
+		return reg.get_effective_layout().get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+	return WorldLandmarks.SPIDER_FOREST_CENTER
+
+
+func _apply_webwood_shader_uniforms(mat: ShaderMaterial, layout: Dictionary) -> void:
+	if mat == null or layout.is_empty():
+		return
+	mat.set_shader_parameter("u_webwood_center", layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER))
+	mat.set_shader_parameter("u_webwood_trail_start", layout.get("trail_start", WorldLandmarks.SPIDER_TRAIL_START))
+	mat.set_shader_parameter("u_webwood_trail_bend", layout.get("trail_bend", WorldLandmarks.SPIDER_TRAIL_BEND))
+
+
 func rebuild() -> void:
 	_setup_noise()
+	_webwood_layout = get_webwood_layout()
 	var terrain_node := get_node_or_null("Terrain") as MeshInstance3D
 	var grass_node := get_node_or_null("Grass") as MultiMeshInstance3D
 	var wispy_node := get_node_or_null("GrassWispy") as MultiMeshInstance3D
+	var distant_node := get_node_or_null("GrassDistant") as MultiMeshInstance3D
+	if terrain_node != null:
+		_apply_webwood_shader_uniforms(terrain_node.material_override as ShaderMaterial, _webwood_layout)
+		if terrain_node.material_override is ShaderMaterial:
+			(terrain_node.material_override as ShaderMaterial).set_shader_parameter("sea_level", sea_level)
+	if grass_node != null:
+		_apply_webwood_shader_uniforms(grass_node.material_override as ShaderMaterial, _webwood_layout)
+	if wispy_node != null:
+		_apply_webwood_shader_uniforms(wispy_node.material_override as ShaderMaterial, _webwood_layout)
+	if distant_node != null:
+		_apply_webwood_shader_uniforms(distant_node.material_override as ShaderMaterial, _webwood_layout)
 	var water_node := get_node_or_null("Water") as MeshInstance3D
 	var trees_node := get_node_or_null("Trees") as Node3D
 	var rocks_node := get_node_or_null("Rocks") as Node3D
@@ -454,12 +542,44 @@ func rebuild() -> void:
 	_build_mountain_fog()
 	_build_cave()
 	_build_village()
+	_build_landmarks()
 
 
 func _build_village() -> void:
 	if Engine.is_editor_hint():
 		return
-	VillageBuilder.build_village(self)
+	var v_reg := _ensure_region_node("VillageRegion", village_scene)
+	VillageBuilder.build_village(self, v_reg)
+
+
+func _ensure_region_node(node_name: String, scene_res: PackedScene) -> Node:
+	var n := get_node_or_null(node_name)
+	if n == null and scene_res != null:
+		n = scene_res.instantiate()
+		if n != null:
+			n.name = node_name
+			add_child(n)
+	return n
+
+
+func _build_landmarks() -> void:
+	if Engine.is_editor_hint():
+		return
+	var crypt_reg := _ensure_region_node("SkeletonCryptRegion", skeleton_crypt_scene)
+	var skel_cave := get_node_or_null("SkeletonDungeonCave") as DungeonCaveBuilder
+	if skel_cave == null:
+		skel_cave = DungeonCaveBuilder.new()
+		skel_cave.set("crypt_region", crypt_reg)
+		add_child(skel_cave)
+	var wolf_reg := _ensure_region_node("WolfCragRegion", wolf_crag_scene)
+	var waystones_reg := _ensure_region_node("WaystonesRegion", waystones_scene)
+	var rat_reg := _ensure_region_node("RatWarrenRegion", rat_warren_scene)
+	var terr_b := get_node_or_null("BeastTerritories") as TerritoryBuilder
+	if terr_b == null:
+		terr_b = TerritoryBuilder.new()
+		terr_b.name = "BeastTerritories"
+		add_child(terr_b)
+		terr_b.setup_territories(self, _spider_forest_trees, get_webwood_region(), wolf_reg, waystones_reg, rat_reg)
 
 
 func _build_cave() -> void:
@@ -603,6 +723,7 @@ func sample_height(x: float, z: float) -> float:
 	var land_h := maxf(valley_floor + inner_gentle + meadow_hills * (0.35 + 0.65 * interior_mask) + highland_features, 20.0)
 	if enable_cave:
 		land_h = CaveSystem.apply_overworld_mountain_and_plaza(x, z, land_h, _noise)
+	land_h = WorldLandmarks.apply_landmark_terrain_grading(x, z, land_h, get_webwood_center())
 
 	# 4. Continental Coastline, Sweeping Golden Sandy Beach Shelf & Soft Coastal Dunes
 	var coast_inner := continent_radius - 295.0
@@ -701,13 +822,13 @@ const CAVE_SUBDIV_Z_MAX := -30.0
 
 
 func _get_cave_cell_subdiv(n: int) -> int:
-	if not enable_cave or n < 96:
+	if n < 96:
 		return 1
 	return 8
 
 
 func _is_cave_subdiv_cell(ix: int, iz: int, n: int) -> bool:
-	if not enable_cave or n < 96:
+	if n < 96:
 		return false
 	if ix < 0 or iz < 0 or ix >= n or iz >= n:
 		return false
@@ -715,9 +836,16 @@ func _is_cave_subdiv_cell(ix: int, iz: int, n: int) -> bool:
 	var x1 := _cached_grid_coords[ix + 1]
 	var z0 := _cached_grid_coords[iz]
 	var z1 := _cached_grid_coords[iz + 1]
-	var in_cave_box := x1 > CAVE_SUBDIV_X_MIN and x0 < CAVE_SUBDIV_X_MAX and z1 > CAVE_SUBDIV_Z_MIN and z0 < CAVE_SUBDIV_Z_MAX
+	var in_cave_box := enable_cave and x1 > CAVE_SUBDIV_X_MIN and x0 < CAVE_SUBDIV_X_MAX and z1 > CAVE_SUBDIV_Z_MIN and z0 < CAVE_SUBDIV_Z_MAX
 	var in_village_box := x1 > 470.0 and x0 < 730.0 and z1 > 2090.0 and z0 < 2520.0
-	return in_cave_box or in_village_box
+	var in_landmark_box := WorldLandmarks.is_in_extra_subdiv_box(x0, x1, z0, z1)
+	return in_cave_box or in_village_box or in_landmark_box
+
+
+func _is_quad_in_any_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v11: Vector3) -> bool:
+	if enable_cave and CaveSystem.is_quad_in_portal_cutout(v00, v10, v01, v11):
+		return true
+	return WorldLandmarks.is_quad_in_extra_cutout(v00, v10, v01, v11)
 
 
 func _sample_cave_subdiv_vertex_y(ix: int, iz: int, sx: int, sz: int, sub: int, n: int, x0: float, x1: float, z0: float, z1: float) -> float:
@@ -841,6 +969,9 @@ func sample_surface_exact(x: float, z: float) -> Vector4:
 ## and returns the overworld terrain surface everywhere else (including on top of the karst mountain roof).
 func sample_support_floor(x: float, z: float, actor_foot_y: float) -> Vector4:
 	var over_surf := sample_surface_exact(x, z)
+	if WorldLandmarks.is_in_extra_cave(x, z, actor_foot_y, over_surf.w):
+		var ec_surf := WorldLandmarks.sample_extra_cave_floor(x, z, actor_foot_y, over_surf.w)
+		return Vector4(ec_surf.x, ec_surf.y, ec_surf.z, ec_surf.w - 0.30)
 	if enable_cave:
 		if CaveSystem.is_subterranean_or_cutout(x, z, actor_foot_y, over_surf.w):
 			var c_surf := CaveSystem.sample_sdf_floor_below(x, z, actor_foot_y, over_surf.w)
@@ -859,6 +990,8 @@ func sample_support_floor(x: float, z: float, actor_foot_y: float) -> Vector4:
 ## Exact initial spawn floor height query for Slime._ready() (supports both inside-cave and overworld spawns).
 func sample_spawn_floor_y(x: float, z: float, est_foot_y: float) -> float:
 	var over_h := sample_height(x, z)
+	if WorldLandmarks.is_in_extra_cave(x, z, est_foot_y, over_h):
+		return WorldLandmarks.sample_extra_cave_floor(x, z, est_foot_y, over_h).w
 	if enable_cave:
 		if CaveSystem.is_subterranean_or_cutout(x, z, est_foot_y, over_h):
 			return CaveSystem.sample_sdf_floor_below(x, z, est_foot_y, over_h).w
@@ -918,7 +1051,7 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 	chunks_root.name = "TerrainChunks"
 	terrain_node.add_child(chunks_root)
 
-	var cut_cave_portal := enable_cave and n >= 96
+	var cut_cave_portal := n >= 96
 	var sub := _get_cave_cell_subdiv(n)
 	var grid_chunks := 8
 	var cell_step := maxi(1, int(ceil(float(n) / float(grid_chunks))))
@@ -1017,7 +1150,7 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 								var si10 := si00 + 1
 								var si01 := sr1 + sx
 								var si11 := si01 + 1
-								if cut_cave_portal and CaveSystem.is_quad_in_portal_cutout(c_verts[si00], c_verts[si10], c_verts[si01], c_verts[si11]):
+								if cut_cave_portal and _is_quad_in_any_cutout(c_verts[si00], c_verts[si10], c_verts[si01], c_verts[si11]):
 									continue
 								c_indices.append(si00)
 								c_indices.append(si10)
@@ -1031,7 +1164,7 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 					var g10 := g00 + 1
 					var g01 := r1 + ix
 					var g11 := g01 + 1
-					if cut_cave_portal and CaveSystem.is_quad_in_portal_cutout(verts[g00], verts[g10], verts[g01], verts[g11]):
+					if cut_cave_portal and _is_quad_in_any_cutout(verts[g00], verts[g10], verts[g01], verts[g11]):
 						continue
 
 					var l00: int = add_base_vert.call(g00)
@@ -1063,7 +1196,7 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 			chunk_mi.material_override = mat_ov
 			chunk_mi.cast_shadow = shadow_mode
 			chunk_mi.gi_mode = gi
-			chunk_mi.custom_aabb = AABB(min_pt, max_pt - min_pt).grow(0.5)
+			chunk_mi.custom_aabb = c_mesh.get_aabb().grow(0.5)
 			chunks_root.add_child(chunk_mi)
 
 	terrain_node.mesh = null
@@ -1117,7 +1250,7 @@ func _build_low_mem_collision_shape(verts: PackedVector3Array, row_count: int, n
 									var sv10 := Vector3(sx1, _sample_cave_subdiv_vertex_y(cix, ciz, sx + 1, sz, sub, n, x0, x1, z0, z1), sz0)
 									var sv01 := Vector3(sx0, _sample_cave_subdiv_vertex_y(cix, ciz, sx, sz + 1, sub, n, x0, x1, z0, z1), sz1)
 									var sv11 := Vector3(sx1, _sample_cave_subdiv_vertex_y(cix, ciz, sx + 1, sz + 1, sub, n, x0, x1, z0, z1), sz1)
-									if enable_cave and n >= 96 and CaveSystem.is_quad_in_portal_cutout(sv00, sv10, sv01, sv11):
+									if n >= 96 and _is_quad_in_any_cutout(sv00, sv10, sv01, sv11):
 										continue
 									faces.append(sv00)
 									faces.append(sv01)
@@ -1130,7 +1263,7 @@ func _build_low_mem_collision_shape(verts: PackedVector3Array, row_count: int, n
 							var cv10 := verts[ciz * row_count + cix + 1]
 							var cv01 := verts[(ciz + 1) * row_count + cix]
 							var cv11 := verts[(ciz + 1) * row_count + cix + 1]
-							if enable_cave and n >= 96 and CaveSystem.is_quad_in_portal_cutout(cv00, cv10, cv01, cv11):
+							if n >= 96 and _is_quad_in_any_cutout(cv00, cv10, cv01, cv11):
 								continue
 							faces.append(cv00)
 							faces.append(cv01)
@@ -1149,7 +1282,7 @@ func _build_low_mem_collision_shape(verts: PackedVector3Array, row_count: int, n
 			# Cull abyss quads deeper than the active seabed (below seabed_depth - 15m)
 			if v00.y < cull_floor and v10.y < cull_floor and v01.y < cull_floor and v11.y < cull_floor:
 				continue
-			if enable_cave and n >= 96 and CaveSystem.is_quad_in_portal_cutout(v00, v10, v01, v11):
+			if n >= 96 and _is_quad_in_any_cutout(v00, v10, v01, v11):
 				continue
 			# Counter-clockwise winding: face normals point UPWARD towards the sky
 			faces.append(v00)
@@ -1361,6 +1494,169 @@ static var _cached_grass_center: Vector2 = Vector2(INF, INF)
 var _grass_center: Vector2 = Vector2.ZERO
 var _player_ref: Node3D = null
 var _grass_mat: ShaderMaterial = null
+var _grass_map_image: Image = null
+var _grass_map_tex: Texture2D = null
+var _grass_map_rgba: PackedByteArray = PackedByteArray()
+var _grass_map_w: int = 0
+var _grass_map_h: int = 0
+
+
+func _ensure_grass_map() -> void:
+	if _grass_map_tex != null and not _grass_map_rgba.is_empty():
+		return
+	if grass_map_override != null:
+		_grass_map_tex = grass_map_override
+		var img := grass_map_override.get_image()
+		if img != null:
+			_grass_map_image = img.duplicate() as Image
+			_grass_map_image.convert(Image.FORMAT_RGBA8)
+			_grass_map_w = _grass_map_image.get_width()
+			_grass_map_h = _grass_map_image.get_height()
+			_grass_map_rgba = _grass_map_image.get_data()
+			return
+
+	const RES := 512
+	var n_d := FastNoiseLite.new()
+	n_d.seed = terrain_seed + 401
+	n_d.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n_d.fractal_octaves = 3
+	n_d.frequency = 0.15
+
+	var n_h := FastNoiseLite.new()
+	n_h.seed = terrain_seed + 709
+	n_h.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n_h.fractal_octaves = 3
+	n_h.frequency = 0.11
+
+	var n_hd := FastNoiseLite.new()
+	n_hd.seed = terrain_seed + 911
+	n_hd.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n_hd.fractal_octaves = 2
+	n_hd.frequency = 0.26
+
+	var img_d := n_d.get_image(RES, RES, false, false, false)
+	var img_h := n_h.get_image(RES, RES, false, false, false)
+	var img_hd := n_hd.get_image(RES, RES, false, false, false)
+	img_d.convert(Image.FORMAT_L8)
+	img_h.convert(Image.FORMAT_L8)
+	img_hd.convert(Image.FORMAT_L8)
+
+	var db := img_d.get_data()
+	var hb := img_h.get_data()
+	var hdb := img_hd.get_data()
+	var total := RES * RES
+	var rgba := PackedByteArray()
+	rgba.resize(total * 4)
+	for i in range(total):
+		var d_raw := float(db[i]) / 255.0
+		var h_raw := float(hb[i]) / 255.0 + (float(hdb[i]) / 255.0 - 0.5) * 0.34
+		var dens := clampf(0.45 + smoothstep(0.20, 0.78, d_raw) * 0.55, 0.0, 1.0)
+		var h_val := clampf(smoothstep(0.24, 0.76, clampf(h_raw, 0.0, 1.0)), 0.0, 1.0)
+		var t_val := clampf(h_val * 0.74 + dens * 0.26, 0.0, 1.0)
+		var o := i * 4
+		rgba[o] = int(round(dens * 255.0))
+		rgba[o + 1] = int(round(h_val * 255.0))
+		rgba[o + 2] = int(round(t_val * 255.0))
+		rgba[o + 3] = 255
+
+	_grass_map_w = RES
+	_grass_map_h = RES
+	_grass_map_rgba = rgba
+	_grass_map_image = Image.create_from_data(RES, RES, false, Image.FORMAT_RGBA8, rgba)
+	_grass_map_tex = ImageTexture.create_from_image(_grass_map_image)
+
+
+func get_grass_map_texture() -> Texture2D:
+	_ensure_grass_map()
+	return _grass_map_tex
+
+
+## Bilinearly samples the terrain Grass Map at world (x, z):
+## returns Vector3(density [0..1], height_multiplier [min..max], species_bias [0..1]).
+func sample_grass_map(x: float, z: float) -> Vector3:
+	_ensure_grass_map()
+	if _grass_map_rgba.is_empty() or _grass_map_w <= 1 or _grass_map_h <= 1:
+		return Vector3(1.0, 1.0, 0.35)
+	var u := clampf((x - grass_map_bounds.position.x) / maxf(1.0, grass_map_bounds.size.x), 0.0, 1.0)
+	var v := clampf((z - grass_map_bounds.position.y) / maxf(1.0, grass_map_bounds.size.y), 0.0, 1.0)
+	var fx := u * float(_grass_map_w - 1)
+	var fy := v * float(_grass_map_h - 1)
+	var x0 := int(floor(fx))
+	var y0 := int(floor(fy))
+	var x1 := mini(x0 + 1, _grass_map_w - 1)
+	var y1 := mini(y0 + 1, _grass_map_h - 1)
+	var tx := fx - float(x0)
+	var ty := fy - float(y0)
+
+	var i00 := (y0 * _grass_map_w + x0) * 4
+	var i10 := (y0 * _grass_map_w + x1) * 4
+	var i01 := (y1 * _grass_map_w + x0) * 4
+	var i11 := (y1 * _grass_map_w + x1) * 4
+
+	var inv255 := 1.0 / 255.0
+	var r0 := lerpf(float(_grass_map_rgba[i00]), float(_grass_map_rgba[i10]), tx)
+	var r1 := lerpf(float(_grass_map_rgba[i01]), float(_grass_map_rgba[i11]), tx)
+	var dens := lerpf(r0, r1, ty) * inv255
+
+	var g0 := lerpf(float(_grass_map_rgba[i00 + 1]), float(_grass_map_rgba[i10 + 1]), tx)
+	var g1 := lerpf(float(_grass_map_rgba[i01 + 1]), float(_grass_map_rgba[i11 + 1]), tx)
+	var h_norm := lerpf(g0, g1, ty) * inv255
+
+	var b0 := lerpf(float(_grass_map_rgba[i00 + 2]), float(_grass_map_rgba[i10 + 2]), tx)
+	var b1 := lerpf(float(_grass_map_rgba[i01 + 2]), float(_grass_map_rgba[i11 + 2]), tx)
+	var type_bias := lerpf(b0, b1, ty) * inv255
+
+	return Vector3(dens, lerpf(grass_height_map_min, grass_height_map_max, h_norm), type_bias)
+
+
+## Paint a circular brush stroke onto the terrain grass map (density/height_norm/type_bias in [0..1]) and refresh GPU textures.
+func paint_grass_map(world_xz: Vector2, radius: float, density: float, height_norm: float, type_bias: float, opacity: float = 1.0) -> void:
+	_ensure_grass_map()
+	if _grass_map_image == null or _grass_map_w <= 1 or _grass_map_h <= 1:
+		return
+	var uv := Vector2(
+		(world_xz.x - grass_map_bounds.position.x) / maxf(1.0, grass_map_bounds.size.x),
+		(world_xz.y - grass_map_bounds.position.y) / maxf(1.0, grass_map_bounds.size.y)
+	)
+	var rx := int(ceil((radius / maxf(1.0, grass_map_bounds.size.x)) * float(_grass_map_w)))
+	var ry := int(ceil((radius / maxf(1.0, grass_map_bounds.size.y)) * float(_grass_map_h)))
+	var cx := int(round(uv.x * float(_grass_map_w - 1)))
+	var cy := int(round(uv.y * float(_grass_map_h - 1)))
+	var rad_sq := radius * radius
+	var dens_c := clampf(density, 0.0, 1.0)
+	var h_c := clampf(height_norm, 0.0, 1.0)
+	var t_c := clampf(type_bias, 0.0, 1.0)
+	var op := clampf(opacity, 0.0, 1.0)
+	for py in range(maxi(0, cy - ry), mini(_grass_map_h, cy + ry + 1)):
+		var wz := grass_map_bounds.position.y + (float(py) / float(_grass_map_h - 1)) * grass_map_bounds.size.y
+		for px in range(maxi(0, cx - rx), mini(_grass_map_w, cx + rx + 1)):
+			var wx := grass_map_bounds.position.x + (float(px) / float(_grass_map_w - 1)) * grass_map_bounds.size.x
+			var d_sq := Vector2(wx - world_xz.x, wz - world_xz.y).length_squared()
+			if d_sq > rad_sq:
+				continue
+			var falloff := (1.0 - smoothstep(0.35, 1.0, sqrt(d_sq) / maxf(0.01, radius))) * op
+			var o := (py * _grass_map_w + px) * 4
+			var cr := float(_grass_map_rgba[o]) / 255.0
+			var cg := float(_grass_map_rgba[o + 1]) / 255.0
+			var cb := float(_grass_map_rgba[o + 2]) / 255.0
+			_grass_map_rgba[o] = int(round(lerpf(cr, dens_c, falloff) * 255.0))
+			_grass_map_rgba[o + 1] = int(round(lerpf(cg, h_c, falloff) * 255.0))
+			_grass_map_rgba[o + 2] = int(round(lerpf(cb, t_c, falloff) * 255.0))
+	_grass_map_image = Image.create_from_data(_grass_map_w, _grass_map_h, false, Image.FORMAT_RGBA8, _grass_map_rgba)
+	if _grass_map_tex is ImageTexture:
+		(_grass_map_tex as ImageTexture).update(_grass_map_image)
+	else:
+		_grass_map_tex = ImageTexture.create_from_image(_grass_map_image)
+	_sync_grass_map_to_materials()
+
+
+func _sync_grass_map_to_materials() -> void:
+	_ensure_grass_map()
+	var bounds_v := Vector4(grass_map_bounds.position.x, grass_map_bounds.position.y, grass_map_bounds.size.x, grass_map_bounds.size.y)
+	for gm: ShaderMaterial in [_grass_mat, _grass_far_mat, _grass_wispy_mat, _grass_wispy_far_mat]:
+		if gm != null:
+			gm.set_shader_parameter(&"grass_map", _grass_map_tex)
+			gm.set_shader_parameter(&"grass_map_bounds", bounds_v)
 
 
 func _get_grass_mesh() -> Mesh:
@@ -1427,18 +1723,37 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 	if enable_cave and not Engine.is_editor_hint():
 		pass_defs.append([mouth_c, 72.0, 8000, -1.0])
 		pass_defs.append([sky_c, 64.0, 5600, -1.0])
+	if not Engine.is_editor_hint():
+		pass_defs.append([Vector2(0.0, 10.0), 58.0, 5800, -1.0])
+		var web_c: Vector2 = _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+		var web_gr_r: float = float(_webwood_layout.get("grass_radius", 145.0))
+		var web_gr_n: int = int(_webwood_layout.get("grass_count", 14500))
+		pass_defs.append([web_c, web_gr_r, web_gr_n, -1.0])
+		var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
+		pass_defs.append([WorldLandmarks.WOLF_CRAG_CENTER, rs.wolf_grass_radius, rs.wolf_grass_count, -1.0])
+		pass_defs.append([Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0), rs.rat_grass_radius, rs.rat_grass_count, -1.0])
+		pass_defs.append([WorldLandmarks.SKEL_CAVE_MOUTH, rs.skel_grass_radius, rs.skel_grass_count, -1.0])
+		pass_defs.append([Vector2(590.0, 2200.0), rs.village_grass_radius, rs.village_grass_count, -1.0])
 	var main_reach := 0.0
 	for pass_i in pass_defs.size():
 		var pc: Vector2 = pass_defs[pass_i][0]
-		var max_rings := int(ceil(float(pass_defs[pass_i][1]) / spacing))
-		var pass_cap: int = (common_xforms.size() + wispy_xforms.size() + int(pass_defs[pass_i][2])) if pass_i > 0 else int(pass_defs[pass_i][2])
+		var raw_cap := int(pass_defs[pass_i][2])
+		var pass_r := float(pass_defs[pass_i][1])
+		if pass_i == 0:
+			pass_r = minf(pass_r, sqrt(maxf(float(raw_cap), 400.0) * spacing * spacing / PI) * 1.18)
+		var max_rings := int(ceil(pass_r / spacing))
+		var pass_cap: int = (common_xforms.size() + wispy_xforms.size() + raw_cap) if pass_i > 0 else raw_cap
 
 		for ring in range(max_rings + 1):
 			if (common_xforms.size() + wispy_xforms.size()) >= pass_cap:
 				break
 			var r_dist := float(ring) * spacing
 			if pass_i == 0:
-				main_reach = r_dist
+				main_reach = r_dist * 0.85
+			var outer_keep := 1.0
+			var feather_start := pass_r * 0.62
+			if r_dist > feather_start:
+				outer_keep = clampf(1.0 - smoothstep(feather_start, pass_r, r_dist), 0.0, 1.0)
 			var count := 1 if ring == 0 else int(round(TAU * float(ring)))
 			var angle_step := TAU / float(count)
 			var ring_phase := rng.randf() * TAU
@@ -1446,6 +1761,8 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 			for i in count:
 				if (common_xforms.size() + wispy_xforms.size()) >= pass_cap:
 					break
+				if outer_keep < 0.999 and rng.randf() > outer_keep:
+					continue
 				var angle := float(i) * angle_step + ring_phase
 				var r_jitter := r_dist + rng.randf_range(-0.25 * spacing, 0.25 * spacing)
 				var a_jitter := angle + rng.randf_range(-0.15, 0.15) * angle_step
@@ -1459,9 +1776,12 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 					continue
 				if VillageBuilder.is_in_village_exclusion(x, z, true):
 					continue
+				if WorldLandmarks.is_in_landmark_exclusion(x, z, true):
+					continue
 
-				# 1. Botanical Meadow Density (smooth Perlin glades, trails, and clearings)
-				var density := sample_grass_density(x, z)
+				# 1. Botanical Meadow Density + Terrain Grass Map (glades, trails, height zones & species bias)
+				var gm := sample_grass_map(x, z)
+				var density := clampf(sample_grass_density(x, z) * lerpf(0.76, 1.12, gm.x), 0.0, 1.0)
 				if density < grass_clearing_threshold:
 					continue
 
@@ -1474,12 +1794,15 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 				if n.y < min_grass_normal_y:
 					continue
 
-				# 4. Elevation Mask: green meadow begins cleanly above coastal golden beach dunes (5.8m to 95.0m)
+				# 4. Elevation Mask: green meadow begins cleanly above coastal golden beach dunes (5.8m to 95.0m),
+				# and skip submerged grass blades beneath the Sunken Rat Swamp Lagoon
 				if y < 5.8 or y > 95.0:
 					continue
+				if z > 415.0 and z < 556.0 and x > -330.0 and x < -140.0 and y < WorldLandmarks.RAT_SWAMP_WATER_Y - 0.04:
+					continue
 
-				# 5. Species allocation: 65% Common Tall Grass, 35% Wispy Feathery Grass
-				var is_wispy := rng.randf() >= 0.65
+				# 5. Species allocation driven by Grass Map B channel (short lawns=Common, wild swells=Wispy plumes)
+				var is_wispy := rng.randf() < lerpf(0.18, 0.72, gm.z)
 
 				# 6. Gravity-Biased Orientation (Natural Phototropism)
 				var up_vec := (Vector3.UP * (1.0 - grass_slope_gravity_blend) + n * grass_slope_gravity_blend).normalized()
@@ -1488,17 +1811,10 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 				var right := up_vec.cross(fwd).normalized()
 				fwd = right.cross(up_vec).normalized()
 
-				# 7. Volumetric Scale Modulation (prominent 3D presence, lush non-flat tufts)
-				var base_scale := remap(density, grass_clearing_threshold, 1.0, 0.95, 1.25)
-				var sxz := 1.0
-				var sy := 1.0
-
-				if is_wispy:
-					sxz = base_scale * rng.randf_range(1.10, 1.45)
-					sy = base_scale * rng.randf_range(1.15, 1.55)
-				else:
-					sxz = base_scale * rng.randf_range(grass_scale_xz_min, grass_scale_xz_max)
-					sy = base_scale * rng.randf_range(grass_scale_y_min, grass_scale_y_max)
+				# 7. Volumetric Scale Modulation driven by Grass Map G channel (~0.36x short turf .. ~2.20x tall swells)
+				var height_norm := clampf((gm.y - grass_height_map_min) / maxf(0.01, grass_height_map_max - grass_height_map_min), 0.0, 1.0)
+				var sxz := lerpf(0.78, 1.32, height_norm) * rng.randf_range(0.86, 1.14)
+				var sy := gm.y * rng.randf_range(0.84, 1.16)
 
 				var basis := Basis(right * sxz, up_vec * sy, fwd * sxz)
 
@@ -1569,24 +1885,16 @@ func _build_chunked_multimeshes(
 		arr.append(xf)
 		chunk_map[key] = arr
 
-	# 3. Instantiate a MultiMeshInstance3D per tile with tight custom_aabb
+	# 3. Instantiate a MultiMeshInstance3D per tile centered at its tight AABB so Godot's native distance culling works accurately
 	for key: Vector2i in chunk_map.keys():
 		var chunk_xforms: Array = chunk_map[key]
 		if chunk_xforms.is_empty():
 			continue
 
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = mesh
-		mm.instance_count = chunk_xforms.size()
-
 		var min_pt := Vector3(INF, INF, INF)
 		var max_pt := Vector3(-INF, -INF, -INF)
-
 		for i in chunk_xforms.size():
-			var xf: Transform3D = chunk_xforms[i]
-			mm.set_instance_transform(i, xf)
-			var o := xf.origin
+			var o: Vector3 = (chunk_xforms[i] as Transform3D).origin
 			min_pt.x = minf(min_pt.x, o.x)
 			min_pt.y = minf(min_pt.y, o.y)
 			min_pt.z = minf(min_pt.z, o.z)
@@ -1594,21 +1902,107 @@ func _build_chunked_multimeshes(
 			max_pt.y = maxf(max_pt.y, o.y)
 			max_pt.z = maxf(max_pt.z, o.z)
 
+		var tight_aabb := AABB(min_pt, max_pt - min_pt).grow(aabb_grow_margin)
+		var center := tight_aabb.get_center()
+		var half_diag := tight_aabb.size.length() * 0.5
+
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = chunk_xforms.size()
+
+		for i in chunk_xforms.size():
+			var xf: Transform3D = chunk_xforms[i]
+			xf.origin -= center
+			mm.set_instance_transform(i, xf)
+
 		var chunk_inst := MultiMeshInstance3D.new()
 		chunk_inst.name = "Chunk_%d_%d" % [key.x, key.y]
+		chunk_inst.position = center
 		chunk_inst.multimesh = mm
 		if material != null:
 			chunk_inst.material_override = material
 		chunk_inst.cast_shadow = cast_shadow
-		# Use tight custom_aabb frustum culling; avoid origin-based visibility_range_end culling on (0,0,0) chunks.
-		chunk_inst.visibility_range_end = 0.0
-		chunk_inst.visibility_range_end_margin = 0.0
+		chunk_inst.set_meta("half_diag", half_diag)
+		if vis_end > 0.0:
+			chunk_inst.visibility_range_end = vis_end + half_diag
+			chunk_inst.visibility_range_end_margin = vis_margin
+		else:
+			chunk_inst.visibility_range_end = 0.0
+			chunk_inst.visibility_range_end_margin = 0.0
 		chunk_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
-		var tight_aabb := AABB(min_pt, max_pt - min_pt).grow(aabb_grow_margin)
+		tight_aabb.position -= center
 		chunk_inst.custom_aabb = tight_aabb
 
 		parent_node.add_child(chunk_inst)
+
+
+var _cached_grass_lod_mesh: Mesh = null
+var _cached_wispy_grass_lod_mesh: Mesh = null
+
+
+func _make_grass_lod_mesh(wispy: bool) -> ArrayMesh:
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+
+	var blade_count := 8
+	var heights := [1.56, 1.24, 1.72, 1.32, 1.62, 1.18, 1.76, 1.38] if not wispy else [1.46, 1.16, 1.58, 1.22, 1.48, 1.10, 1.54, 1.26]
+	var leans := [0.28, 0.36, 0.22, 0.34, 0.30, 0.38, 0.24, 0.32] if not wispy else [0.46, 0.58, 0.38, 0.54, 0.44, 0.62, 0.40, 0.52]
+	var rads := [0.16, 0.22, 0.14, 0.24, 0.18, 0.20, 0.12, 0.22] if not wispy else [0.22, 0.30, 0.18, 0.32, 0.24, 0.28, 0.18, 0.30]
+	var angles := [0.12, 0.91, 1.68, 2.47, 3.24, 4.03, 4.81, 5.59]
+	var u0: float = 0.024 if wispy else 0.185
+	var u1: float = 0.034 if wispy else 0.197
+	var um: float = (u0 + u1) * 0.5
+	var w0: float = 0.072 if not wispy else 0.068
+	var w1: float = w0 * 0.56
+
+	for b in blade_count:
+		var ang: float = angles[b]
+		var rot := Basis(Vector3.UP, ang)
+		var off := rot * Vector3(0.0, 0.0, rads[b])
+		var h: float = heights[b]
+		var lean: float = leans[b]
+		var bv := verts.size()
+		verts.append(off + rot * Vector3(-w0, 0.0, 0.0))
+		verts.append(off + rot * Vector3(w0, 0.0, 0.0))
+		verts.append(off + rot * Vector3(-w1, h * 0.54, lean * 0.42))
+		verts.append(off + rot * Vector3(w1, h * 0.54, lean * 0.42))
+		verts.append(off + rot * Vector3(0.0, h, lean))
+		for _ni in 5:
+			normals.append(Vector3.UP)
+		uvs.append(Vector2(u0, 0.96))
+		uvs.append(Vector2(u1, 0.96))
+		uvs.append(Vector2(u0, 0.48))
+		uvs.append(Vector2(u1, 0.48))
+		uvs.append(Vector2(um, 0.04))
+		indices.append(bv + 0); indices.append(bv + 1); indices.append(bv + 2)
+		indices.append(bv + 1); indices.append(bv + 3); indices.append(bv + 2)
+		indices.append(bv + 2); indices.append(bv + 3); indices.append(bv + 4)
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return m
+
+
+func _get_grass_lod_mesh() -> Mesh:
+	if _cached_grass_lod_mesh == null:
+		_cached_grass_lod_mesh = _make_grass_lod_mesh(false)
+	return _cached_grass_lod_mesh
+
+
+func _get_wispy_grass_lod_mesh() -> Mesh:
+	if _cached_wispy_grass_lod_mesh == null:
+		_cached_wispy_grass_lod_mesh = _make_grass_lod_mesh(true)
+	return _cached_wispy_grass_lod_mesh
 
 
 func _build_grass_multimesh(grass_node: MultiMeshInstance3D) -> void:
@@ -1622,6 +2016,7 @@ func _build_grass_multimesh(grass_node: MultiMeshInstance3D) -> void:
 	var common_xforms: Array[Transform3D] = _cached_grass_data.get("common", [])
 	if _grass_mat == null:
 		_grass_mat = grass_node.material_override as ShaderMaterial
+	_sync_grass_map_to_materials()
 	_build_chunked_multimeshes(grass_node, _get_grass_mesh(), common_xforms, grass_visibility_end, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, _grass_mat, 32.0, 2.0)
 
 
@@ -1637,6 +2032,9 @@ func _build_grass_wispy_multimesh(wispy_node: MultiMeshInstance3D) -> void:
 	var mat: ShaderMaterial = wispy_node.material_override as ShaderMaterial
 	if mat == null:
 		mat = _grass_mat
+	else:
+		_grass_wispy_mat = mat
+	_sync_grass_map_to_materials()
 	_build_chunked_multimeshes(wispy_node, _get_wispy_grass_mesh(), wispy_xforms, grass_visibility_end, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, mat, 32.0, 2.0)
 
 
@@ -1663,19 +2061,25 @@ func _ensure_grass_far_materials() -> void:
 		_grass_wispy_far_mat.shader = _grass_far_shader
 	elif _grass_wispy_mat == _grass_mat:
 		_grass_wispy_far_mat = _grass_far_mat
+	_sync_grass_map_to_materials()
 
 
-func _update_grass_chunk_lod(holder: Node3D, near_mat: ShaderMaterial, far_mat: ShaderMaterial, cam_pos: Vector3) -> void:
+func _update_grass_chunk_lod(holder: Node3D, near_mat: ShaderMaterial, far_mat: ShaderMaterial, near_mesh: Mesh, far_mesh: Mesh, cam_pos: Vector3) -> void:
 	if holder == null or near_mat == null or far_mat == null:
 		return
 	for ch in holder.get_children():
 		var mmi := ch as MultiMeshInstance3D
 		if mmi == null:
 			continue
-		var center := mmi.custom_aabb.get_center()
-		var target_mat := far_mat if cam_pos.distance_squared_to(center) > 400.0 else near_mat
+		var center := mmi.position + mmi.custom_aabb.get_center()
+		var d_sq := cam_pos.distance_squared_to(center)
+		var target_mat := far_mat if d_sq > 1024.0 else near_mat
 		if mmi.material_override != target_mat:
 			mmi.material_override = target_mat
+		if near_mesh != null and far_mesh != null and mmi.multimesh != null:
+			var target_mesh := far_mesh if d_sq > 2304.0 else near_mesh
+			if mmi.multimesh.mesh != target_mesh:
+				mmi.multimesh.mesh = target_mesh
 
 
 func _process(delta: float) -> void:
@@ -1742,12 +2146,13 @@ func _process(delta: float) -> void:
 		var lod_pos := cam.global_position if cam != null else p_pos
 		if lod_pos.distance_squared_to(_last_grass_lod_cam_pos) > 16.0:
 			_last_grass_lod_cam_pos = lod_pos
-			_update_grass_chunk_lod(_grass_holder_ref, _grass_mat, _grass_far_mat, lod_pos)
-			_update_grass_chunk_lod(_grass_wispy_holder_ref, _grass_wispy_mat if _grass_wispy_mat != null else _grass_mat, _grass_wispy_far_mat if _grass_wispy_far_mat != null else _grass_far_mat, lod_pos)
+			_update_grass_chunk_lod(_grass_holder_ref, _grass_mat, _grass_far_mat, _get_grass_mesh(), _get_grass_lod_mesh(), lod_pos)
+			_update_grass_chunk_lod(_grass_wispy_holder_ref, _grass_wispy_mat if _grass_wispy_mat != null else _grass_mat, _grass_wispy_far_mat if _grass_wispy_far_mat != null else _grass_far_mat, _get_wispy_grass_mesh(), _get_wispy_grass_lod_mesh(), lod_pos)
 
 		_grass_recenter_cooldown = maxf(0.0, _grass_recenter_cooldown - delta)
 		var p_xz := Vector2(p_pos.x, p_pos.z)
-		if _grass_recenter_cooldown <= 0.0 and p_xz.distance_to(_grass_center) > 60.0 and p_pos.y > 7.5:
+		var jump_dist := p_xz.distance_to(_grass_center)
+		if ((jump_dist > 95.0) or (_grass_recenter_cooldown <= 0.0 and jump_dist > 60.0)) and p_pos.y > 7.5:
 			_grass_recenter_cooldown = 1.5
 			_grass_center = p_xz
 			_cached_grass_data.clear()
@@ -1813,6 +2218,7 @@ func _make_tree_leaf_mat(albedo_path: String, alpha_scissor: float = 0.42) -> Sh
 	mat.shader = preload("res://terrain/tree_foliage.gdshader")
 	mat.set_shader_parameter("leaf_texture", load(albedo_path) as Texture2D)
 	mat.set_shader_parameter("alpha_scissor", alpha_scissor)
+	mat.set_shader_parameter("u_webwood_center", get_webwood_center())
 	return mat
 
 
@@ -1866,6 +2272,11 @@ func _get_tree_mesh(archetype: int) -> Mesh:
 
 
 var _cached_tree_data: Array[Dictionary] = []
+var _spider_forest_trees: Array[Dictionary] = []
+
+
+func get_spider_forest_trees() -> Array[Dictionary]:
+	return _spider_forest_trees
 
 func _try_place_tree(
 	jx: float,
@@ -1886,6 +2297,8 @@ func _try_place_tree(
 	if enable_cave and (CaveSystem.is_in_portal_scatter_exclusion(jx, jz, false) or is_point_in_cave_cutout(jx, jz)):
 		return false
 	if VillageBuilder.is_in_village_exclusion(jx, jz, false):
+		return false
+	if WorldLandmarks.is_in_landmark_exclusion(jx, jz, false):
 		return false
 
 	var surf := sample_surface_exact(jx, jz)
@@ -2068,6 +2481,150 @@ func build_tree_data() -> Array[Dictionary]:
 		if _try_place_tree(jx, jz, 9.2, 0.84, arch, coast_rng, placed_positions, placed_trees, true, 6.8):
 			coast_trees_added += 1
 
+	# Pass 4: Wide Webwood Spider Domain with flanked forest approach path
+	_spider_forest_trees = []
+	var sp_rng := RandomNumberGenerator.new()
+	sp_rng.seed = tree_seed + 811
+	var sp_c: Vector2 = _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+	var sp_f_rad: float = float(_webwood_layout.get("forest_radius", WorldLandmarks.SPIDER_FOREST_RADIUS))
+	var sp_cell: float = float(_webwood_layout.get("tree_grid_spacing", 8.6))
+	var sp_min_r: float = float(_webwood_layout.get("tree_min_radius", 10.0))
+	var sp_glade_r: float = float(_webwood_layout.get("tree_glade_clearance", 11.0))
+	var sp_trail_r: float = float(_webwood_layout.get("tree_trail_clearance", 3.8))
+	var sp_snags: Array = _webwood_layout.get("snag_offsets", WorldLandmarks.SPIDER_NEST_SNAGS)
+	var sp_grid := int(ceil(sp_f_rad / sp_cell))
+	var sp_cells: Array[Vector2] = []
+	for gx in range(-sp_grid, sp_grid + 1):
+		for gz in range(-sp_grid, sp_grid + 1):
+			var off := Vector2(float(gx) * sp_cell, float(gz) * sp_cell)
+			var d := off.length()
+			if d < sp_min_r or d > sp_f_rad:
+				continue
+			sp_cells.append(sp_c + off)
+	for i in range(sp_cells.size() - 1, 0, -1):
+		var j := sp_rng.randi_range(0, i)
+		var tmp := sp_cells[i]
+		sp_cells[i] = sp_cells[j]
+		sp_cells[j] = tmp
+
+	var sp_road_a: Vector2 = _webwood_layout.get("trail_start", WorldLandmarks.SPIDER_TRAIL_START)
+	var sp_road_b: Vector2 = _webwood_layout.get("trail_bend", WorldLandmarks.SPIDER_TRAIL_BEND)
+	var sp_added := 0
+	for cell_base in sp_cells:
+		if sp_added >= 460:
+			break
+		var jx := cell_base.x + sp_rng.randf_range(-sp_cell * 0.42, sp_cell * 0.42)
+		var jz := cell_base.y + sp_rng.randf_range(-sp_cell * 0.42, sp_cell * 0.42)
+		var jv := Vector2(jx, jz)
+		# Keep a narrow flanked footpath along the NE dirt trail so trees frame it on both sides
+		if jv.distance_to(Geometry2D.get_closest_point_to_segment(jv, sp_road_a, sp_road_b)) < sp_trail_r \
+				or jv.distance_to(Geometry2D.get_closest_point_to_segment(jv, sp_road_b, sp_c)) < sp_trail_r:
+			continue
+		var d_glade := jv.distance_to(sp_c)
+		if d_glade < sp_glade_r:
+			continue
+		if d_glade < 20.0 and sp_snags.any(func(off: Vector2) -> bool: return jv.distance_squared_to(sp_c + off) < 12.25):
+			continue
+		# Make the tree silhouettes tell the same progression as the webs: a broken,
+		# unsettling outer fringe growing into a dense wall around the broodmother's heart.
+		var tree_probability := 0.38 if d_glade > 118.0 else (0.76 if d_glade > 72.0 else 0.97)
+		if sp_rng.randf() > tree_probability:
+			continue
+		var r_pick := sp_rng.randf()
+		var arch := 8 if r_pick < 0.34 else (2 if r_pick < 0.68 else (3 if r_pick < 0.92 else (1 if d_glade > 44.0 else 2)))
+		var min_spacing := 8.0 if d_glade > 112.0 else (6.8 if d_glade > 68.0 else 5.8)
+		if _try_place_tree(jx, jz, min_spacing, 0.77, arch, sp_rng, placed_positions, placed_trees, true, 6.4):
+			sp_added += 1
+			var rec: Dictionary = placed_trees[placed_trees.size() - 1]
+			if d_glade <= 152.0:
+				_spider_forest_trees.append(rec)
+
+	# Pass 5: Howlcrest Pine Grove wrapping Wolf Pack Crag ((290, -240), R = 68m)
+	var rs_tree := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
+	var wf_rng := RandomNumberGenerator.new()
+	wf_rng.seed = tree_seed + 929
+	var wf_c := WorldLandmarks.WOLF_CRAG_CENTER
+	var wf_cell := maxf(rs_tree.wolf_tree_spacing, 4.0)
+	var wf_grid := int(ceil(rs_tree.wolf_tree_radius / wf_cell))
+	var wf_cells: Array[Vector2] = []
+	for gx in range(-wf_grid, wf_grid + 1):
+		for gz in range(-wf_grid, wf_grid + 1):
+			var off := Vector2(float(gx) * wf_cell, float(gz) * wf_cell)
+			var d := off.length()
+			if d < 15.0 or d > WorldLandmarks.WOLF_GROVE_RADIUS:
+				continue
+			wf_cells.append(wf_c + off)
+	for i in range(wf_cells.size() - 1, 0, -1):
+		var j := wf_rng.randi_range(0, i)
+		var tmp := wf_cells[i]
+		wf_cells[i] = wf_cells[j]
+		wf_cells[j] = tmp
+
+	var wf_added := 0
+	for cell_base in wf_cells:
+		if wf_added >= 115:
+			break
+		var jx := cell_base.x + wf_rng.randf_range(-wf_cell * 0.40, wf_cell * 0.40)
+		var jz := cell_base.y + wf_rng.randf_range(-wf_cell * 0.40, wf_cell * 0.40)
+		var surf_y := sample_height(jx, jz)
+		var r_w := wf_rng.randf()
+		var arch := 2 if r_w < 0.52 else (3 if r_w < 0.80 else (8 if r_w < 0.90 else (4 if r_w < 0.96 else 6)))
+		if _try_place_tree(jx, jz, 8.8, 0.78, arch, wf_rng, placed_positions, placed_trees, true, 8.0):
+			wf_added += 1
+
+	# Pass 6: Distant Continent Woodlands (Skeleton Crypt Moorland Hills, Rat Ruins Ring & Western Trail Corridor)
+	var cont_rng := RandomNumberGenerator.new()
+	cont_rng.seed = tree_seed + 1103
+	var rat_ruins_hub := Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0)
+	var biome_hubs: Array = [
+		[WorldLandmarks.SKEL_CAVE_MOUTH, 28.0, 145.0, 14.5, 58],
+		[rat_ruins_hub, 56.0, 162.0, 12.5, 92],
+		[Vector2(-520.0, 315.0), 12.0, 110.0, 18.0, 36],
+	]
+	for hub in biome_hubs:
+		var hc: Vector2 = hub[0]
+		var r_min: float = float(hub[1])
+		var r_max: float = float(hub[2])
+		var h_cell: float = float(hub[3])
+		var h_cap: int = int(hub[4])
+		var h_grid := int(ceil(r_max / h_cell))
+		var h_cells: Array[Vector2] = []
+		for gx in range(-h_grid, h_grid + 1):
+			for gz in range(-h_grid, h_grid + 1):
+				var off := Vector2(float(gx) * h_cell, float(gz) * h_cell)
+				var d := off.length()
+				if d < r_min or d > r_max:
+					continue
+				h_cells.append(hc + off)
+		for i in range(h_cells.size() - 1, 0, -1):
+			var j := cont_rng.randi_range(0, i)
+			var tmp := h_cells[i]
+			h_cells[i] = h_cells[j]
+			h_cells[j] = tmp
+		var added_h := 0
+		for cell_base in h_cells:
+			if added_h >= h_cap:
+				break
+			var jx := cell_base.x + cont_rng.randf_range(-h_cell * 0.42, h_cell * 0.42)
+			var jz := cell_base.y + cont_rng.randf_range(-h_cell * 0.42, h_cell * 0.42)
+			# Keep Skeleton Crypt south causeway vista & Rat Warren south trail unobstructed
+			if hc == WorldLandmarks.SKEL_CAVE_MOUTH and absf(jx - hc.x) < 18.0 and jz > 322.0:
+				continue
+			if hc == rat_ruins_hub and absf(jx - hc.x) < 16.0 and jz > 409.0 and jz < 525.0:
+				continue
+			var surf_y := sample_height(jx, jz)
+			if hc == rat_ruins_hub and surf_y < WorldLandmarks.RAT_SWAMP_WATER_Y - 0.28:
+				continue
+			var grove_n := _noise.get_noise_2d(jx * 0.015 + 75.0, jz * 0.015 - 40.0) * 0.5 + 0.5
+			if grove_n < (0.26 if hc == rat_ruins_hub else 0.34):
+				continue
+			var r_p := cont_rng.randf()
+			var arch := 2 if r_p < 0.45 else (3 if r_p < 0.72 else (8 if r_p < 0.85 else (1 if r_p < 0.94 else 4)))
+			if hc == rat_ruins_hub:
+				arch = 8 if r_p < 0.40 else (0 if r_p < 0.68 else (1 if r_p < 0.88 else (4 if r_p < 0.95 else 6)))
+			if _try_place_tree(jx, jz, 10.5, 0.82, arch, cont_rng, placed_positions, placed_trees, true, 8.0):
+				added_h += 1
+
 	_cached_tree_data = placed_trees
 	return placed_trees
 
@@ -2110,7 +2667,7 @@ func _build_trees(trees_node: Node3D) -> void:
 	for a in range(TREE_ASSET_PATHS.size()):
 		var node: MultiMeshInstance3D = mm_nodes[a]
 		var mesh := _get_tree_mesh(a)
-		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 150.0, 25.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 112.0, 12.0)
+		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 290.0, 25.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 72.0, 12.0)
 
 	# Physical trunk and root flare collision (registered directly via PhysicsServer3D without SceneTree nodes)
 	if colliders_node != null:
@@ -2252,6 +2809,8 @@ func build_rock_data() -> Array[Dictionary]:
 			continue
 		if VillageBuilder.is_in_village_exclusion(x, z, false):
 			continue
+		if WorldLandmarks.is_in_landmark_exclusion(x, z, false):
+			continue
 
 		# Exact terrain surface query (replaces rough sample_height / sample_normal)
 		var surf := sample_surface_exact(x, z)
@@ -2352,6 +2911,8 @@ func build_rock_data() -> Array[Dictionary]:
 		var z := cell_w.y + coast_rock_rng.randf_range(-cr_cell * 0.45, cr_cell * 0.45)
 		if VillageBuilder.is_in_village_exclusion(x, z, false):
 			continue
+		if WorldLandmarks.is_in_landmark_exclusion(x, z, false):
+			continue
 		var surf := sample_surface_exact(x, z)
 		var y := surf.w
 		var normal := Vector3(surf.x, surf.y, surf.z)
@@ -2403,6 +2964,89 @@ func build_rock_data() -> Array[Dictionary]:
 		})
 		coast_rocks_added += 1
 
+	# Pass 3: Highland & Moorland Boulders around Wolf Crag, Rat Warren, Webwood & Skeleton Crypt Ridges
+	var high_rock_rng := RandomNumberGenerator.new()
+	high_rock_rng.seed = rock_seed + 977
+	var rock_hubs: Array = [
+		[WorldLandmarks.WOLF_CRAG_CENTER, 22.0, 125.0, 13.0, 56],
+		[Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0), 56.0, 150.0, 14.5, 38],
+		[WorldLandmarks.SPIDER_FOREST_CENTER, 24.0, 158.0, 16.0, 42],
+		[WorldLandmarks.SKEL_CAVE_MOUTH, 30.0, 120.0, 16.0, 28],
+	]
+	for rhub in rock_hubs:
+		var hc: Vector2 = rhub[0]
+		var r_min: float = float(rhub[1])
+		var r_max: float = float(rhub[2])
+		var r_cell: float = float(rhub[3])
+		var r_cap: int = int(rhub[4])
+		var r_grid := int(ceil(r_max / r_cell))
+		var cells_h: Array[Vector2] = []
+		for gx in range(-r_grid, r_grid + 1):
+			for gz in range(-r_grid, r_grid + 1):
+				var off := Vector2(float(gx) * r_cell, float(gz) * r_cell)
+				var d := off.length()
+				if d < r_min or d > r_max:
+					continue
+				cells_h.append(hc + off)
+		for i in range(cells_h.size() - 1, 0, -1):
+			var j := high_rock_rng.randi_range(0, i)
+			var tmp := cells_h[i]
+			cells_h[i] = cells_h[j]
+			cells_h[j] = tmp
+		var added_r := 0
+		for cell_w in cells_h:
+			if added_r >= r_cap:
+				break
+			var x := cell_w.x + high_rock_rng.randf_range(-r_cell * 0.42, r_cell * 0.42)
+			var z := cell_w.y + high_rock_rng.randf_range(-r_cell * 0.42, r_cell * 0.42)
+			if WorldLandmarks.is_in_landmark_exclusion(x, z, false):
+				continue
+			var surf := sample_surface_exact(x, z)
+			var y := surf.w
+			var normal := Vector3(surf.x, surf.y, surf.z)
+			if y < 6.0 or y > 135.0 or normal.y < 0.44:
+				continue
+			var ridge_n: float = 1.0 - absf(_noise.get_noise_2d(x * 0.015 + 40.0, z * 0.015 - 70.0))
+			if normal.y > 0.94 and ridge_n < 0.56:
+				continue
+			var hits_tree := false
+			for tp in tree_positions:
+				var tdx := tp.x - x
+				var tdz := tp.z - z
+				if tdx * tdx + tdz * tdz < 30.25:
+					hits_tree = true
+					break
+			if hits_tree:
+				continue
+			var too_close := false
+			for rk in placed_rocks:
+				var dx: float = rk.position.x - x
+				var dz: float = rk.position.z - z
+				if dx * dx + dz * dz < 100.0:
+					too_close = true
+					break
+			if too_close:
+				continue
+			var archetype := high_rock_rng.randi_range(0, 1)
+			var scale_factor := high_rock_rng.randf_range(1.6, 3.2)
+			var sxz := scale_factor
+			var sy := scale_factor * high_rock_rng.randf_range(0.75, 1.18)
+			var yaw := high_rock_rng.randf_range(0.0, TAU)
+			var pos := Vector3(x, y - 0.24 * sy, z)
+			var up := (Vector3.UP * 0.65 + normal * 0.35).normalized()
+			var fwd := Vector3(sin(yaw), 0.0, cos(yaw))
+			var right := up.cross(fwd).normalized()
+			fwd = right.cross(up).normalized()
+			var basis := Basis(right * sxz, up * sy, fwd * sxz)
+			placed_rocks.append({
+				"archetype": archetype,
+				"position": pos,
+				"scale_xz": sxz,
+				"scale_y": sy,
+				"transform": Transform3D(basis, pos)
+			})
+			added_r += 1
+
 	return placed_rocks
 
 
@@ -2447,7 +3091,7 @@ func _build_rocks(rocks_node: Node3D) -> void:
 		if node == null:
 			continue
 		var mesh := _get_rock_mesh(a)
-		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 80.0, 15.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 112.0, 6.0)
+		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 115.0, 20.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 112.0, 6.0)
 
 	# Physical rock collision (exact convex hull matching rock facets, via PhysicsServer3D)
 	if colliders_node != null:
@@ -2598,6 +3242,8 @@ func build_vegetation_data() -> Array[Dictionary]:
 			continue
 		if VillageBuilder.is_in_village_exclusion(x, z, false):
 			continue
+		if WorldLandmarks.is_in_landmark_exclusion(x, z, false):
+			continue
 
 		# Exact terrain surface query (replaces rough sample_height / sample_normal)
 		var surf := sample_surface_exact(x, z)
@@ -2698,6 +3344,8 @@ func build_vegetation_data() -> Array[Dictionary]:
 		var z := cell_w.y + coast_veg_rng.randf_range(-cv_cell * 0.45, cv_cell * 0.45)
 		if VillageBuilder.is_in_village_exclusion(x, z, false):
 			continue
+		if WorldLandmarks.is_in_landmark_exclusion(x, z, false):
+			continue
 		var surf := sample_surface_exact(x, z)
 		var y := surf.w
 		var normal := Vector3(surf.x, surf.y, surf.z)
@@ -2776,7 +3424,7 @@ func _build_vegetation(veg_node: Node3D) -> void:
 			grouped_xforms[arch].append(v.transform)
 
 	var mm_nodes := [bush_node, plant_node, flower_node]
-	var vis_ranges := [60.0, 60.0, 60.0]
+	var vis_ranges := [75.0, 75.0, 65.0]
 	var shadows_cfg := [
 		GeometryInstance3D.SHADOW_CASTING_SETTING_ON,
 		GeometryInstance3D.SHADOW_CASTING_SETTING_OFF,
@@ -2932,7 +3580,4 @@ func _build_mountain_fog() -> void:
 	fog_node.visibility_range_begin = 0.0
 	fog_node.visibility_range_end = 2800.0
 	fog_node.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-
-
-
 

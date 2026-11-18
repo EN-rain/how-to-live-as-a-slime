@@ -43,6 +43,11 @@ extends Node3D
 ## Negative means "use the slime's authored tuning value".
 @export var follow_speed_threshold := -1.0
 
+@export_group("Occlusion & Pitch Feel")
+@export_range(0.0, 0.5, 0.01) var pitch_soft_limit_rad := 0.08
+@export_range(2.0, 40.0, 0.5) var occlusion_recovery_rate := 16.0
+@export_range(0.0, 1.0, 0.05) var look_up_framing_bias := 0.35
+
 var target := Vector3.ZERO
 var _target_theta := 0.45
 var _target_phi := 1.18

@@ -209,7 +209,14 @@ const FENCE_RUNS: Array[Dictionary] = [
 
 var _mesh_cache: Dictionary = {}
 var _roof_mesh_cache: Dictionary = {}
+var _roof_mat_cache: Dictionary = {}
 var _mat_cache: Dictionary = {}
+var _mat_sig_cache: Dictionary = {}
+var _tex_sig_cache: Dictionary = {}
+var _ext_scene_cache: Dictionary = {}
+var _color_mat_cache: Dictionary = {}
+var _smoke_mesh: QuadMesh = null
+var _smoke_pmat: ParticleProcessMaterial = null
 var _gray_tile_tex: Texture2D = null
 var _mat_stone_foundation: StandardMaterial3D
 var _mat_cobble: StandardMaterial3D
@@ -217,6 +224,8 @@ var _mat_plaza_brick: StandardMaterial3D
 var _mat_packed_mud: StandardMaterial3D
 var _mat_wood_trim: StandardMaterial3D
 var _mat_wood_dark: StandardMaterial3D
+var _mat_dock_oak: StandardMaterial3D
+var _mat_rope: StandardMaterial3D
 var _mat_iron: StandardMaterial3D
 var _mat_lantern_glow: StandardMaterial3D
 var _mat_window_glow: StandardMaterial3D
@@ -235,8 +244,8 @@ static func is_in_village_exclusion(x: float, z: float, is_grass: bool = false) 
 		# Exclude trees/rocks/grass along the exact coastal PierPathway curve, FishermanCottage yard & cove
 		var pt := Vector2(x, z)
 		var b0 := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0)
-		var b1 := Vector2(VILLAGE_CENTER.x - 7.5, VILLAGE_CENTER.z + 156.0)
-		var b2 := Vector2(VILLAGE_CENTER.x + 50.0, VILLAGE_CENTER.z + 250.0)
+		var b1 := Vector2(VILLAGE_CENTER.x + 6.4, VILLAGE_CENTER.z + 254.5)
+		var b2 := Vector2(VILLAGE_CENTER.x + 70.0, VILLAGE_CENTER.z + 248.0)
 		var min_path_d := 1e9
 		for si in range(9):
 			var ta := float(si) / 8.0
@@ -306,10 +315,15 @@ static func is_in_village_exclusion(x: float, z: float, is_grass: bool = false) 
 	return false
 
 
-static func build_village(terrain: Node3D) -> Node3D:
+static func build_village(terrain: Node3D, village_region: Node = null) -> Node3D:
 	var script_res: GDScript = load("res://terrain/village_builder.gd") as GDScript
 	var builder: VillageBuilder = script_res.new()
-	return builder._build_into(terrain)
+	var root := builder._build_into(terrain)
+	if root != null and village_region != null and village_region.has_method("get_profile"):
+		var vp = village_region.call("get_profile")
+		if vp != null:
+			root.set_meta("harbor_ropes_decorative_only", bool(vp.get("harbor_ropes_decorative_only")))
+	return root
 
 
 static func update_night_lights(village_root: Node, strength: float, wetness: float = 0.0) -> void:
@@ -384,6 +398,8 @@ func _build_into(terrain: Node3D) -> Node3D:
 	_build_street_lanterns(root, colliders, terrain)
 	_build_town_trees(root, colliders, terrain)
 	_build_props_and_fences(root, colliders, terrain)
+	_build_plaza_bunting(root, terrain, plaza_center_top)
+	_build_plaza_ambiance(root, plaza_center_top)
 	_build_fishing_dock(root, colliders, terrain)
 	_batch_village_meshes(root)
 
@@ -403,6 +419,8 @@ func _init_shared_materials() -> void:
 	_mat_stone_foundation = _extract_floor_material("Prop_ExteriorBorder_Straight1.gltf", Color(0.78, 0.77, 0.74), Color(0.36, 0.35, 0.33))
 	_mat_wood_trim = _extract_floor_material("Wall_Arch.gltf", Color(0.95, 0.92, 0.88), Color(0.46, 0.34, 0.22))
 	_mat_wood_dark = _extract_floor_material("Wall_Arch.gltf", Color(0.68, 0.60, 0.52), Color(0.31, 0.21, 0.14))
+	_mat_dock_oak = _make_matte_mat(Color(0.42, 0.28, 0.18), 0.92)
+	_mat_rope = _make_matte_mat(Color(0.74, 0.61, 0.39), 0.96)
 	_mat_iron = _make_matte_mat(Color(0.20, 0.21, 0.23), 0.88)
 	_mat_well_water = _make_matte_mat(Color(0.14, 0.24, 0.28), 0.32)
 
@@ -431,6 +449,45 @@ func _init_shared_materials() -> void:
 	_mat_window_glow.emission_enabled = true
 	_mat_window_glow.emission = Color(1.0, 0.68, 0.28)
 	_mat_window_glow.emission_energy_multiplier = 1.55
+
+	# Shared soft radial smoke puff mesh & process material for active hearth chimneys
+	var simg := Image.create(24, 24, false, Image.FORMAT_RGBA8)
+	for py in range(24):
+		for px in range(24):
+			var d := Vector2((float(px) + 0.5) / 12.0 - 1.0, (float(py) + 0.5) / 12.0 - 1.0).length()
+			var a := pow(clampf(1.0 - d, 0.0, 1.0), 1.7)
+			simg.set_pixel(px, py, Color(1.0, 1.0, 1.0, a))
+	var stex := ImageTexture.create_from_image(simg)
+	var smat := StandardMaterial3D.new()
+	smat.albedo_texture = stex
+	smat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	smat.billboard_keep_scale = true
+	smat.vertex_color_use_as_albedo = true
+	smat.no_depth_test = false
+	_smoke_mesh = QuadMesh.new()
+	_smoke_mesh.size = Vector2(0.85, 0.85)
+	_smoke_mesh.material = smat
+	_smoke_pmat = ParticleProcessMaterial.new()
+	_smoke_pmat.direction = Vector3(0.32, 1.0, 0.14)
+	_smoke_pmat.spread = 16.0
+	_smoke_pmat.initial_velocity_min = 0.85
+	_smoke_pmat.initial_velocity_max = 1.35
+	_smoke_pmat.gravity = Vector3(0.16, 0.14, 0.06)
+	_smoke_pmat.scale_min = 0.55
+	_smoke_pmat.scale_max = 1.35
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 0.22, 0.72, 1.0])
+	grad.colors = PackedColorArray([
+		Color(0.95, 0.92, 0.88, 0.0),
+		Color(0.92, 0.90, 0.87, 0.34),
+		Color(0.88, 0.88, 0.90, 0.18),
+		Color(0.86, 0.86, 0.90, 0.0),
+	])
+	var gtex := GradientTexture1D.new()
+	gtex.gradient = grad
+	_smoke_pmat.color_ramp = gtex
 
 
 func _extract_floor_material(rel_path: String, tint: Color, fallback_col: Color) -> StandardMaterial3D:
@@ -485,8 +542,57 @@ func _sample_patch_minmax(terrain: Node3D, cx: float, cz: float, hx: float, hz: 
 	return Vector2(min_h, max_h)
 
 
+func _is_runtime_animated_mat(mat: Material) -> bool:
+	return mat == _mat_window_glow or mat == _mat_lantern_glow or mat == _mat_cobble or mat == _mat_plaza_brick or mat == _mat_packed_mud
+
+
+func _texture_signature(tex: Texture2D) -> String:
+	if tex == null:
+		return "none"
+	var tid: int = tex.get_instance_id()
+	if _tex_sig_cache.has(tid):
+		return String(_tex_sig_cache[tid])
+	var sig := ""
+	if tex.resource_path != "":
+		sig = "p:" + tex.resource_path
+	else:
+		var img := tex.get_image()
+		if img != null and not img.is_empty():
+			var hc := HashingContext.new()
+			hc.start(HashingContext.HASH_MD5)
+			hc.update(img.get_data())
+			sig = "i:%dx%d:%d:%s" % [img.get_width(), img.get_height(), int(img.get_format()), hc.finish().hex_encode()]
+		else:
+			sig = "id:%d" % tid
+	_tex_sig_cache[tid] = sig
+	return sig
+
+
+func _material_signature(mat: StandardMaterial3D) -> String:
+	var em_c: int = mat.emission.to_rgba32() if mat.emission_enabled else 0
+	var em_e: int = int(round(mat.emission_energy_multiplier * 100.0)) if mat.emission_enabled else 0
+	return "%s|%x|%d|%d|%d|%d|%d|%s|%s|%d|%x|%d|%s|%d" % [
+		_texture_signature(mat.albedo_texture),
+		mat.albedo_color.to_rgba32(),
+		int(round(mat.roughness * 100.0)),
+		int(mat.transparency),
+		int(round(mat.alpha_scissor_threshold * 100.0)),
+		int(mat.cull_mode),
+		int(mat.shading_mode),
+		str(mat.uv1_scale),
+		str(mat.uv1_offset),
+		int(mat.emission_enabled),
+		em_c,
+		em_e,
+		_texture_signature(mat.normal_texture) if mat.normal_enabled else "none",
+		int(mat.vertex_color_use_as_albedo),
+	]
+
+
 func _normalize_matte_material(src: Material) -> Material:
 	if src == null or not (src is StandardMaterial3D):
+		return src
+	if _is_runtime_animated_mat(src):
 		return src
 	var rid: int = src.get_instance_id()
 	if _mat_cache.has(rid):
@@ -502,6 +608,12 @@ func _normalize_matte_material(src: Material) -> Material:
 		mat.cull_mode = BaseMaterial3D.CULL_BACK
 	else:
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var sig := _material_signature(mat)
+	if _mat_sig_cache.has(sig):
+		var shared := _mat_sig_cache[sig] as Material
+		_mat_cache[rid] = shared
+		return shared
+	_mat_sig_cache[sig] = mat
 	_mat_cache[rid] = mat
 	return mat
 
@@ -586,6 +698,11 @@ func _get_roof_mesh(rel_path: String, palette_name: String) -> Mesh:
 			if gtex != null:
 				tmat.albedo_texture = gtex
 			tmat.albedo_color = tint
+			var rsig := palette_name + "|" + _material_signature(tmat)
+			if _roof_mat_cache.has(rsig):
+				tmat = _roof_mat_cache[rsig] as StandardMaterial3D
+			else:
+				_roof_mat_cache[rsig] = tmat
 			dup.surface_set_material(si, tmat)
 	_roof_mesh_cache[cache_key] = dup
 	return dup
@@ -633,6 +750,68 @@ func _add_box_visual(parent: Node3D, box_name: String, pos: Vector3, size: Vecto
 	mi.rotation = rot
 	parent.add_child(mi)
 	return mi
+
+
+func _add_cylinder_visual(parent: Node3D, cyl_name: String, pos: Vector3, top_r: float, bottom_r: float, height: float, mat: Material, rot: Vector3 = Vector3.ZERO, radial_segs: int = 10) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = cyl_name
+	var cm := CylinderMesh.new()
+	cm.top_radius = top_r
+	cm.bottom_radius = bottom_r
+	cm.height = height
+	cm.radial_segments = radial_segs
+	cm.rings = 1
+	mi.mesh = cm
+	mi.material_override = mat
+	mi.position = pos
+	mi.rotation = rot
+	parent.add_child(mi)
+	return mi
+
+
+func _add_rope_ring_visual(parent: Node3D, ring_name: String, pos: Vector3, inner_r: float, outer_r: float, mat: Material) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = ring_name
+	var tm := TorusMesh.new()
+	tm.inner_radius = inner_r
+	tm.outer_radius = outer_r
+	tm.rings = 10
+	tm.ring_segments = 6
+	mi.mesh = tm
+	mi.material_override = mat
+	mi.position = pos
+	parent.add_child(mi)
+	return mi
+
+
+func _spawn_rope_span(parent: Node3D, span_name: String, p_a: Vector3, p_b: Vector3, radius: float, mat: Material) -> void:
+	var delta := p_b - p_a
+	var dist := delta.length()
+	if dist < 0.05:
+		return
+	var mid := (p_a + p_b) * 0.5
+	var dir := delta / dist
+	var yaw := atan2(dir.x, dir.z)
+	var horiz := Vector2(dir.x, dir.z).length()
+	var pitch := -atan2(dir.y, maxf(horiz, 0.0001)) + PI * 0.5
+	_add_cylinder_visual(parent, span_name, mid, radius, radius, dist, mat, Vector3(pitch, yaw, 0.0), 6)
+
+
+func _spawn_mooring_dolphin(dock: Node3D, colliders: StaticBody3D, d_basis: Basis, local_xz: Vector2, bottom_y: float, top_y: float) -> void:
+	var height := top_y - bottom_y
+	var cy := (top_y + bottom_y) * 0.5
+	var offsets: Array[Vector2] = [Vector2(0.0, 0.20), Vector2(-0.18, -0.12), Vector2(0.18, -0.12)]
+	var tilts: Array[Vector3] = [Vector3(0.04, 0.0, 0.0), Vector3(-0.03, 0.0, 0.04), Vector3(-0.03, 0.0, -0.04)]
+	for i in range(3):
+		var ox := local_xz.x + offsets[i].x
+		var oz := local_xz.y + offsets[i].y
+		var post_h := height + (0.28 if i == 0 else -0.12 * float(i))
+		var post_cy := bottom_y + post_h * 0.5
+		_add_cylinder_visual(dock, "DolphinPost_%d" % i, Vector3(ox, post_cy, oz), 0.12, 0.16, post_h, _mat_dock_oak, tilts[i])
+	_add_rope_ring_visual(dock, "DolphinRopeHi", Vector3(local_xz.x, top_y - 0.52, local_xz.y), 0.25, 0.37, _mat_rope)
+	_add_rope_ring_visual(dock, "DolphinRopeLo", Vector3(local_xz.x, top_y - 0.72, local_xz.y), 0.26, 0.38, _mat_rope)
+	var dw := dock.position + d_basis * Vector3(local_xz.x, cy, local_xz.y)
+	_add_cylinder_collider(colliders, dw, 0.42, height)
 
 
 func _add_box_collider(colliders: StaticBody3D, xform: Transform3D, size: Vector3) -> void:
@@ -801,6 +980,7 @@ func _add_draped_surface(
 	mi.name = surf_name
 	mi.mesh = mesh
 	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(mi)
 
 	if not col_faces.is_empty():
@@ -1087,6 +1267,20 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 		var chim_x: float = hw - (1.25 if w >= 8 else 0.75)
 		var chim_y: float = top_y + (2.05 if w >= 8 else (1.55 if w == 6 else 1.05))
 		_spawn_part(house, chim_file, Vector3(chim_x, chim_y, -hd + 1.15), 0.0)
+		var bname: String = String(spec.get("name", ""))
+		if bname in ["GoldenSlimeInn", "Bakery", "Blacksmith", "BreweryHall", "PotteryCottage", "InnKitchenWing", "MarketHall"]:
+			var smoke := GPUParticles3D.new()
+			smoke.name = "ChimneySmoke"
+			smoke.position = Vector3(chim_x, chim_y + 1.45, -hd + 1.15)
+			smoke.amount = 7
+			smoke.lifetime = 3.8
+			smoke.preprocess = 2.5
+			smoke.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			smoke.visibility_range_end = 145.0
+			smoke.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+			smoke.process_material = _smoke_pmat
+			smoke.draw_pass_1 = _smoke_mesh
+			house.add_child(smoke)
 
 	# 4b. Attached L-shaped side/rear annex wing for complex medieval compound silhouettes
 	if spec.has("wing"):
@@ -1211,11 +1405,11 @@ func _spawn_wall_sconce(parent: Node3D, pos: Vector3, rot_y: float, add_light: b
 	sconce.rotation = Vector3(0.0, rot_y, 0.0)
 	parent.add_child(sconce)
 
-	_add_box_visual(sconce, "SconceBackplate", Vector3(0.0, 0.0, -0.04), Vector3(0.14, 0.32, 0.06), _mat_iron)
-	_add_box_visual(sconce, "SconceArm", Vector3(0.0, 0.06, 0.12), Vector3(0.07, 0.07, 0.30), _mat_iron)
+	_add_box_visual(sconce, "SconceBackplate", Vector3(0.0, 0.0, -0.04), Vector3(0.14, 0.32, 0.06), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_add_box_visual(sconce, "SconceArm", Vector3(0.0, 0.06, 0.12), Vector3(0.07, 0.07, 0.30), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var glow := _add_box_visual(sconce, "SconceGlow", Vector3(0.0, -0.10, 0.22), Vector3(0.18, 0.26, 0.18), _mat_lantern_glow)
 	glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_add_box_visual(sconce, "SconceCap", Vector3(0.0, 0.06, 0.22), Vector3(0.24, 0.08, 0.24), _mat_iron)
+	_add_box_visual(sconce, "SconceCap", Vector3(0.0, 0.06, 0.22), Vector3(0.24, 0.08, 0.24), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	if add_light:
 		var light := OmniLight3D.new()
@@ -1294,7 +1488,13 @@ func _build_well(root: Node3D, colliders: StaticBody3D, terrain: Node3D, plaza_t
 			_add_box_visual(well, "WellPost", Vector3(float(px), 1.48, float(pz)), Vector3(0.20, 2.15, 0.20), _mat_wood_trim)
 	_add_box_visual(well, "WellWinchBeam", Vector3(0.0, 1.72, 0.0), Vector3(2.20, 0.14, 0.14), _mat_wood_trim)
 	_add_box_visual(well, "WellPulley", Vector3(0.0, 1.72, 0.0), Vector3(0.72, 0.28, 0.28), _mat_wood_dark)
+	_add_box_visual(well, "WellRope", Vector3(0.0, 1.38, 0.0), Vector3(0.05, 0.62, 0.05), _get_color_mat("hemp", Color(0.76, 0.64, 0.44)))
+	_add_box_visual(well, "WellBucket", Vector3(0.0, 1.08, 0.0), Vector3(0.36, 0.34, 0.36), _mat_wood_trim)
+	_add_box_visual(well, "WellBucketBand", Vector3(0.0, 1.12, 0.0), Vector3(0.38, 0.07, 0.38), _mat_iron)
 	_spawn_tinted_part(well, "Roof_Tower_RoundTiles.gltf", "slate", Vector3(0.0, 2.52, 0.0), 0.0, Vector3(0.58, 0.56, 0.58))
+	for corner_sign in [Vector2(-1.42, -1.42), Vector2(1.42, -1.42), Vector2(-1.42, 1.42), Vector2(1.42, 1.42)]:
+		_add_box_visual(well, "WellPlanterBox", Vector3(corner_sign.x, 0.22, corner_sign.y), Vector3(0.58, 0.40, 0.58), _mat_wood_dark)
+		_spawn_ext_prop(well, "res://assets/nature/Flower_4_Group.gltf", Vector3(corner_sign.x, 0.42, corner_sign.y), corner_sign.x, Vector3.ONE * 0.72, false)
 
 	var well_light := OmniLight3D.new()
 	well_light.position = Vector3(0.0, 2.25, 0.0)
@@ -1374,12 +1574,14 @@ func _build_market_stalls(root: Node3D, colliders: StaticBody3D, terrain: Node3D
 			rmi.scale = Vector3(0.66, 0.64, 0.88)
 			stall.add_child(rmi)
 
-		# Keep stall crates cleanly underneath canopy height
-		_spawn_part(stall, "Prop_Crate.gltf", Vector3(-0.92, fy - 0.01, -0.30), 0.15)
-		if i % 2 == 0:
-			var small_crate := _spawn_part(stall, "Prop_Crate.gltf", Vector3(0.85, fy + 1.02, 0.22), -0.22)
-			if small_crate != null:
-				small_crate.scale = Vector3(0.56, 0.56, 0.56)
+		# Stocked guild goods & wares cleanly placed on counters and beneath awnings
+		_populate_stall_wares(stall, i, fy)
+
+		# Small hanging warm brass lantern under awning eaves
+		_add_box_visual(stall, "StallLanternMount", Vector3(0.0, fy + 2.26, 0.66), Vector3(0.10, 0.18, 0.10), _mat_iron)
+		var sl_glass := _add_box_visual(stall, "StallLanternGlow", Vector3(0.0, fy + 2.10, 0.66), Vector3(0.20, 0.24, 0.20), _mat_lantern_glow)
+		if sl_glass != null:
+			sl_glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 		var stall_basis := Basis(Vector3.UP, yaw)
 		var col_local := Vector3(0.0, bot_y + (plinth_h + 2.4) * 0.5, 0.0)
@@ -1767,6 +1969,338 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			var fb := Basis.from_euler(rot_euler)
 			_add_box_collider(colliders, Transform3D(fb, fpos + fb * Vector3(0.0, 0.42, 0.0)), Vector3(panel_len, 0.84, 0.24))
 
+	# Cozy civic life clusters: outdoor Inn tables, Bakery bread display, Blacksmith anvil & forge rack,
+	# plaza wooden benches, wine barrels, bottle crates, and timber flower boxes (all statically batched!).
+	_populate_civic_life_props(group, colliders, terrain)
+
+
+func _get_color_mat(key: String, col: Color, rough: float = 0.88) -> StandardMaterial3D:
+	if _color_mat_cache.has(key):
+		return _color_mat_cache[key] as StandardMaterial3D
+	var mat := _make_matte_mat(col, rough)
+	_color_mat_cache[key] = mat
+	return mat
+
+
+func _spawn_ext_prop(parent: Node3D, res_path: String, pos: Vector3, rot_y: float = 0.0, scale_vec: Vector3 = Vector3.ONE, shadow: bool = true) -> Node3D:
+	var tmpl: Node3D = _ext_scene_cache.get(res_path) as Node3D
+	if tmpl == null:
+		var ps := load(res_path) as PackedScene
+		if ps == null:
+			return null
+		tmpl = ps.instantiate() as Node3D
+		if tmpl == null:
+			return null
+		_normalize_glb_materials(tmpl)
+		_ext_scene_cache[res_path] = tmpl
+	var inst := tmpl.duplicate() as Node3D
+	inst.position = pos
+	inst.rotation = Vector3(0.0, rot_y, 0.0)
+	if scale_vec != Vector3.ONE:
+		inst.scale = scale_vec
+	if not shadow:
+		_disable_shadow_recursive(inst)
+	parent.add_child(inst)
+	return inst
+
+
+func _disable_shadow_recursive(n: Node) -> void:
+	if n is GeometryInstance3D:
+		(n as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for ch in n.get_children():
+		_disable_shadow_recursive(ch)
+
+
+func _populate_stall_wares(stall: Node3D, idx: int, fy: float) -> void:
+	var cy := fy + 1.02
+	# Ground crates / barrels tucked cleanly underneath or beside counter
+	_spawn_ext_prop(stall, "res://assets/fishing/barrel.glb", Vector3(-1.02, fy - 0.01, -0.34), 0.2, Vector3.ONE * 0.85, true)
+	if idx % 2 == 0:
+		_spawn_ext_prop(stall, "res://assets/fishing/crate.glb", Vector3(0.95, fy - 0.01, -0.36), -0.3, Vector3.ONE * 0.82, true)
+	else:
+		_spawn_ext_prop(stall, "res://assets/fishing/chest.glb", Vector3(0.95, fy - 0.01, -0.34), 0.15, Vector3.ONE * 0.85, true)
+
+	match idx % 4:
+		0:
+			# Harvest & Fruit Stall: wooden tray + crimson apples, golden melons & green cabbages
+			var apples := _get_color_mat("apple_red", Color(0.86, 0.20, 0.16), 0.72)
+			var pumpkin := _get_color_mat("pumpkin_gold", Color(0.92, 0.52, 0.14), 0.78)
+			var cabbage := _get_color_mat("cabbage_green", Color(0.32, 0.62, 0.26), 0.82)
+			_add_box_visual(stall, "ProduceTrayL", Vector3(-0.78, cy + 0.04, 0.22), Vector3(0.76, 0.08, 0.54), _mat_wood_trim).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			for ax in [-0.95, -0.78, -0.62]:
+				for az in [0.12, 0.30]:
+					var orb := MeshInstance3D.new()
+					var sm := SphereMesh.new()
+					sm.radius = 0.09
+					sm.height = 0.18
+					sm.radial_segments = 8
+					sm.rings = 4
+					orb.mesh = sm
+					orb.material_override = apples if idx < 4 else cabbage
+					orb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+					orb.position = Vector3(float(ax), cy + 0.15, float(az))
+					stall.add_child(orb)
+			for px_off in [0.12, 0.42]:
+				var mel := MeshInstance3D.new()
+				var ms := SphereMesh.new()
+				ms.radius = 0.15
+				ms.height = 0.26
+				ms.radial_segments = 8
+				ms.rings = 4
+				mel.mesh = ms
+				mel.material_override = pumpkin
+				mel.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				mel.position = Vector3(float(px_off), cy + 0.13, 0.24)
+				stall.add_child(mel)
+			_spawn_ext_prop(stall, "res://assets/fishing/crate-bottles.glb", Vector3(0.96, cy, 0.24), 0.2, Vector3.ONE * 0.68, false)
+		1:
+			# Florist & Herbalist / Botanical Stall: colorful flowers, forest mushrooms & potion flasks
+			_spawn_ext_prop(stall, "res://assets/nature/Flower_3_Group.gltf", Vector3(-0.92, cy, 0.22), 0.3, Vector3.ONE * 0.85, false)
+			_spawn_ext_prop(stall, "res://assets/nature/Flower_4_Group.gltf", Vector3(-0.22, cy, 0.24), -0.4, Vector3.ONE * 0.85, false)
+			_spawn_ext_prop(stall, "res://assets/nature/Mushroom_Laetiporus.gltf", Vector3(0.45, cy, 0.22), 0.5, Vector3.ONE * 0.72, false)
+			_spawn_ext_prop(stall, "res://assets/fishing/crate-bottles.glb", Vector3(0.98, cy, 0.24), -0.2, Vector3.ONE * 0.65, false)
+		2:
+			# Bakery & Cloth / Pantry Stall: warm golden bread loaves, stacked cheese & mugs
+			var bread_mat := _get_color_mat("bread_crust", Color(0.84, 0.58, 0.26), 0.86)
+			var cheese_mat := _get_color_mat("cheese_gold", Color(0.96, 0.78, 0.28), 0.78)
+			for bx in [-0.95, -0.58, -0.22]:
+				var loaf := _add_box_visual(stall, "BreadLoaf", Vector3(float(bx), cy + 0.08, 0.22), Vector3(0.28, 0.14, 0.18), bread_mat)
+				if loaf != null:
+					loaf.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			for cx_off in [0.34, 0.34]:
+				var wheel := MeshInstance3D.new()
+				var cm := CylinderMesh.new()
+				cm.top_radius = 0.18
+				cm.bottom_radius = 0.18
+				cm.height = 0.11
+				cm.radial_segments = 10
+				wheel.mesh = cm
+				wheel.material_override = cheese_mat
+				wheel.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				wheel.position = Vector3(float(cx_off), cy + (0.06 if cx_off == 0.34 else 0.17), 0.22)
+				stall.add_child(wheel)
+			_spawn_ext_prop(stall, "res://assets/npcs/mug_full.gltf", Vector3(0.82, cy, 0.20), 0.4, Vector3.ONE * 0.95, false)
+			_spawn_ext_prop(stall, "res://assets/npcs/mug_full.gltf", Vector3(1.06, cy, 0.28), -0.3, Vector3.ONE * 0.95, false)
+		_:
+			# Merchant / Clothier & Oddities Stall: folded colorful fabric bolts, open ledger & brass coffer
+			var cloth_cols := [
+				["cloth_crimson", Color(0.76, 0.22, 0.22)],
+				["cloth_cobalt", Color(0.22, 0.38, 0.72)],
+				["cloth_saffron", Color(0.90, 0.70, 0.22)],
+			]
+			for ci in range(cloth_cols.size()):
+				var cmat := _get_color_mat(cloth_cols[ci][0], cloth_cols[ci][1], 0.90)
+				var bolt := _add_box_visual(stall, "ClothBolt", Vector3(-0.92 + float(ci) * 0.34, cy + 0.08, 0.22), Vector3(0.28, 0.15, 0.46), cmat)
+				if bolt != null:
+					bolt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			_spawn_ext_prop(stall, "res://assets/npcs/spellbook_open.gltf", Vector3(0.25, cy + 0.04, 0.25), 0.15, Vector3.ONE * 0.95, false)
+			_spawn_ext_prop(stall, "res://assets/fishing/chest.glb", Vector3(0.92, cy, 0.22), -0.25, Vector3.ONE * 0.48, false)
+
+
+func _populate_civic_life_props(group: Node3D, colliders: StaticBody3D, terrain: Node3D) -> void:
+	# 1. Plaza Well Quadrant Wooden Benches & Planter Boxes facing the central Well
+	var bench_specs := [
+		{"off": Vector2(-4.8, -4.8), "yaw": PI * 0.25},
+		{"off": Vector2( 4.8, -4.8), "yaw": -PI * 0.25},
+		{"off": Vector2(-4.8,  4.8), "yaw": PI * 0.75},
+		{"off": Vector2( 4.8,  4.8), "yaw": -PI * 0.75},
+		{"off": Vector2(-5.2, -14.8), "yaw": 0.0},
+		{"off": Vector2( 5.2, -14.8), "yaw": 0.0},
+	]
+	for bspec in bench_specs:
+		var boff: Vector2 = bspec["off"]
+		var byaw: float = bspec["yaw"]
+		var bx: float = VILLAGE_CENTER.x + boff.x
+		var bz: float = VILLAGE_CENTER.z + boff.y
+		var by: float = _sample_h(terrain, bx, bz) + 0.048
+		var bench := Node3D.new()
+		bench.name = "PlazaBench"
+		bench.position = Vector3(bx, by, bz)
+		bench.rotation = Vector3(0.0, byaw, 0.0)
+		group.add_child(bench)
+		_add_box_visual(bench, "Seat", Vector3(0.0, 0.42, 0.0), Vector3(1.65, 0.10, 0.50), _mat_wood_trim)
+		_add_box_visual(bench, "LegL", Vector3(-0.68, 0.21, 0.0), Vector3(0.14, 0.42, 0.44), _mat_wood_dark)
+		_add_box_visual(bench, "LegR", Vector3( 0.68, 0.21, 0.0), Vector3(0.14, 0.42, 0.44), _mat_wood_dark)
+		_add_box_visual(bench, "Back", Vector3(0.0, 0.74, -0.20), Vector3(1.65, 0.34, 0.08), _mat_wood_trim)
+		_add_box_collider(colliders, Transform3D(Basis(Vector3.UP, byaw), Vector3(bx, by + 0.38, bz)), Vector3(1.65, 0.76, 0.52))
+
+	# 2. GoldenSlimeInn & Bakery Outdoor Terrace Tables + Benches + Barrels (x=-14.2 apron)
+	var inn_tables := [Vector2(-14.2, -9.8), Vector2(-14.2, -5.8), Vector2(-14.2, 6.2)]
+	for ti in range(inn_tables.size()):
+		var toff: Vector2 = inn_tables[ti]
+		var tx: float = VILLAGE_CENTER.x + toff.x
+		var tz: float = VILLAGE_CENTER.z + toff.y
+		var ty: float = _sample_h(terrain, tx, tz) + 0.048
+		var tbl := Node3D.new()
+		tbl.name = "InnTable_%d" % ti
+		tbl.position = Vector3(tx, ty, tz)
+		group.add_child(tbl)
+		_add_box_visual(tbl, "TableTop", Vector3(0.0, 0.74, 0.0), Vector3(1.60, 0.10, 0.92), _mat_wood_trim)
+		_add_box_visual(tbl, "TableLegL", Vector3(-0.62, 0.37, 0.0), Vector3(0.14, 0.74, 0.72), _mat_wood_dark)
+		_add_box_visual(tbl, "TableLegR", Vector3( 0.62, 0.37, 0.0), Vector3(0.14, 0.74, 0.72), _mat_wood_dark)
+		_add_box_visual(tbl, "BenchN", Vector3(0.0, 0.40, -0.78), Vector3(1.45, 0.10, 0.34), _mat_wood_trim)
+		_add_box_visual(tbl, "BenchS", Vector3(0.0, 0.40,  0.78), Vector3(1.45, 0.10, 0.34), _mat_wood_trim)
+		if ti < 2:
+			_spawn_ext_prop(tbl, "res://assets/npcs/mug_full.gltf", Vector3(-0.35, 0.79, 0.10), 0.3, Vector3.ONE * 0.95, false)
+			_spawn_ext_prop(tbl, "res://assets/npcs/mug_full.gltf", Vector3(0.32, 0.79, -0.14), -0.6, Vector3.ONE * 0.95, false)
+		else:
+			var bread_m := _get_color_mat("bread_crust", Color(0.84, 0.58, 0.26), 0.86)
+			_add_box_visual(tbl, "BakeryLoaf1", Vector3(-0.35, 0.86, 0.08), Vector3(0.30, 0.14, 0.18), bread_m).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			_add_box_visual(tbl, "BakeryLoaf2", Vector3(0.28, 0.86, -0.10), Vector3(0.28, 0.14, 0.18), bread_m).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(tx, ty + 0.44, tz)), Vector3(1.65, 0.88, 1.85))
+
+	# 3. Tavern, Brewery, Market & Apothecary Barrel + Bottle Crate Clusters
+	var barrel_spots := [
+		Vector2(-15.5, -12.4), Vector2(-15.5, 11.4), Vector2(14.8, -11.4),
+		Vector2(14.8, 11.2), Vector2(13.2, 18.2), Vector2(-13.2, 18.2),
+		Vector2(6.5, 36.2), Vector2(-24.8, -35.8),
+	]
+	for bi in range(barrel_spots.size()):
+		var bo: Vector2 = barrel_spots[bi]
+		var bx: float = VILLAGE_CENTER.x + bo.x
+		var bz: float = VILLAGE_CENTER.z + bo.y
+		var by: float = _sample_h(terrain, bx, bz) + (0.048 if absf(bo.x) <= 13.5 and absf(bo.y) <= 13.5 else 0.0)
+		_spawn_ext_prop(group, "res://assets/fishing/barrel.glb", Vector3(bx, by, bz), float(bi) * 0.6, Vector3.ONE, true)
+		_spawn_ext_prop(group, "res://assets/fishing/crate-bottles.glb", Vector3(bx + 0.88, by, bz + 0.22), float(bi) * 0.4, Vector3.ONE * 0.88, true)
+		_add_cylinder_collider(colliders, Vector3(bx, by + 0.55, bz), 0.60, 1.15)
+
+	# 4. Blacksmith Forge Courtyard (outside Blacksmith at (+8.5, +14.8))
+	var fx: float = VILLAGE_CENTER.x + 5.8
+	var fz: float = VILLAGE_CENTER.z + 14.8
+	var fy_smith: float = _sample_h(terrain, fx, fz) + 0.048
+	var smith_yard := Node3D.new()
+	smith_yard.name = "BlacksmithCourtyard"
+	smith_yard.position = Vector3(fx, fy_smith, fz)
+	group.add_child(smith_yard)
+	_add_box_visual(smith_yard, "AnvilStump", Vector3(0.0, 0.34, 0.0), Vector3(0.56, 0.68, 0.56), _mat_wood_dark)
+	_add_box_visual(smith_yard, "AnvilBase", Vector3(0.0, 0.76, 0.0), Vector3(0.46, 0.16, 0.32), _mat_iron)
+	_add_box_visual(smith_yard, "AnvilHorn", Vector3(0.0, 0.90, 0.0), Vector3(0.68, 0.14, 0.24), _mat_iron)
+	_spawn_ext_prop(smith_yard, "res://assets/fishing/barrel.glb", Vector3(1.15, 0.0, 0.15), 0.3, Vector3.ONE, true)
+	_spawn_ext_prop(smith_yard, "res://assets/npcs/sword_1handed.gltf", Vector3(1.15, 0.96, 0.15), 0.4, Vector3.ONE, false)
+	_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(fx + 0.45, fy_smith + 0.55, fz)), Vector3(1.90, 1.10, 0.85))
+
+	# 5. Vibrant Flower Planter Boxes along Plaza Promenade Corners
+	for poff in [
+		Vector2(-12.2, -12.2), Vector2(12.2, -12.2), Vector2(-12.2, 12.2), Vector2(12.2, 12.2),
+		Vector2(-7.8, -14.8), Vector2(7.8, -14.8), Vector2(-7.8, 14.8), Vector2(7.8, 14.8),
+	]:
+		var px: float = VILLAGE_CENTER.x + poff.x
+		var pz: float = VILLAGE_CENTER.z + poff.y
+		var py: float = _sample_h(terrain, px, pz) + 0.048
+		_add_box_visual(group, "FlowerPlanter", Vector3(px, py + 0.20, pz), Vector3(0.92, 0.40, 0.56), _mat_wood_dark)
+		_spawn_ext_prop(group, "res://assets/nature/Flower_3_Group.gltf", Vector3(px - 0.18, py + 0.40, pz), poff.x, Vector3.ONE * 0.78, false)
+		_spawn_ext_prop(group, "res://assets/nature/Flower_4_Group.gltf", Vector3(px + 0.18, py + 0.40, pz), poff.y, Vector3.ONE * 0.78, false)
+
+
+func _build_plaza_bunting(root: Node3D, terrain: Node3D, plaza_top_y: float) -> void:
+	var holder := Node3D.new()
+	holder.name = "PlazaBunting"
+	root.add_child(holder)
+
+	var spans := [
+		[Vector2(-7.6, -8.6), Vector2(-3.6, -3.6)],
+		[Vector2( 7.6, -8.6), Vector2( 3.6, -3.6)],
+		[Vector2(-7.6,  8.6), Vector2(-3.6,  3.6)],
+		[Vector2( 7.6,  8.6), Vector2( 3.6,  3.6)],
+		[Vector2(-8.2, -6.6), Vector2(-8.2, -2.8)],
+		[Vector2( 8.2, -6.6), Vector2( 8.2, -2.8)],
+		[Vector2(-8.2,  2.8), Vector2(-8.2,  6.6)],
+		[Vector2( 8.2,  2.8), Vector2( 8.2,  6.6)],
+	]
+	var flag_mats := [
+		_get_color_mat("bunting_red", Color(0.84, 0.24, 0.20), 0.90),
+		_get_color_mat("bunting_gold", Color(0.94, 0.74, 0.24), 0.90),
+		_get_color_mat("bunting_blue", Color(0.24, 0.46, 0.78), 0.90),
+		_get_color_mat("bunting_green", Color(0.28, 0.62, 0.34), 0.90),
+	]
+	var cord_mat := _get_color_mat("bunting_cord", Color(0.32, 0.24, 0.16), 0.92)
+	var base_y := maxf(_sample_h(terrain, VILLAGE_CENTER.x, VILLAGE_CENTER.z), plaza_top_y)
+
+	for s_idx in range(spans.size()):
+		var a2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][0] as Vector2)
+		var b2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][1] as Vector2)
+		var ha: float = maxf(_sample_h(terrain, a2.x, a2.y), base_y) + 3.85
+		var hb: float = maxf(_sample_h(terrain, b2.x, b2.y), base_y) + 3.85
+		var dvec := b2 - a2
+		var len2 := dvec.length()
+		var yaw := atan2(dvec.x, dvec.y)
+		var n_flags := maxi(5, int(round(len2 / 0.62)))
+		for fi in range(n_flags):
+			var t := (float(fi) + 0.5) / float(n_flags)
+			var p2 := a2.lerp(b2, t)
+			var sag := 4.0 * t * (1.0 - t) * 0.45
+			var py := lerpf(ha, hb, t) - sag
+			var fmat: Material = flag_mats[(fi + s_idx) % flag_mats.size()]
+			var pennant := MeshInstance3D.new()
+			var pm := PrismMesh.new()
+			pm.size = Vector3(0.04, 0.34, 0.36)
+			pennant.mesh = pm
+			pennant.material_override = fmat
+			pennant.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			pennant.position = Vector3(p2.x, py - 0.16, p2.y)
+			pennant.rotation = Vector3(PI, yaw, 0.0)
+			holder.add_child(pennant)
+		# Thin taut rope cord segment at midpoint
+		var mid2 := (a2 + b2) * 0.5
+		var cord := MeshInstance3D.new()
+		var cm := BoxMesh.new()
+		cm.size = Vector3(0.03, 0.03, len2)
+		cord.mesh = cm
+		cord.material_override = cord_mat
+		cord.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		cord.position = Vector3(mid2.x, (ha + hb) * 0.5 - 0.22, mid2.y)
+		cord.rotation = Vector3(0.0, yaw, 0.0)
+		holder.add_child(cord)
+
+
+func _build_plaza_ambiance(root: Node3D, plaza_y: float) -> void:
+	# Gentle sunlit pollen/blossom motes floating above Grand Market Square
+	var motes := GPUParticles3D.new()
+	motes.name = "PlazaBlossomMotes"
+	motes.position = Vector3(VILLAGE_CENTER.x, plaza_y + 2.4, VILLAGE_CENTER.z)
+	motes.amount = 24
+	motes.lifetime = 4.6
+	motes.preprocess = 2.0
+	motes.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	motes.visibility_range_end = 58.0
+	motes.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+
+	var pmat := ParticleProcessMaterial.new()
+	pmat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pmat.emission_box_extents = Vector3(13.0, 1.8, 13.0)
+	pmat.direction = Vector3(0.45, 0.18, 0.25)
+	pmat.spread = 45.0
+	pmat.initial_velocity_min = 0.25
+	pmat.initial_velocity_max = 0.65
+	pmat.gravity = Vector3(0.04, -0.04, 0.02)
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 0.2, 0.8, 1.0])
+	grad.colors = PackedColorArray([
+		Color(1.0, 0.94, 0.72, 0.0),
+		Color(1.0, 0.94, 0.72, 0.72),
+		Color(1.0, 0.86, 0.76, 0.65),
+		Color(1.0, 0.86, 0.76, 0.0),
+	])
+	var gtex := GradientTexture1D.new()
+	gtex.gradient = grad
+	pmat.color_ramp = gtex
+	motes.process_material = pmat
+
+	var q := QuadMesh.new()
+	q.size = Vector2(0.065, 0.065)
+	var qmat := StandardMaterial3D.new()
+	if _smoke_mesh != null and _smoke_mesh.material is StandardMaterial3D:
+		qmat.albedo_texture = (_smoke_mesh.material as StandardMaterial3D).albedo_texture
+	qmat.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+	qmat.roughness = 0.92
+	qmat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	qmat.billboard_keep_scale = true
+	qmat.vertex_color_use_as_albedo = true
+	qmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	q.material = qmat
+	motes.draw_pass_1 = q
+	root.add_child(motes)
+
 
 func _normalize_glb_materials(node: Node) -> void:
 	if node is MeshInstance3D:
@@ -1959,15 +2493,15 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 		_add_box_visual(root, "CottageFenceRailHi_%d" % si_f, mid + Vector3(0.0, 0.84, 0.0), Vector3(0.10, 0.10, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
 		_add_box_visual(root, "CottageFenceRailLo_%d" % si_f, mid + Vector3(0.0, 0.48, 0.0), Vector3(0.10, 0.10, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
 
-	# 0b. Terrain-draped Cobble Pathway from Village South Gatehouse to Beach Boardwalk
+	# 0b. Terrain-draped Cobble Pathway from Village South Gatehouse aligned straight onto the Harbor Wharf
 	var gate_xy := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0)
-	var entry_w := dock.position + d_basis * Vector3(0.0, 0.0, -30.6)
+	var entry_w := dock.position + d_basis * Vector3(0.0, 0.0, -10.35)
 	var entry_xy := Vector2(entry_w.x, entry_w.z)
-	var ctrl_xy := Vector2(entry_xy.x - sea_normal.x * 58.0, lerpf(gate_xy.y, entry_xy.y, 0.52))
+	var ctrl_xy := entry_xy - sea_normal * 64.0
 
 	var path_pts: Array[Vector3] = []
 	var path_dirs: Array[Vector2] = []
-	var n_seg := 44
+	var n_seg := 48
 	for si in range(n_seg + 1):
 		var t := float(si) / float(n_seg)
 		var omt := 1.0 - t
@@ -1979,7 +2513,7 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 		path_pts.append(Vector3(p2.x, py, p2.y))
 		path_dirs.append(dp.normalized())
 
-	var half_w := 1.65
+	var half_w := 1.75
 	var y_lift := 0.09
 	var p_left: Array[Vector3] = []
 	var p_right: Array[Vector3] = []
@@ -1998,25 +2532,26 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	path_mi.name = "PierPathway"
 	path_mi.mesh = _build_road_ribbon_mesh(p_left, p_right, 1.2, 0.55)
 	path_mi.material_override = _mat_cobble
+	path_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(path_mi)
 
 	# Roadside wooden lantern posts along the pier pathway (emissive glow without excess OmniLights)
-	for li in [6, 14, 22, 30, 38]:
+	for li in [6, 14, 22, 30, 38, 44]:
 		var lp := path_pts[li]
 		var ld := path_dirs[li]
 		var lr := Vector2(-ld.y, ld.x)
 		var side := 1.0 if (li % 16 != 6) else -1.0
-		var post_xz := Vector2(lp.x, lp.z) + lr * (side * 2.25)
+		var post_xz := Vector2(lp.x, lp.z) + lr * (side * 2.35)
 		var post_y := _sample_h(terrain, post_xz.x, post_xz.y)
 		var post_pos := Vector3(post_xz.x, post_y + 1.25, post_xz.y)
-		_add_box_visual(root, "PierPathLantern_%d" % li, post_pos, Vector3(0.18, 2.70, 0.18), _mat_wood_dark)
-		_add_cylinder_collider(colliders, post_pos, 0.16, 2.70)
+		_add_cylinder_visual(root, "PierPathLantern_%d" % li, post_pos, 0.08, 0.11, 2.70, _mat_dock_oak)
+		_add_cylinder_collider(colliders, post_pos, 0.15, 2.70)
 		var sconce_yaw := atan2(-lr.x * side, -lr.y * side)
-		var sconce_pos := Vector3(post_xz.x - lr.x * side * 0.14, post_y + 2.35, post_xz.y - lr.y * side * 0.14)
+		var sconce_pos := Vector3(post_xz.x - lr.x * side * 0.12, post_y + 2.35, post_xz.y - lr.y * side * 0.12)
 		_spawn_wall_sconce(root, sconce_pos, sconce_yaw, false)
 
 	# Cottage cobble doorway spur connecting PierPathway up to Fisherman's Cottage front
-	var spur_start := path_pts[n_seg - 4]
+	var spur_start := path_pts[n_seg - 8]
 	var spur_start_xz := Vector2(spur_start.x, spur_start.z)
 	var spur_end_xz := cottage_xy - tangent * 3.8
 	var spur_segs := 6
@@ -2038,92 +2573,265 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	spur_mi.name = "CottageCobbleSpur"
 	spur_mi.mesh = _build_road_ribbon_mesh(s_left, s_right, 1.1, 0.45)
 	spur_mi.material_override = _mat_cobble
+	spur_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(spur_mi)
 
-	# 1. Extended Beach Plank Boardwalk across the wide sandy beach down to the wharf
-	var plank_zs: Array[float] = [-29.6, -26.9, -24.2, -21.5, -18.8, -16.1, -13.4, -11.4]
-	for pz in plank_zs:
-		var w_a := dock.position + d_basis * Vector3(0.0, 0.0, pz - 1.2)
-		var w_b := dock.position + d_basis * Vector3(0.0, 0.0, pz + 1.2)
-		var ha := _sample_h(terrain, w_a.x, w_a.z)
-		var hb := _sample_h(terrain, w_b.x, w_b.z)
-		var slope_x := clampf(atan2(ha - hb, 2.4), -0.35, 0.35)
-		var py := (ha + hb) * 0.5 - 0.05
-		_spawn_glb_scene(dock, fdir + "platform-planks.glb", Vector3(0.0, py, pz), 0.0, Vector3(slope_x, 0.0, 0.0))
-		var pb := d_basis * Basis(Vector3.RIGHT, slope_x)
-		_add_box_collider(colliders, Transform3D(pb, dock.position + d_basis * Vector3(0.0, py + 0.18, pz)), Vector3(1.90, 0.38, 2.70))
-	# Entry bollards flanking the boardwalk start
-	for bx in [-1.35, 1.35]:
-		var bw := dock.position + d_basis * Vector3(float(bx), 0.0, -30.2)
-		var by := _sample_h(terrain, bw.x, bw.z)
-		_add_box_visual(dock, "BoardwalkBollard", Vector3(float(bx), by + 0.55, -30.2), Vector3(0.22, 1.35, 0.22), _mat_wood_dark)
-		_add_cylinder_collider(colliders, Vector3(bw.x, by + 0.55, bw.z), 0.16, 1.35)
+	# 1. Flush Timber Entry Threshold Apron (solid twin platform.glb bays + oak curb sill sealing PierPathway -> Wharf)
+	var wharf_base_y := 0.80
+	var wharf_top_y := wharf_base_y + 0.928  # 1.728 m
+	var pier_base_y := 0.34
+	var pier_top_y := pier_base_y + 1.3123   # 1.6523 m
 
-	# 2. Upper Shoreline Wharf Deck (5m x 5m timber staging deck with ground-sunk pilings)
-	for wx_off in [-1.25, 1.25]:
-		for wz_off in [-9.6, -7.1]:
-			_spawn_glb_scene(dock, fdir + "structure-platform.glb", Vector3(float(wx_off), 0.42, float(wz_off)))
-	for px in [-2.32, 0.0, 2.32]:
-		for pz in [-10.65, -8.35, -6.05]:
-			_add_box_visual(dock, "WharfPiling", Vector3(float(px), -0.25, float(pz)), Vector3(0.24, 2.45, 0.24), _mat_wood_dark)
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, 1.12, -8.35)), Vector3(5.05, 0.40, 5.05))
+	for ap_x: float in [-0.90, 0.90]:
+		_spawn_glb_scene(dock, fdir + "platform.glb", Vector3(ap_x, wharf_top_y - 0.218, -9.60), 0.0, Vector3(-0.015, 0.0, 0.0), Vector3(0.74, 1.0, 0.92))
+	_add_box_visual(dock, "WharfThresholdSill", Vector3(0.0, wharf_top_y - 0.05, -10.68), Vector3(3.86, 0.16, 0.24), _mat_dock_oak)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, wharf_top_y - 0.19, -9.60)), Vector3(3.75, 0.38, 2.40))
+	for side_s: float in [-1.0, 1.0]:
+		_add_cylinder_visual(dock, "WharfEntryPost", Vector3(side_s * 1.96, wharf_top_y + 1.15, -10.55), 0.10, 0.13, 2.75, _mat_dock_oak)
+		_add_rope_ring_visual(dock, "WharfEntryRope", Vector3(side_s * 1.96, wharf_top_y + 0.52, -10.55), 0.10, 0.15, _mat_rope)
+		_spawn_wall_sconce(dock, Vector3(side_s * 1.82, wharf_top_y + 2.28, -10.55), -side_s * PI * 0.5, side_s < 0.0)
+		_add_cylinder_collider(colliders, dock.position + d_basis * Vector3(side_s * 1.96, wharf_top_y + 1.15, -10.55), 0.16, 2.75)
 
-	# Wharf props (crates, barrels, chest, paddle, lantern)
-	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-1.85, 1.32, -9.85), 0.4)
-	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-1.95, 1.32, -8.45), 1.9)
-	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(-1.75, 1.32, -7.05), 0.25)
-	_spawn_glb_scene(dock, fdir + "crate-bottles.glb", Vector3(1.75, 1.32, -7.25), -0.45)
-	_spawn_glb_scene(dock, fdir + "chest.glb", Vector3(1.65, 1.45, -9.65), -0.6)
-	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-1.35, 1.35, -9.95), 0.0, Vector3(0.22, 0.35, 0.14))
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(-1.82, 1.85, -8.45)), Vector3(1.4, 1.15, 3.8))
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(1.70, 1.80, -8.45)), Vector3(1.3, 1.05, 3.4))
+	# 2. Broad Wharf Plaza & Covered Fish-Market Stall (7.5m x 5.0m at z = -8.5..-3.5, top y=1.728)
+	for wx_off in [-2.50, 0.0, 2.50]:
+		for wz_off in [-7.25, -4.75]:
+			_spawn_glb_scene(dock, fdir + "structure-platform.glb", Vector3(float(wx_off), wharf_base_y, float(wz_off)))
+	for px in [-3.62, -1.25, 1.25, 3.62]:
+		for pz in [-8.35, -6.00, -3.65]:
+			_add_cylinder_visual(dock, "WharfOakPiling", Vector3(float(px), -0.40, float(pz)), 0.13, 0.16, 4.18, _mat_dock_oak)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, wharf_top_y - 0.22, -6.00)), Vector3(7.55, 0.44, 5.05))
 
-	_add_box_visual(dock, "WharfLanternPost", Vector3(2.15, 2.25, -10.35), Vector3(0.20, 2.70, 0.20), _mat_wood_dark)
-	_spawn_wall_sconce(dock, Vector3(2.02, 3.35, -10.35), -PI * 0.5, true)
+	# West Wharf Fish-Market Stall (slanted warm cloth canopy on timber posts so Pier-Head Pavilion remains unique)
+	var mat_stall_awning := _make_matte_mat(Color(0.58, 0.23, 0.19), 0.92)
+	var mat_awning_trim := _make_matte_mat(Color(0.84, 0.76, 0.58), 0.92)
+	for sx_p in [-3.35, -1.65]:
+		for sz_p in [-7.45, -4.55]:
+			var sp_h := 2.45 if sx_p < -2.5 else 2.18
+			_add_cylinder_visual(dock, "WharfStallPost", Vector3(sx_p, wharf_top_y + sp_h * 0.5, sz_p), 0.07, 0.08, sp_h, _mat_dock_oak)
+	_add_box_visual(dock, "WharfStallCanopy", Vector3(-2.45, wharf_top_y + 2.34, -6.00), Vector3(2.25, 0.08, 3.35), mat_stall_awning, Vector3(0.0, 0.0, -0.18))
+	_add_box_visual(dock, "WharfStallValance", Vector3(-1.38, wharf_top_y + 2.08, -6.00), Vector3(0.06, 0.18, 3.32), mat_awning_trim)
+	_add_box_visual(dock, "WharfStallCounter", Vector3(-2.05, wharf_top_y + 0.42, -6.00), Vector3(0.65, 0.84, 2.30), _mat_wood_trim)
+	_spawn_wall_sconce(dock, Vector3(-1.58, wharf_top_y + 1.88, -6.00), PI * 0.5, true)
+	_spawn_glb_scene(dock, fdir + "chest.glb", Vector3(-2.95, wharf_top_y + 0.02, -7.25), 0.35, Vector3.INF, Vector3.ONE * 0.76)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-3.00, wharf_top_y + 0.02, -5.95), 1.4, Vector3.INF, Vector3.ONE * 0.74)
+	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(-2.85, wharf_top_y + 0.02, -4.85), -0.25, Vector3.INF, Vector3.ONE * 0.76)
+	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-2.20, wharf_top_y + 0.02, -7.35), 0.0, Vector3(0.22, 0.40, 0.14), Vector3.ONE * 0.90)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(-2.55, wharf_top_y + 0.50, -6.02)), Vector3(1.85, 1.00, 3.25))
 
-	# 3. Main Wooden Pier extending out over the ocean water
-	var pier_zs: Array[float] = [-4.5, -2.0, 0.5, 3.0, 5.5, 8.0, 10.5, 13.0, 15.5]
+	# East Wharf Cargo Cluster & Harbor Mooring Railings framing Main Pier entrance
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(2.85, wharf_top_y + 0.02, -7.05), 0.7, Vector3.INF, Vector3.ONE * 0.78)
+	_spawn_glb_scene(dock, fdir + "crate-bottles.glb", Vector3(2.85, wharf_top_y + 0.02, -5.75), -0.45, Vector3.INF, Vector3.ONE * 0.76)
+	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(2.20, wharf_top_y + 0.02, -4.55), 0.20, Vector3.INF, Vector3.ONE * 0.72)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(2.70, wharf_top_y + 0.46, -5.90)), Vector3(1.45, 0.95, 3.15))
+
+	# Wharf perimeter mooring posts & hemp-rope guard spans (center 2.5m pier entry left clear)
+	var wharf_rail_segments: Array[Array] = [
+		[Vector2(-3.62, -8.35), Vector2(-3.62, -3.65)],
+		[Vector2(-3.62, -3.65), Vector2(-1.25, -3.65)],
+		[Vector2( 3.62, -8.35), Vector2( 3.62, -3.65)],
+		[Vector2( 3.62, -3.65), Vector2( 1.25, -3.65)],
+	]
+	for rseg in wharf_rail_segments:
+		var a2: Vector2 = rseg[0]
+		var b2: Vector2 = rseg[1]
+		for pt2 in [a2, b2]:
+			_add_cylinder_visual(dock, "WharfGuardPost", Vector3(pt2.x, wharf_top_y + 0.46, pt2.y), 0.09, 0.11, 0.96, _mat_dock_oak)
+			_add_rope_ring_visual(dock, "WharfGuardRopeWrap", Vector3(pt2.x, wharf_top_y + 0.80, pt2.y), 0.09, 0.13, _mat_rope)
+		_spawn_rope_span(dock, "WharfRopeTop", Vector3(a2.x, wharf_top_y + 0.82, a2.y), Vector3(b2.x, wharf_top_y + 0.82, b2.y), 0.036, _mat_rope)
+		_spawn_rope_span(dock, "WharfRopeMid", Vector3(a2.x, wharf_top_y + 0.46, a2.y), Vector3(b2.x, wharf_top_y + 0.46, b2.y), 0.030, _mat_rope)
+
+	# 3. Main Stepped Timber Pier Spine extending over cove water (z = -3.5..16.5, top y=1.652)
+	# Uses flat structure-platform.glb decks (no protruding interior tile bollards) carried on deep oak bents.
+	var pier_deck_base_y := pier_top_y - 0.928 # 0.7243 m
+	var pier_zs: Array[float] = [-2.25, 0.25, 2.75, 5.25, 7.75, 10.25, 12.75, 15.25]
 	for pz in pier_zs:
-		_spawn_glb_scene(dock, fdir + "structure-platform-dock.glb", Vector3(0.0, 0.32, pz))
-	for pz_p in [-4.5, 0.5, 5.5, 10.5, 15.5]:
-		for px_p in [-1.12, 1.12]:
-			_add_box_visual(dock, "PierPiling", Vector3(float(px_p), -1.75, float(pz_p)), Vector3(0.26, 4.70, 0.26), _mat_wood_dark)
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, 1.14, 5.5)), Vector3(2.50, 0.38, 22.8))
+		_spawn_glb_scene(dock, fdir + "structure-platform.glb", Vector3(0.0, pier_deck_base_y, pz))
+	var spine_bents: Array[float] = [-3.50, -1.00, 1.50, 4.00, 6.50, 9.00, 11.50, 14.00, 16.50]
+	for bz_idx in range(spine_bents.size()):
+		var bz: float = spine_bents[bz_idx]
+		# Cross-brace girder connecting each bent below deck height
+		_spawn_rope_span(dock, "PierBentBrace", Vector3(-1.14, 0.48, bz), Vector3(1.14, 0.48, bz), 0.065, _mat_dock_oak)
+		for px_p: float in [-1.14, 1.14]:
+			var at_wharf_seam: bool = bz < -3.0
+			var at_head_seam: bool = bz > 16.0
+			var at_east_gangway: bool = px_p > 0.0 and bz > 3.1 and bz < 5.5
+			var at_west_slip: bool = px_p < 0.0 and bz > 9.8 and bz < 13.0
+			var under_only: bool = at_wharf_seam or at_head_seam or at_east_gangway or at_west_slip
+			var is_tall_bollard: bool = (not under_only) and (bz_idx == 2 or bz_idx == 4 or bz_idx == 7)
+			var post_top := pier_top_y - 0.12 if under_only else pier_top_y + (1.06 if is_tall_bollard else 0.88)
+			var post_bot := -4.20
+			_add_cylinder_visual(dock, "PierOakPiling", Vector3(px_p, (post_top + post_bot) * 0.5, bz), 0.11, 0.15, post_top - post_bot, _mat_dock_oak)
+			if not under_only:
+				_add_rope_ring_visual(dock, "PierPostRopeTop", Vector3(px_p, pier_top_y + 0.74, bz), 0.11, 0.15, _mat_rope)
+				if is_tall_bollard:
+					_add_rope_ring_visual(dock, "PierPostRopeLow", Vector3(px_p, pier_top_y + 0.36, bz), 0.12, 0.17, _mat_rope)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, pier_top_y - 0.19, 6.50)), Vector3(2.50, 0.38, 20.10))
 
-	# 4. T-Head Fishing Platform & Shelter Pavilion at Pier End (z = 18.0)
+	# Dedicated gate posts strictly at East Finger Gangway & West Boat-Slip openings (no overlap with bents)
+	for gp: Vector2 in [Vector2(1.14, 3.10), Vector2(1.14, 5.45), Vector2(-1.14, 9.80), Vector2(-1.14, 13.00)]:
+		_add_cylinder_visual(dock, "PierOpeningPost", Vector3(gp.x, pier_top_y + 0.44, gp.y), 0.09, 0.11, 0.90, _mat_dock_oak)
+		_add_rope_ring_visual(dock, "PierOpeningRope", Vector3(gp.x, pier_top_y + 0.74, gp.y), 0.09, 0.13, _mat_rope)
+
+	# Continuous hemp-rope guard rails along open pier sides connecting existing Wharf & PierHead boundary posts
+	var pier_rail_segments: Array[Array] = [
+		[Vector2(-1.20, -3.65), Vector2(-1.14, -1.00)],
+		[Vector2(-1.14, -1.00), Vector2(-1.14,  9.80)],
+		[Vector2(-1.14, 13.00), Vector2(-1.25, 16.65)],
+		[Vector2( 1.20, -3.65), Vector2( 1.14, -1.00)],
+		[Vector2( 1.14, -1.00), Vector2( 1.14,  3.10)],
+		[Vector2( 1.14,  5.45), Vector2( 1.25, 16.65)],
+	]
+	for pseg in pier_rail_segments:
+		var pa: Vector2 = pseg[0]
+		var pb: Vector2 = pseg[1]
+		_spawn_rope_span(dock, "PierRopeTop", Vector3(pa.x, pier_top_y + 0.76, pa.y), Vector3(pb.x, pier_top_y + 0.76, pb.y), 0.032, _mat_rope)
+		_spawn_rope_span(dock, "PierRopeMid", Vector3(pa.x, pier_top_y + 0.42, pa.y), Vector3(pb.x, pier_top_y + 0.42, pb.y), 0.025, _mat_rope)
+
+	# 3b. Tiered East Boat-Slip Gangway Ramp & Low-Water Finger Landing (top y = 0.65m)
+	var low_top_y := 0.65
+	_spawn_glb_scene(dock, fdir + "platform-planks.glb", Vector3(2.05, 0.90, 4.25), 0.0, Vector3(0.37, PI * 0.5, 0.0), Vector3(0.90, 1.0, 1.05))
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, PI * 0.5) * Basis(Vector3.RIGHT, 0.37), dock.position + d_basis * Vector3(2.05, 1.06, 4.25)), Vector3(1.85, 0.34, 2.75))
+
+	for lz in [4.25, 6.75, 9.25]:
+		_spawn_glb_scene(dock, fdir + "platform.glb", Vector3(3.85, low_top_y - 0.228, lz))
+	for lpx in [2.72, 4.98]:
+		for lpz in [3.15, 6.75, 10.35]:
+			_add_cylinder_visual(dock, "FingerDockPiling", Vector3(lpx, (low_top_y + 0.62 - 3.80) * 0.5, lpz), 0.11, 0.14, low_top_y + 4.42, _mat_dock_oak)
+			_add_rope_ring_visual(dock, "FingerDockRope", Vector3(lpx, low_top_y + 0.38, lpz), 0.11, 0.16, _mat_rope)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(3.85, low_top_y - 0.14, 6.75)), Vector3(2.50, 0.28, 7.60))
+	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(4.35, low_top_y, 9.55), -0.35, Vector3.INF, Vector3.ONE * 0.72)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(3.35, low_top_y, 9.65), 1.15, Vector3.INF, Vector3.ONE * 0.70)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(3.85, low_top_y + 0.42, 9.60)), Vector3(1.85, 0.90, 1.25))
+
+	# 4. Asymmetrical Harbor Pier-Head Plaza (3x2 flat structure-platform.glb bays = 7.5m x 5.0m at z = 16.5..21.5, top y=1.652)
 	for tx in [-2.50, 0.0, 2.50]:
-		_spawn_glb_scene(dock, fdir + "structure-platform-dock.glb", Vector3(float(tx), 0.32, 18.0))
-	for tx_p in [-3.62, -1.38, 1.38, 3.62]:
-		_add_box_visual(dock, "PierHeadPiling", Vector3(float(tx_p), -1.85, 18.0), Vector3(0.26, 4.90, 0.26), _mat_wood_dark)
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, 1.14, 18.0)), Vector3(7.55, 0.38, 2.55))
+		for tz in [17.75, 20.25]:
+			_spawn_glb_scene(dock, fdir + "structure-platform.glb", Vector3(float(tx), pier_deck_base_y, float(tz)))
+	for tx_p: float in [-3.62, -1.25, 1.25, 3.62]:
+		for tz_p: float in [16.65, 19.00, 21.35]:
+			var is_interior: bool = absf(tx_p) < 2.0 and tz_p > 17.0 and tz_p < 20.5
+			var is_outer_corner: bool = absf(tx_p) > 3.0 and tz_p > 20.5
+			var head_bot := -4.50
+			if is_interior:
+				var under_top := pier_top_y - 0.14
+				_add_cylinder_visual(dock, "PierHeadUnderPiling", Vector3(tx_p, (under_top + head_bot) * 0.5, tz_p), 0.12, 0.16, under_top - head_bot, _mat_dock_oak)
+			else:
+				var post_top := pier_top_y + (1.16 if is_outer_corner else 0.92)
+				_add_cylinder_visual(dock, "PierHeadOakPiling", Vector3(tx_p, (post_top + head_bot) * 0.5, tz_p), 0.12, 0.16, post_top - head_bot, _mat_dock_oak)
+				_add_rope_ring_visual(dock, "PierHeadPostRope", Vector3(tx_p, pier_top_y + 0.76, tz_p), 0.12, 0.16, _mat_rope)
+				if is_outer_corner:
+					_add_rope_ring_visual(dock, "PierHeadBollardRope", Vector3(tx_p, pier_top_y + 0.40, tz_p), 0.13, 0.18, _mat_rope)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(0.0, pier_top_y - 0.19, 19.00)), Vector3(7.55, 0.38, 5.05))
 
-	_spawn_glb_scene(dock, fdir + "structure.glb", Vector3(-2.50, 1.25, 18.0), 0.0)
-	_spawn_glb_scene(dock, fdir + "structure-roof.glb", Vector3(-2.50, 3.45, 18.0), 0.0)
-	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-2.95, 1.32, 17.6), 0.8)
-	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(-1.90, 1.32, 18.3), -0.3)
-	_spawn_glb_scene(dock, fdir + "structure-fence.glb", Vector3(2.50, 1.25, 18.0), PI)
-	_add_box_visual(dock, "PierBeaconPost", Vector3(3.45, 2.40, 18.85), Vector3(0.20, 2.80, 0.20), _mat_wood_dark)
-	_spawn_wall_sconce(dock, Vector3(3.32, 3.55, 18.85), -PI * 0.5, true)
+	# West Harbormaster Watch Canopy & Tally Desk (single-story open timber gable pavilion echoing village slate roofs)
+	var mat_pier_slate := _make_matte_mat(Color(0.25, 0.28, 0.33), 0.90)
+	var pav_x := -2.25
+	var pav_z := 18.95
+	var pav_post_h := 2.34
+	for px_o: float in [-1.05, 1.05]:
+		for pz_o: float in [-1.20, 1.20]:
+			var p_pos := Vector3(pav_x + px_o, pier_top_y + pav_post_h * 0.5, pav_z + pz_o)
+			_add_cylinder_visual(dock, "HarborPavilionPost", p_pos, 0.085, 0.105, pav_post_h, _mat_dock_oak)
+			_add_box_visual(dock, "HarborPavilionPlinth", Vector3(pav_x + px_o, pier_top_y + 0.09, pav_z + pz_o), Vector3(0.26, 0.18, 0.26), _mat_stone_foundation)
+			# Subtle diagonal knee brace along roof eaves
+			var brace_in := -px_o * 0.45
+			_spawn_rope_span(dock, "HarborPavilionBrace", Vector3(pav_x + px_o, pier_top_y + 1.82, pav_z + pz_o), Vector3(pav_x + px_o + brace_in, pier_top_y + 2.28, pav_z + pz_o), 0.055, _mat_dock_oak)
+		# Wall-plate beam along Z
+		_add_box_visual(dock, "HarborPavilionEave", Vector3(pav_x + px_o, pier_top_y + 2.32, pav_z), Vector3(0.16, 0.16, 2.75), _mat_dock_oak)
+	# Pitched Slate Shingle Gable Roof (port & starboard slopes + ridge beam + overhang fascia)
+	_add_box_visual(dock, "HarborPavilionRoofW", Vector3(pav_x - 0.68, pier_top_y + 2.66, pav_z), Vector3(1.56, 0.11, 2.96), mat_pier_slate, Vector3(0.0, 0.0, 0.42))
+	_add_box_visual(dock, "HarborPavilionRoofE", Vector3(pav_x + 0.68, pier_top_y + 2.66, pav_z), Vector3(1.56, 0.11, 2.96), mat_pier_slate, Vector3(0.0, 0.0, -0.42))
+	_add_box_visual(dock, "HarborPavilionRidge", Vector3(pav_x, pier_top_y + 2.98, pav_z), Vector3(0.20, 0.18, 3.04), _mat_dock_oak)
+	# Hanging Iron Lantern inside Canopy Ridge
+	var pav_lamp := Vector3(pav_x, pier_top_y + 2.24, pav_z)
+	_spawn_rope_span(dock, "PavilionLampChain", Vector3(pav_x, pier_top_y + 2.90, pav_z), pav_lamp + Vector3(0.0, 0.14, 0.0), 0.022, _mat_iron)
+	_add_box_visual(dock, "PavilionLampCap", pav_lamp + Vector3(0.0, 0.12, 0.0), Vector3(0.24, 0.06, 0.24), _mat_iron)
+	var pav_glow := _add_box_visual(dock, "PavilionLampGlow", pav_lamp, Vector3(0.16, 0.20, 0.16), _mat_lantern_glow)
+	pav_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_add_box_visual(dock, "PavilionLampBase", pav_lamp - Vector3(0.0, 0.12, 0.0), Vector3(0.20, 0.05, 0.20), _mat_iron)
+	var pav_light := OmniLight3D.new()
+	pav_light.position = pav_lamp
+	pav_light.light_color = Color(1.0, 0.78, 0.44)
+	pav_light.light_energy = 1.05
+	pav_light.omni_range = 9.5
+	pav_light.shadow_enabled = false
+	pav_light.distance_fade_enabled = true
+	pav_light.distance_fade_begin = 95.0
+	pav_light.distance_fade_length = 30.0
+	dock.add_child(pav_light)
+	_register_night_light(pav_light, 1.05)
+	# Grounded Harbormaster tally counter + cargo crates inside open canopy (West half, leaving East side walkable)
+	_add_box_visual(dock, "HarborTallyDesk", Vector3(pav_x - 0.62, pier_top_y + 0.42, pav_z), Vector3(0.60, 0.84, 1.45), _mat_wood_trim)
+	_spawn_glb_scene(dock, fdir + "chest.glb", Vector3(pav_x + 0.45, pier_top_y + 0.02, pav_z - 0.68), 0.25, Vector3.INF, Vector3.ONE * 0.72)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(pav_x - 0.55, pier_top_y + 0.02, pav_z + 0.85), 0.90, Vector3.INF, Vector3.ONE * 0.72)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(pav_x - 0.58, pier_top_y + 0.48, pav_z)), Vector3(0.85, 0.96, 1.95))
 
-	# 5. Moored Rowboats on water & Beached Rowboat on sand
-	_spawn_glb_scene(dock, fdir + "boat-row-large.glb", Vector3(-2.95, -0.14, 11.2), 0.12)
-	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.12), dock.position + d_basis * Vector3(-2.95, 0.22, 11.2)), Vector3(2.60, 0.72, 2.75))
+	# East Harbor Beacon Crane cleanly seated inside southeast bay with iron cap & framed harbor lantern
+	var crane_base := Vector3(2.65, pier_top_y, 20.05)
+	_add_box_visual(dock, "HarborCranePlinth", crane_base + Vector3(0.0, 0.09, 0.0), Vector3(0.42, 0.18, 0.42), _mat_iron)
+	_add_cylinder_visual(dock, "HarborCraneMast", crane_base + Vector3(0.0, 1.95, 0.0), 0.11, 0.15, 3.90, _mat_dock_oak)
+	_add_box_visual(dock, "HarborCraneCap", crane_base + Vector3(0.0, 3.88, 0.0), Vector3(0.28, 0.10, 0.28), _mat_iron)
+	_spawn_rope_span(dock, "HarborCraneBrace", crane_base + Vector3(0.0, 2.48, 0.0), crane_base + Vector3(0.54, 3.50, 0.62), 0.068, _mat_dock_oak)
+	_spawn_rope_span(dock, "HarborCraneJib", crane_base + Vector3(0.0, 3.55, -0.10), crane_base + Vector3(0.98, 3.68, 1.28), 0.082, _mat_dock_oak)
+	_add_rope_ring_visual(dock, "HarborCraneLash", crane_base + Vector3(0.0, 3.54, 0.0), 0.12, 0.18, _mat_rope)
+	var beacon_tip := crane_base + Vector3(0.92, 3.64, 1.20)
+	_add_box_visual(dock, "BeaconPulley", beacon_tip, Vector3(0.18, 0.16, 0.18), _mat_iron)
+	_spawn_rope_span(dock, "BeaconHangRope", beacon_tip - Vector3(0.0, 0.06, 0.0), beacon_tip - Vector3(0.0, 0.64, 0.0), 0.022, _mat_rope)
+	var beacon_pos := beacon_tip - Vector3(0.0, 0.76, 0.0)
+	_add_box_visual(dock, "BeaconCap", beacon_pos + Vector3(0.0, 0.16, 0.0), Vector3(0.30, 0.07, 0.30), _mat_iron)
+	for b_sx: float in [-0.11, 0.11]:
+		for b_sz: float in [-0.11, 0.11]:
+			_add_box_visual(dock, "BeaconStrut", beacon_pos + Vector3(b_sx, 0.0, b_sz), Vector3(0.035, 0.28, 0.035), _mat_iron)
+	var b_glow := _add_box_visual(dock, "BeaconGlow", beacon_pos, Vector3(0.20, 0.24, 0.20), _mat_lantern_glow)
+	b_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_add_box_visual(dock, "BeaconBase", beacon_pos - Vector3(0.0, 0.16, 0.0), Vector3(0.26, 0.06, 0.26), _mat_iron)
+	var beacon_light := OmniLight3D.new()
+	beacon_light.position = beacon_pos
+	beacon_light.light_color = Color(1.0, 0.78, 0.42)
+	beacon_light.light_energy = 1.25
+	beacon_light.omni_range = 12.0
+	beacon_light.shadow_enabled = false
+	beacon_light.distance_fade_enabled = true
+	beacon_light.distance_fade_begin = 95.0
+	beacon_light.distance_fade_length = 30.0
+	dock.add_child(beacon_light)
+	_register_night_light(beacon_light, 1.25)
+	_spawn_glb_scene(dock, fdir + "crate-bottles.glb", Vector3(2.15, pier_top_y + 0.02, 19.35), 0.45, Vector3.INF, Vector3.ONE * 0.74)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(2.85, pier_top_y + 0.02, 18.45), -0.8, Vector3.INF, Vector3.ONE * 0.76)
 
-	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(2.85, -0.14, 14.0), -0.22)
-	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, -0.22), dock.position + d_basis * Vector3(2.85, 0.22, 14.0)), Vector3(2.55, 0.72, 2.30))
+	# Continuous seaward & side hemp-rope railings connecting existing Pier-Head perimeter pilings (0 duplicate posts)
+	var head_rail_segments: Array[Array] = [
+		[Vector2(-1.25, 16.65), Vector2(-3.62, 16.65)],
+		[Vector2(-3.62, 16.65), Vector2(-3.62, 21.35)],
+		[Vector2(-3.62, 21.35), Vector2( 3.62, 21.35)],
+		[Vector2( 3.62, 21.35), Vector2( 3.62, 16.65)],
+		[Vector2( 3.62, 16.65), Vector2( 1.25, 16.65)],
+	]
+	for hseg in head_rail_segments:
+		var ha: Vector2 = hseg[0]
+		var hb: Vector2 = hseg[1]
+		_spawn_rope_span(dock, "PierHeadRopeTop", Vector3(ha.x, pier_top_y + 0.76, ha.y), Vector3(hb.x, pier_top_y + 0.76, hb.y), 0.032, _mat_rope)
+		_spawn_rope_span(dock, "PierHeadRopeMid", Vector3(ha.x, pier_top_y + 0.42, ha.y), Vector3(hb.x, pier_top_y + 0.42, hb.y), 0.026, _mat_rope)
 
-	var beach_boat_w := dock.position + d_basis * Vector3(-6.4, 0.0, -7.0)
+	# 5. Moored Rowboats alongside East Low-Water Finger Slip & West Main Pier + Beached Skiff
+	_spawn_glb_scene(dock, fdir + "boat-row-large.glb", Vector3(6.65, -0.14, 7.6), -0.08)
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, -0.08), dock.position + d_basis * Vector3(6.65, 0.22, 7.6)), Vector3(2.60, 0.72, 2.75))
+
+	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-2.95, -0.14, 11.4), 0.10)
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.10), dock.position + d_basis * Vector3(-2.95, 0.22, 11.4)), Vector3(2.55, 0.72, 2.30))
+
+	var beach_boat_w := dock.position + d_basis * Vector3(-8.2, 0.0, -6.2)
 	var beach_boat_y := _sample_h(terrain, beach_boat_w.x, beach_boat_w.z) - 0.06
-	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-6.4, beach_boat_y, -7.0), 0.0, Vector3(0.08, 0.45, -0.06))
-	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-5.1, beach_boat_y + 0.12, -6.8), 0.0, Vector3(1.42, 0.65, 0.0))
+	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-8.2, beach_boat_y, -6.2), 0.0, Vector3(0.08, 0.45, -0.06))
+	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-6.9, beach_boat_y + 0.12, -6.0), 0.0, Vector3(1.42, 0.65, 0.0))
 	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.45), Vector3(beach_boat_w.x, beach_boat_y + 0.35, beach_boat_w.z)), Vector3(2.55, 0.72, 2.30))
 
-	# 6. Coastal Sand Rocks & Harbor Mooring Dolphins framing the sandy cove
+	# 6. Coastal Sand Rocks & 3-Post Lashed Harbor Mooring Dolphins
 	var cove_rocks: Array[Dictionary] = [
-		{"off": Vector2(-10.5, -13.5), "glb": "rocks-sand-a.glb", "yaw": 0.4, "scale": 1.00},
-		{"off": Vector2(  9.5, -14.5), "glb": "rocks-sand-b.glb", "yaw": 1.9, "scale": 1.05},
-		{"off": Vector2( 14.2,  -8.0), "glb": "rocks-sand-c.glb", "yaw": 2.7, "scale": 0.90},
-		{"off": Vector2(-14.5, -21.0), "glb": "rocks-sand-b.glb", "yaw": 1.1, "scale": 0.95},
+		{"off": Vector2(-12.5, -12.5), "glb": "rocks-sand-a.glb", "yaw": 0.4, "scale": 1.00},
+		{"off": Vector2( 11.4, -13.2), "glb": "rocks-sand-b.glb", "yaw": 1.9, "scale": 1.05},
+		{"off": Vector2( 14.5,  -7.5), "glb": "rocks-sand-c.glb", "yaw": 2.7, "scale": 0.90},
+		{"off": Vector2(-15.5, -18.5), "glb": "rocks-sand-b.glb", "yaw": 1.1, "scale": 0.95},
 		{"off": Vector2( 16.5, -24.5), "glb": "rocks-sand-a.glb", "yaw": 3.4, "scale": 1.10},
 		{"off": Vector2(-21.0, -11.5), "glb": "rocks-sand-c.glb", "yaw": 2.1, "scale": 1.15},
 	]
@@ -2137,10 +2845,8 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 			_override_glb_material(rinst, _mat_coastal_rock)
 		_add_cylinder_collider(colliders, Vector3(rworld.x, ry + 1.2, rworld.z), 1.9 * float(rk["scale"]), 2.6)
 
-	for dp in [Vector2(-3.8, 6.5), Vector2(3.8, 6.5), Vector2(-4.2, 14.2), Vector2(4.2, 14.2)]:
-		_add_box_visual(dock, "PierMooringDolphin", Vector3(dp.x, -0.45, dp.y), Vector3(0.38, 4.10, 0.38), _mat_wood_dark)
-		var dw := dock.position + d_basis * Vector3(dp.x, 0.45, dp.y)
-		_add_cylinder_collider(colliders, dw, 0.25, 4.10)
+	for dp in [Vector2(-4.4, 7.8), Vector2(8.3, 12.2), Vector2(-5.2, 15.8), Vector2(5.6, 22.4)]:
+		_spawn_mooring_dolphin(dock, colliders, d_basis, dp, -4.40, 2.15)
 
 
 ## Lossless static draw-call batcher: merges static child MeshInstance3D surfaces
@@ -2183,9 +2889,14 @@ func _batch_subtree(container: Node3D, root: Node3D, split_spatial: bool) -> voi
 			continue
 		var m := mi.mesh
 		var cell_tag := "0,0"
+		var cell_origin := Vector3.ZERO
 		if split_spatial:
 			var p := rel_xform.origin
-			cell_tag = "%d,%d" % [int(floor(p.x / 52.0)), int(floor(p.z / 52.0))]
+			var cx := int(floor(p.x / 52.0))
+			var cz := int(floor(p.z / 52.0))
+			cell_tag = "%d,%d" % [cx, cz]
+			cell_origin = Vector3((float(cx) + 0.5) * 52.0, 0.0, (float(cz) + 0.5) * 52.0)
+		var local_xform := Transform3D(Basis.IDENTITY, -cell_origin) * rel_xform if split_spatial else rel_xform
 		var can_strip_all := true
 		var is_arr := m is ArrayMesh
 		for si in range(m.get_surface_count()):
@@ -2193,19 +2904,25 @@ func _batch_subtree(container: Node3D, root: Node3D, split_spatial: bool) -> voi
 				can_strip_all = false
 				continue
 			var mat: Material = mi.material_override if mi.material_override != null else mi.get_active_material(si)
-			var mat_id: int = mat.get_instance_id() if mat != null else 0
+			var mat_key := "0"
+			if mat != null:
+				if (mat is StandardMaterial3D) and not _is_runtime_animated_mat(mat):
+					mat_key = "s:" + _material_signature(mat as StandardMaterial3D)
+				else:
+					mat_key = "id:" + str(mat.get_instance_id())
 			var fmt: int = int((m as ArrayMesh).surface_get_format(si)) if is_arr else -1
-			var bkey := "%s|%d|%d|%d" % [cell_tag, mat_id, int(mi.cast_shadow), fmt]
+			var bkey := "%s|%s|%d|%d" % [cell_tag, mat_key, int(mi.cast_shadow), fmt]
 			if not buckets.has(bkey):
 				var st := SurfaceTool.new()
 				st.begin(Mesh.PRIMITIVE_TRIANGLES)
 				buckets[bkey] = {
 					"cell": cell_tag,
+					"cell_origin": cell_origin,
 					"shadow": mi.cast_shadow,
 					"mat": mat,
 					"st": st,
 				}
-			(buckets[bkey]["st"] as SurfaceTool).append_from(m, si, rel_xform)
+			(buckets[bkey]["st"] as SurfaceTool).append_from(m, si, local_xform)
 		if can_strip_all:
 			to_detach.append(mi)
 
@@ -2219,7 +2936,7 @@ func _batch_subtree(container: Node3D, root: Node3D, split_spatial: bool) -> voi
 		var b: Dictionary = buckets[bkey]
 		var ck := "%s|%d" % [b["cell"], int(b["shadow"])]
 		if not cell_meshes.has(ck):
-			cell_meshes[ck] = {"shadow": b["shadow"], "parts": []}
+			cell_meshes[ck] = {"shadow": b["shadow"], "cell_origin": b["cell_origin"], "parts": []}
 		(cell_meshes[ck]["parts"] as Array).append(b)
 
 	var batch_holder := Node3D.new()
@@ -2239,12 +2956,23 @@ func _batch_subtree(container: Node3D, root: Node3D, split_spatial: bool) -> voi
 				arr_mesh.surface_set_material(si, surf_mats[si])
 		var out_mi := MeshInstance3D.new()
 		out_mi.name = "Batch_" + ck.replace("|", "_")
+		out_mi.position = cm["cell_origin"] as Vector3
 		out_mi.mesh = arr_mesh
 		out_mi.cast_shadow = int(cm["shadow"]) as GeometryInstance3D.ShadowCastingSetting
+		if split_spatial:
+			var aabb := arr_mesh.get_aabb()
+			var half_diag := aabb.size.length() * 0.5
+			var base_vis := 220.0 if container.name == "TownProps" else (240.0 if container.name == "StreetLanterns" else 260.0)
+			out_mi.visibility_range_end = base_vis + half_diag
+			out_mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+			out_mi.set_meta("base_vis_range", out_mi.visibility_range_end)
 		batch_holder.add_child(out_mi)
 
-	for mi in to_detach:
-		mi.visible = false
+	for i in range(to_detach.size() - 1, -1, -1):
+		var mi := to_detach[i]
 		mi.mesh = null
 		if mi.get_child_count() == 0:
+			var p := mi.get_parent()
+			if p != null:
+				p.remove_child(mi)
 			mi.queue_free()

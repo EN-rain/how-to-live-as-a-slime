@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ActorArchetype" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://resources/actors/actor_archetype.gd" id="1_arch"]
+
+[resource]
+script = ExtResource("1_arch")
+archetype_name = "Skeleton Overlord"
+glb_path = "res://assets/mobs/Skeleton_Mage.glb"
+scale_factor = 1.18
+max_hp = 340.0
+attack_damage = 22.0
+walk_speed = 2.8
+run_speed = 5.5
+aggro_radius = 26.0
+territory_radius = 12.0
+leash_radius = 20.0
+hp_bar_height = 3.20
+body_radius = 0.62

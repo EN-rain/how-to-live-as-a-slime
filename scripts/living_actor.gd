@@ -41,16 +41,31 @@ enum AIState {
 var actor_idx: int = 0
 var display_name: String = "Actor"
 var category: String = "npc"
+var model_path: String = ""
+var visual_scale: float = 1.0
+var equip_r: String = ""
+var equip_l: String = ""
 var faction: Faction = Faction.NEUTRAL
 var role: RoleKind = RoleKind.ARTISAN
 var attack_kind: AttackKind = AttackKind.MELEE
 var ai_state: AIState = AIState.SCHEDULE_IDLE
 
 var home_xz: Vector2 = Vector2.ZERO
+var territory_center: Vector2 = Vector2.ZERO
+var territory_radius: float = 0.0
+var leash_radius: float = 0.0
+var pack_id: StringName = &""
+var subterranean_kind: int = 0  # 0 = surface, 1 = skeleton cave, 2 = rat warren
+var has_room_bounds: bool = false
+var room_min_xz: Vector2 = Vector2(-1e9, -1e9)
+var room_max_xz: Vector2 = Vector2(1e9, 1e9)
 var patrol_points: Array[Vector2] = []
 var patrol_cursor: int = 0
 var work_anim_hint: String = "Interact"
 var facing_hint_yaw: float = 0.0
+var has_facing_hint: bool = false
+var initial_facing_yaw: float = 0.0
+var has_initial_facing: bool = false
 var is_night_raider: bool = false
 
 var max_hp: float = 100.0
@@ -85,13 +100,17 @@ var _path_idx: int = 0
 var _repath_cd: float = 0.0
 var _state_timer: float = 1.5
 var _atk_cd: float = 0.0
+var _leap_cd: float = 0.0
 var _action_lock: float = 0.0
 var _flash_timer: float = 0.0
 var _flash_col: Color = Color(1.0, 0.25, 0.25, 0.0)
 var _combat_show_timer: float = 0.0
 var _respawn_timer: float = 0.0
 var _anim_accum_dt: float = 0.0
+var _ai_accum_dt: float = 0.0
 var _slam_grace: float = 0.0
+var _last_ground_xz := Vector2(1e9, 1e9)
+var _cached_ground_y: float = 0.0
 var _rng := RandomNumberGenerator.new()
 
 
@@ -111,8 +130,23 @@ func setup_visuals(model_root: Node3D, anim_player: AnimationPlayer, meshes: Arr
 	if _anim != null:
 		_anim.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
 		_build_anim_map()
-		_play_anim("awaken" if is_night_raider else "idle", true)
-		_anim.advance(0.05)
+		var init_key := "awaken" if is_night_raider else (_work_anim_key() if ai_state == AIState.SCHEDULE_WORK else "idle")
+		_play_anim(init_key, true)
+
+
+func install_visuals(model_root: Node3D, anim_player: AnimationPlayer, meshes: Array[MeshInstance3D], muzzle: Node3D) -> void:
+	for ch in get_children():
+		if ch != _notifier and not (ch is CollisionShape3D):
+			ch.queue_free()
+	add_child(model_root)
+	_anim = anim_player
+	_meshes = meshes
+	_muzzle_node = muzzle
+	if _anim != null:
+		_anim.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
+		_build_anim_map()
+		_play_anim("idle", true)
+		_anim.advance(_rng.randf_range(0.05, 1.35))
 
 
 func _build_anim_map() -> void:
@@ -143,18 +177,22 @@ func _build_anim_map() -> void:
 	_anim_map["hit"] = find_clip.call(["Hit_A", "AnimalArmature|Idle_HitReact_Left"], idle_c)
 	_anim_map["death"] = find_clip.call(["Death_A", "AnimalArmature|Death", "SpiderArmature|Spider_Death", "RatArmature|Rat_Death", "WaspArmature|Wasp_Death"], idle_c)
 	_anim_map["interact"] = find_clip.call([work_anim_hint, "Interact", "Use_Item", "PickUp", "Cheer", "Idle_2"], idle_c)
+	_anim_map["cheer"] = find_clip.call(["Cheer", "Interact", "Idle_2"], idle_c)
+	_anim_map["pickup"] = find_clip.call(["PickUp", "Interact", "Idle_2"], idle_c)
+	_anim_map["use_item"] = find_clip.call(["Use_Item", "Interact", "Idle_2"], idle_c)
 	_anim_map["sit"] = find_clip.call(["Sit_Chair_Idle", "Sit_Floor_Idle", "Idle"], idle_c)
 	_anim_map["eat"] = find_clip.call(["AnimalArmature|Eating", "AnimalArmature|Idle_2", "Idle"], idle_c)
 	_anim_map["awaken"] = find_clip.call(["Skeletons_Awaken_Floor", "Idle"], idle_c)
+	_anim_map["jump"] = find_clip.call(["SpiderArmature|Spider_Jump"], "")
 
 	# Ensure loop flags are properly set on locomotion & idle clips
-	for k in ["idle", "walk", "run", "interact", "sit", "eat", "block"]:
+	for k in ["idle", "walk", "run", "interact", "cheer", "pickup", "use_item", "sit", "eat", "block"]:
 		var cname: String = _anim_map.get(k, "")
 		if not cname.is_empty() and _anim.has_animation(cname):
 			var anim_res := _anim.get_animation(cname)
 			if anim_res != null:
 				anim_res.loop_mode = Animation.LOOP_LINEAR
-	for k in ["attack", "ranged", "spell", "hit", "death", "awaken"]:
+	for k in ["attack", "ranged", "spell", "hit", "death", "awaken", "jump"]:
 		var cname: String = _anim_map.get(k, "")
 		if not cname.is_empty() and _anim.has_animation(cname):
 			var anim_res := _anim.get_animation(cname)
@@ -216,6 +254,10 @@ func apply_damage(amount: float, push_xz: Vector2, attacker: Node = null, is_sli
 		if faction == Faction.HOSTILE:
 			target_slime = attacker as Slime
 			target_actor = null
+			if not pack_id.is_empty():
+				var eco_p := get_parent()
+				if eco_p != null and eco_p.has_method("rally_pack"):
+					eco_p.call("rally_pack", self, null, target_slime)
 		elif role == RoleKind.ANIMAL:
 			ai_state = AIState.FLEE
 			_state_timer = 4.5
@@ -249,7 +291,10 @@ func respawn(ecosystem: Node) -> void:
 	target_slime = null
 	_combat_show_timer = 0.0
 	visible = true
-	var spawn_y: float = float(ecosystem.sample_ground_y(home_xz.x, home_xz.y, role == RoleKind.FISHERMAN))
+	var spawn_y: float = float(ecosystem.sample_ground_y(home_xz.x, home_xz.y, role == RoleKind.FISHERMAN, subterranean_kind))
+	_last_ground_xz = home_xz
+	_cached_ground_y = spawn_y
+	_ai_accum_dt = 0.0
 	global_position = Vector3(home_xz.x, spawn_y, home_xz.y)
 	ai_state = AIState.AWAKEN if is_night_raider else AIState.SCHEDULE_IDLE
 	_state_timer = 1.1 if is_night_raider else 1.5
@@ -261,6 +306,7 @@ func respawn(ecosystem: Node) -> void:
 func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, village_provoked: bool) -> void:
 	_slam_grace = maxf(0.0, _slam_grace - dt)
 	_atk_cd = maxf(0.0, _atk_cd - dt)
+	_leap_cd = maxf(0.0, _leap_cd - dt)
 	_repath_cd = maxf(0.0, _repath_cd - dt)
 	_action_lock = maxf(0.0, _action_lock - dt)
 	_combat_show_timer = maxf(0.0, _combat_show_timer - dt)
@@ -382,10 +428,12 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 				_state_timer = 1.0
 			else:
 				var dist := pos_xz.distance_to(tgt_xz)
-				if dist > aggro_range * 1.45:
+				var over_leash := leash_radius > 0.0 and pos_xz.distance_to(territory_center) > leash_radius
+				if dist > aggro_range * 1.45 or over_leash:
 					target_actor = null
 					target_slime = null
-					ai_state = AIState.SCHEDULE_IDLE
+					ai_state = AIState.SCHEDULE_MOVE
+					_path = PackedVector2Array()
 					_state_timer = 1.0
 				elif dist <= attack_range + tgt_rad:
 					ai_state = AIState.ATTACK
@@ -404,7 +452,14 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 						_set_destination(tgt_xz, ecosystem.nav_graph)
 						_repath_cd = 0.45
 					desired_vel = _follow_path(pos_xz, run_speed, ecosystem.nav_graph)
-					if _action_lock <= 0.0:
+					if not String(_anim_map.get("jump", "")).is_empty() and dist >= 4.2 and dist <= 11.0 and _leap_cd <= 0.0 and _action_lock <= 0.0 and vertical_offset <= 0.05:
+						var pounce_d := (tgt_xz - pos_xz).normalized()
+						vertical_vel = 5.0
+						knockback_xz += pounce_d * 6.8
+						_leap_cd = _rng.randf_range(3.6, 5.8)
+						_action_lock = 0.45
+						_play_anim("jump", true)
+					elif _action_lock <= 0.0:
 						_play_anim("run")
 
 		AIState.SCHEDULE_MOVE:
@@ -415,8 +470,8 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 				if pos_xz.distance_to(goal_xz) < 1.35:
 					_path = PackedVector2Array()
 					ai_state = AIState.SCHEDULE_WORK if (role == RoleKind.MERCHANT or role == RoleKind.ARTISAN or role == RoleKind.FISHERMAN) else AIState.SCHEDULE_IDLE
-					_state_timer = _rng.randf_range(2.8, 6.2)
-					if facing_hint_yaw != 0.0:
+					_state_timer = _rng.randf_range(4.5, 9.0) if (role == RoleKind.MERCHANT or role == RoleKind.ARTISAN) else _rng.randf_range(2.8, 6.2)
+					if has_facing_hint:
 						desired_yaw = facing_hint_yaw
 				else:
 					desired_vel = _follow_path(pos_xz, move_speed, ecosystem.nav_graph)
@@ -424,12 +479,9 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 
 		AIState.SCHEDULE_WORK:
 			_state_timer -= dt
-			if facing_hint_yaw != 0.0:
+			if has_facing_hint:
 				desired_yaw = facing_hint_yaw
-			if work_anim_hint == "Sit_Chair_Idle":
-				_play_anim("sit")
-			else:
-				_play_anim("interact")
+			_play_anim(_work_anim_key())
 			if _state_timer <= 0.0:
 				ai_state = AIState.SCHEDULE_MOVE
 				_pick_next_schedule_destination(pos_xz, ecosystem, is_night)
@@ -453,17 +505,26 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 	var step_v := desired_vel + knockback_xz
 	if desired_vel.length_squared() > 0.09:
 		desired_yaw = atan2(desired_vel.x, desired_vel.y)
-	rotation.y = lerp_angle(rotation.y, desired_yaw, clampf(dt * 9.0, 0.0, 1.0))
+	if absf(angle_difference(rotation.y, desired_yaw)) > 1e-4:
+		rotation.y = lerp_angle(rotation.y, desired_yaw, clampf(dt * 9.0, 0.0, 1.0))
 
 	var new_xz := pos_xz + step_v * dt
+	if has_room_bounds:
+		new_xz.x = clampf(new_xz.x, room_min_xz.x, room_max_xz.x)
+		new_xz.y = clampf(new_xz.y, room_min_xz.y, room_max_xz.y)
 	# Keep ground actors on island landmass (avoid walking out into deep ocean water)
-	var ground_y: float = float(ecosystem.sample_ground_y(new_xz.x, new_xz.y, role == RoleKind.FISHERMAN))
-	if ground_y < 0.15 and role != RoleKind.BEAST:
-		# Steer softly back inland away from surf
-		new_xz = pos_xz
-	else:
-		global_position.x = new_xz.x
-		global_position.z = new_xz.y
+	if new_xz.distance_squared_to(_last_ground_xz) > 1e-7:
+		var is_fisherman := (role == RoleKind.FISHERMAN)
+		var probe_y: float = float(ecosystem.sample_ground_y(new_xz.x, new_xz.y, is_fisherman, subterranean_kind))
+		if probe_y < 0.15 and role != RoleKind.BEAST:
+			if pos_xz.distance_squared_to(_last_ground_xz) > 1e-7:
+				_cached_ground_y = float(ecosystem.sample_ground_y(pos_xz.x, pos_xz.y, is_fisherman, subterranean_kind))
+				_last_ground_xz = pos_xz
+		else:
+			global_position.x = new_xz.x
+			global_position.z = new_xz.y
+			_cached_ground_y = probe_y
+			_last_ground_xz = new_xz
 
 	if vertical_offset > 0.0 or vertical_vel > 0.0:
 		vertical_vel -= 22.0 * dt
@@ -472,7 +533,9 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 			vertical_offset = 0.0
 			vertical_vel = 0.0
 
-	global_position.y = ecosystem.sample_ground_y(global_position.x, global_position.z, role == RoleKind.FISHERMAN) + vertical_offset
+	var target_y := _cached_ground_y + vertical_offset
+	if absf(global_position.y - target_y) > 1e-5:
+		global_position.y = target_y
 
 
 func step_animation_lod(delta: float, dist_sq: float, frame_idx: int, cave_hidden: bool) -> void:
@@ -543,14 +606,21 @@ func _acquire_combat_target(pos_xz: Vector2, ecosystem: Node, village_provoked: 
 		var d_slime := INF
 		if sl != null and not bool(sl.get("is_dead")):
 			d_slime = pos_xz.distance_to(Vector2(sl.global_position.x, sl.global_position.z))
+			# Prevent surface/subterranean actors aggroing vertically across rock ceilings
+			if subterranean_kind != 0 and absf(sl.global_position.y - global_position.y) > 7.5:
+				d_slime = INF
 		if d_slime <= aggro_range and d_slime < d_npc:
 			target_slime = sl
 			target_actor = null
 			ai_state = AIState.CHASE
+			if not pack_id.is_empty():
+				ecosystem.rally_pack(self, null, target_slime)
 		elif npc != null:
 			target_actor = npc
 			target_slime = null
 			ai_state = AIState.CHASE
+			if not pack_id.is_empty():
+				ecosystem.rally_pack(self, target_actor, null)
 
 
 func _perform_attack(ecosystem: Node) -> void:
@@ -592,11 +662,38 @@ func _follow_path(pos_xz: Vector2, spd: float, _nav: VillageNavGraph) -> Vector2
 	return d.normalized() * spd if d.length_squared() > 0.001 else Vector2.ZERO
 
 
+func _work_anim_key() -> String:
+	match work_anim_hint:
+		"Sit_Chair_Idle":
+			return "sit"
+		"Cheer":
+			return "cheer"
+		"PickUp":
+			return "pickup"
+		"Use_Item":
+			return "use_item"
+		_:
+			return "interact"
+
+
 func _pick_next_schedule_destination(_pos_xz: Vector2, ecosystem: Node, is_night: bool) -> void:
+	has_facing_hint = false
 	facing_hint_yaw = 0.0
 	if not patrol_points.is_empty():
 		patrol_cursor = (patrol_cursor + 1) % patrol_points.size()
 		_set_destination(patrol_points[patrol_cursor], ecosystem.nav_graph)
+		return
+
+	if territory_radius > 0.0:
+		var t_ang := _rng.randf_range(0.0, TAU)
+		var t_rad := _rng.randf_range(minf(3.0, territory_radius * 0.25), territory_radius)
+		var t_dest := territory_center + Vector2(cos(t_ang) * t_rad, sin(t_ang) * t_rad)
+		if has_room_bounds:
+			t_dest.x = clampf(t_dest.x, room_min_xz.x, room_max_xz.x)
+			t_dest.y = clampf(t_dest.y, room_min_xz.y, room_max_xz.y)
+		if float(ecosystem.sample_ground_y(t_dest.x, t_dest.y, false, subterranean_kind)) < 0.6:
+			t_dest = home_xz
+		_set_destination(t_dest, ecosystem.nav_graph)
 		return
 
 	if role == RoleKind.RAIDER:
@@ -611,13 +708,24 @@ func _pick_next_schedule_destination(_pos_xz: Vector2, ecosystem: Node, is_night
 		_set_destination(dest_xz, ecosystem.nav_graph)
 		return
 
-	if role == RoleKind.ANIMAL or role == RoleKind.BEAST:
+	if role == RoleKind.ANIMAL or role == RoleKind.BEAST or role == RoleKind.DOG:
 		var ang := _rng.randf_range(0.0, TAU)
-		var rad := _rng.randf_range(4.0, 16.0 if role == RoleKind.ANIMAL else 24.0)
+		var max_r := 10.5 if role == RoleKind.DOG else (16.0 if role == RoleKind.ANIMAL else 24.0)
+		var min_r := 2.5 if role == RoleKind.DOG else 4.0
+		var rad := _rng.randf_range(min_r, max_r)
 		var dest := home_xz + Vector2(cos(ang) * rad, sin(ang) * rad)
 		if float(ecosystem.sample_ground_y(dest.x, dest.y, false)) < 0.6:
 			dest = home_xz
 		_set_destination(dest, ecosystem.nav_graph)
+		return
+
+	# Merchants stay tethered to their assigned stall ~65% of the time; artisans return to stations ~35%
+	if has_initial_facing and ((role == RoleKind.MERCHANT and _rng.randf() < 0.65) or (role == RoleKind.ARTISAN and _rng.randf() < 0.35)):
+		facing_hint_yaw = initial_facing_yaw
+		has_facing_hint = true
+		var stall_anims := ["Interact", "Cheer", "Use_Item"]
+		work_anim_hint = stall_anims[_rng.randi_range(0, stall_anims.size() - 1)]
+		_set_destination(home_xz, ecosystem.nav_graph)
 		return
 
 	# Default villager wandering between plaza stalls & social spots
@@ -625,6 +733,7 @@ func _pick_next_schedule_destination(_pos_xz: Vector2, ecosystem: Node, is_night
 	if not social.is_empty():
 		var pick: Dictionary = social[_rng.randi_range(0, social.size() - 1)]
 		facing_hint_yaw = float(pick["yaw"])
+		has_facing_hint = true
 		work_anim_hint = String(pick["anim"])
 		_set_destination(pick["pos"] as Vector2, ecosystem.nav_graph)
 	else:

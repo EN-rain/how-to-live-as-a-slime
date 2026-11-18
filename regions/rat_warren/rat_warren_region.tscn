@@ -1,0 +1,8 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://regions/rat_warren/rat_warren_region.gd" id="1_reg"]
+[ext_resource type="Resource" path="res://regions/rat_warren/rat_warren_default_profile.tres" id="2_prof"]
+
+[node name="RatWarrenRegion" type="Node3D"]
+script = ExtResource("1_reg")
+profile = ExtResource("2_prof")

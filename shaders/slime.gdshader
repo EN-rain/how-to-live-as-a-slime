@@ -281,27 +281,61 @@ float smax0(float a, float k) {
 	return (a > k) ? a : (t * t) / (4.0 * k);
 }
 
+struct SolidPre {
+	float cy;
+	float sy;
+	float dirX;
+	float dirZ;
+	float ratioX;
+	float ratioZ;
+	float isRoof;
+};
+
+struct DeformPre {
+	float scaleYBase;
+	float groundFloor;
+	float syCrawl;
+	float invSqrtSy;
+	float splatYScale;
+	vec2 sdir;
+	vec2 sperp;
+	float pdist;
+	vec2 pdir;
+	vec2 moveDirXZ;
+	float drapeCy;
+	float drapeSy;
+	float waterHSpd;
+	float maxBellyR;
+};
+
+// Precomputes invariant per-solid rotation and proportional compression factors once per vertex.
+SolidPre buildSolidPre(vec3 c, vec3 h, float yaw, float groundFloorLocal, float maxBellyR) {
+	SolidPre sp;
+	sp.cy = cos(yaw);
+	sp.sy = sin(yaw);
+	vec3 H = h + vec3(0.05);
+	sp.isRoof = (c.y - h.y > groundFloorLocal + 0.35) ? 1.0 : 0.0;
+	vec2 cRot = vec2(c.x * sp.cy - c.z * sp.sy, c.x * sp.sy + c.z * sp.cy);
+	float clearX = max(abs(cRot.x) - H.x, 0.12);
+	float clearZ = max(abs(cRot.y) - H.z, 0.12);
+	sp.dirX = cRot.x >= 0.0 ? 1.0 : -1.0;
+	sp.dirZ = cRot.y >= 0.0 ? 1.0 : -1.0;
+	sp.ratioX = smax0(1.0 - clearX / maxBellyR, 0.04);
+	sp.ratioZ = smax0(1.0 - clearZ / maxBellyR, 0.04);
+	return sp;
+}
+
 // Conforms the slime surface around an obstacle using proportional half-space scaling.
 // Each obstacle scales only the half of the slime facing it (0 at center -> W at rim),
 // so left and right obstacles never cross or fold the center dome, and release is instant.
-vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 nOv) {
-	float cy = cos(yaw);
-	float sy = sin(yaw);
-
+vec3 solidDent(vec3 p, vec3 c, vec3 h, SolidPre sp, float maxBellyR) {
 	vec3 dv = p - c;
-	vec3 q = vec3(dv.x * cy - dv.z * sy, dv.y, dv.x * sy + dv.z * cy);
+	vec3 q = vec3(dv.x * sp.cy - dv.z * sp.sy, dv.y, dv.x * sp.sy + dv.z * sp.cy);
 	vec3 H = h + vec3(0.05);
 	if (q.y > H.y + 0.18 || q.y < -H.y - 0.18) return vec3(0.0);
 
-	// Slime center -> obstacle center in obstacle-rotatedXZ coordinates
-	vec2 cRot = vec2(c.x * cy - c.z * sy, c.x * sy + c.z * cy);
-	// Vertex position relative to slime center (0,0) in obstacle-rotated XZ coordinates
-	vec2 pRot = vec2(p.x * cy - p.z * sy, p.x * sy + p.z * cy);
-
-	float groundFloorLocal = -uRefRadius * (0.86 - uMelt * 0.22);
-
 	// Overhead roof / tunnel ceiling check
-	if (c.y - h.y > groundFloorLocal + 0.35) {
+	if (sp.isRoof > 0.5) {
 		float wxRoof = 1.0 - smoothstep(h.x - 0.02, h.x + 0.22, abs(q.x));
 		float wzRoof = 1.0 - smoothstep(h.z - 0.02, h.z + 0.22, abs(q.z));
 		float penY = smax0(q.y - (-H.y), 0.08);
@@ -311,35 +345,25 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 	float winY = 1.0 - smoothstep(H.y - 0.02, H.y + 0.16, q.y);
 	if (winY <= 0.001) return vec3(0.0);
 
-	float maxBellyR = uRefRadius * 1.24;
+	// Vertex position relative to slime center (0,0) in obstacle-rotated XZ coordinates
+	vec2 pRot = vec2(p.x * sp.cy - p.z * sp.sy, p.x * sp.sy + p.z * sp.cy);
 	float rVert = length(p.xz);
 	float rho = clamp(rVert / maxBellyR, 0.0, 1.0);
 
-	// Available clearance from slime center (0,0) to the obstacle's near X-wall and Z-wall
-	float clearX = max(abs(cRot.x) - H.x, 0.12);
-	float clearZ = max(abs(cRot.y) - H.z, 0.12);
-
-	// Sign pointing from slime center toward the obstacle (+1 or -1)
-	float dirToObsX = cRot.x >= 0.0 ? 1.0 : -1.0;
-	float dirToObsZ = cRot.y >= 0.0 ? 1.0 : -1.0;
-
 	// Only vertices on the obstacle's side of the slime center (proj > 0) are compressed toward clearX/clearZ
-	float projX = dirToObsX * pRot.x;
-	float projZ = dirToObsZ * pRot.y;
+	float projX = sp.dirX * pRot.x;
+	float projZ = sp.dirZ * pRot.y;
 	float halfMaskX = smoothstep(0.0, 0.14, projX);
 	float halfMaskZ = smoothstep(0.0, 0.14, projZ);
-
-	// Proportional compression ratio (0 when clear >= maxBellyR, up to 1 - clear/maxBellyR when touching)
-	float ratioX = smax0(1.0 - clearX / maxBellyR, 0.04);
-	float ratioZ = smax0(1.0 - clearZ / maxBellyR, 0.04);
 
 	float wz = 1.0 - smoothstep(h.z - 0.02, h.z + 0.26, abs(q.z));
 	float wx = 1.0 - smoothstep(h.x - 0.02, h.x + 0.26, abs(q.x));
 
 	// Push inward (towards slime center) proportionally to pRot so rings stay evenly ordered and never fold
-	vec2 pushX = vec2(-pRot.x * ratioX * halfMaskX * wz, 0.0);
-	vec2 pushZ = vec2(0.0, -pRot.y * ratioZ * halfMaskZ * wx);
+	vec2 pushX = vec2(-pRot.x * sp.ratioX * halfMaskX * wz, 0.0);
+	vec2 pushZ = vec2(0.0, -pRot.y * sp.ratioZ * halfMaskZ * wx);
 
+	vec2 cRot = vec2(c.x * sp.cy - c.z * sp.sy, c.x * sp.sy + c.z * sp.cy);
 	float ox = abs(cRot.x) - h.x;
 	float oz = abs(cRot.y) - h.z;
 	float inX = h.x - abs(q.x);
@@ -353,7 +377,7 @@ vec3 solidDent(vec3 p, vec3 c, float shape, vec3 h, float yaw, float blur, vec3 
 
 	float compressAmt = length(pushXZ);
 	float domeLift = smax0(compressAmt - 0.02, 0.08) * 0.12 * (1.0 - rho * 0.55) * smoothstep(-0.8, 0.4, p.y);
-	vec2 worldPushXZ = vec2(pushXZ.x * cy + pushXZ.y * sy, -pushXZ.x * sy + pushXZ.y * cy);
+	vec2 worldPushXZ = vec2(pushXZ.x * sp.cy + pushXZ.y * sp.sy, -pushXZ.x * sp.sy + pushXZ.y * sp.cy);
 	return vec3(worldPushXZ.x, domeLift, worldPushXZ.y);
 }
 
@@ -362,7 +386,7 @@ float smin_neck(float a, float b, float k) {
 	return mix(b, a, h) - k * h * (1.0 - h);
 }
 
-vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, float imp1Bounce, float imp2Osc, float crawlWave, vec2 moveDirXZ, float drapeCy, float drapeSy, float waterHSpd) {
+vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, float imp1Bounce, float imp2Osc, float crawlWave, DeformPre pre, SolidPre spList[8], int solidCount) {
 	vec3 p = pos;
 
 	float height01 = clamp((p.y / uRefRadius + 1.0) * 0.5, 0.0, 1.0);
@@ -371,9 +395,9 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 	float bellySpread = 1.0 + (lowerBulge * 0.34 + bellyCurve * 0.08) * (0.8 + uMelt * 1.1);
 	p.xz *= bellySpread;
 
-	p.y *= (0.86 - uMelt * 0.22);
+	p.y *= pre.scaleYBase;
 
-	float groundFloor = -uRefRadius * (0.86 - uMelt * 0.22);
+	float groundFloor = pre.groundFloor;
 
 	float baseH = p.y - groundFloor;
 	if (baseH < 0.9) {
@@ -385,20 +409,18 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 	// Organic fluid separation: teardrop bridge stretches toward the partner,
 	// tapering smoothly inward without flaring, while the facing cap forms a rounded dome.
 	if (uSplitAmt > 0.001 || uSplitNeckRadius > 0.001) {
-		vec2 sdir = normalize(uSplitDir.xz + vec2(0.0001));
-		vec2 sperp = vec2(-sdir.y, sdir.x);
-		float sproj = dot(p.xz, sdir);
-		float sperpd = dot(p.xz, sperp);
+		float sproj = dot(p.xz, pre.sdir);
+		float sperpd = dot(p.xz, pre.sperp);
 
 		// Forward stretch towards the separating partner (pulls out a gooey neck)
 		float forwardWeight = smoothstep(-0.25, 1.4, sproj);
 		float stretch = forwardWeight * uSplitAmt * 0.65;
-		p.xz += sdir * stretch;
+		p.xz += pre.sdir * stretch;
 
 		// Monotonic teardrop taper: smoothly constricts inward towards the neck tip (never flaring back out)
 		float taperMask = smoothstep(-0.15, 1.4, sproj);
 		float pinch = taperMask * uSplitAmt * 0.45;
-		p.xz -= sperp * (sperpd * pinch);
+		p.xz -= pre.sperp * (sperpd * pinch);
 
 		// Vertical thinning of the connecting neck
 		float vertThin = smoothstep(0.0, 1.3, sproj) * uSplitAmt * 0.30;
@@ -406,27 +428,22 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 
 		// Rear bulge to conserve visual volume while being pulled forward
 		float backWeight = 1.0 - smoothstep(-1.1, 0.1, sproj);
-		p.xz -= sdir * (backWeight * uSplitAmt * 0.18);
+		p.xz -= pre.sdir * (backWeight * uSplitAmt * 0.18);
 
 		// World-coupled neck: rounded dome cap meeting the partner at the seam plane
-		if (uSplitNeckRadius > 0.001) {
-			float pdistSq = dot(uSplitPartnerLocal.xz, uSplitPartnerLocal.xz);
-			if (pdistSq > 1e-5) {
-				float pdist = sqrt(pdistSq);
-				vec2 pdir = uSplitPartnerLocal.xz / pdist;
-				float proj = dot(p.xz, pdir);
-				float radial = length(p.xz - pdir * proj);
-				float faceW = smoothstep(0.30 * uRefRadius, 0.95 * uRefRadius, proj)
-					* smoothstep(0.0, 0.45 * uRefRadius, pdist);
-				float seam = pdist * 0.5;
-				float seamRadius = smin_neck(radial, uSplitNeckRadius, 0.08);
-				float normR = clamp(seamRadius / max(uSplitNeckRadius, 0.001), 0.0, 1.0);
-				float capDome = sqrt(max(0.0, 1.0 - normR * normR)) * 0.18 * uSplitNeckRadius;
-				vec2 radialDir = radial > 1e-4 ? (p.xz - pdir * proj) / radial : vec2(1.0, 0.0);
-				vec2 target = pdir * (seam - capDome) + radialDir * seamRadius;
-				p.xz = mix(p.xz, target, faceW * 0.85);
-				p.y = mix(p.y, groundFloor + (p.y - groundFloor) * 0.62, faceW * 0.55);
-			}
+		if (uSplitNeckRadius > 0.001 && pre.pdist > 0.0) {
+			float proj = dot(p.xz, pre.pdir);
+			float radial = length(p.xz - pre.pdir * proj);
+			float faceW = smoothstep(0.30 * uRefRadius, 0.95 * uRefRadius, proj)
+				* smoothstep(0.0, 0.45 * uRefRadius, pre.pdist);
+			float seam = pre.pdist * 0.5;
+			float seamRadius = smin_neck(radial, uSplitNeckRadius, 0.08);
+			float normR = clamp(seamRadius / max(uSplitNeckRadius, 0.001), 0.0, 1.0);
+			float capDome = sqrt(max(0.0, 1.0 - normR * normR)) * 0.18 * uSplitNeckRadius;
+			vec2 radialDir = radial > 1e-4 ? (p.xz - pre.pdir * proj) / radial : vec2(1.0, 0.0);
+			vec2 target = pre.pdir * (seam - capDome) + radialDir * seamRadius;
+			p.xz = mix(p.xz, target, faceW * 0.85);
+			p.y = mix(p.y, groundFloor + (p.y - groundFloor) * 0.62, faceW * 0.55);
 		}
 	}
 
@@ -438,9 +455,8 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 
 	if (abs(uSplat) > 0.001 || abs(uSpread) > 0.001) {
 		float hRel = max(p.y - groundFloor, 0.0);
-		float yScale = clamp(1.0 - uSplat * 0.42, 0.52, 1.42);
 		float xzScale = clamp(1.0 + (uSplat * 0.24 + uSpread * 0.16) * (1.0 - 0.35 * height01), 0.78, 1.45);
-		p.y = groundFloor + hRel * yScale;
+		p.y = groundFloor + hRel * pre.splatYScale;
 		p.xz *= xzScale;
 	}
 
@@ -486,23 +502,22 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 	}
 	p.y = max(p.y, groundFloor);
 
-	float sy = 1.0 + uMoveAmt * (0.10 * crawlWave - 0.04);
-	p.xz *= 1.0 / sqrt(sy);
-	p.y = groundFloor + (p.y - groundFloor) * sy;
+	p.xz *= pre.invSqrtSy;
+	p.y = groundFloor + (p.y - groundFloor) * pre.syCrawl;
 	// Lean is a shear that moves the apex sideways, which leaves the hull immediately;
 	// fade it out in liquid and bound it to the skin.
 	vec2 leanOff = uLean.xz * (height01 - 0.2) * 0.38 * (1.0 - uLiquid);
 	float leanLen = length(leanOff);
 	if (leanLen > uSkinLocal) leanOff *= uSkinLocal / leanLen;
 	p.xz -= leanOff;
-	float tw = sin(uCrawl - dot(pos.xz, moveDirXZ) * 2.8);
+	float tw = sin(uCrawl - dot(pos.xz, pre.moveDirXZ) * 2.8);
 	float twMask = smoothstep(0.1, 0.6, height01);
 	p.y += uMoveAmt * 0.07 * tw * twMask;
 	p.xz += norm.xz * uMoveAmt * 0.03 * tw * twMask;
 
 	if (uDrapeAmt > 0.001) {
 		vec3 dv = p - uDrapePos;
-		vec3 q = vec3(dv.x * drapeCy - dv.z * drapeSy, dv.y, dv.x * drapeSy + dv.z * drapeCy);
+		vec3 q = vec3(dv.x * pre.drapeCy - dv.z * pre.drapeSy, dv.y, dv.x * pre.drapeSy + dv.z * pre.drapeCy);
 		vec2 topReach = max(uDrapeHalf.xz * 1.18, vec2(0.2));
 		p.xz = mix(p.xz, normalize(p.xz + vec2(0.0001)) * length(topReach), uDrapeAmt * 0.65);
 		if (dv.y < 0.0) {
@@ -511,11 +526,10 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 	}
 
 	// Final authoritative obstacle conforming across up to 8 nearby objects.
-	int solidCount = min(uActiveSolidCount, 8);
 	for (int i = 0; i < solidCount; i++) {
 		float solidAmt = uSolidParam[i].y;
 		if (solidAmt > 0.001) {
-			vec3 dent = solidDent(p, uSolidPos[i], uSolidParam[i].x, uSolidHalf[i], uSolidParam[i].z, 0.22, uSolidDir[i]);
+			vec3 dent = solidDent(p, uSolidPos[i], uSolidHalf[i], spList[i], pre.maxBellyR);
 			p += dent * solidAmt;
 		}
 	}
@@ -527,7 +541,7 @@ vec3 deformSlime(vec3 pos, vec3 norm, float t, float breathe, float imp1Osc, flo
 		p.y += min(tuck, uSkinLocal * 0.55);
 		float d_lip = (h01 - 0.36) / 0.16;
 		float lip_band = exp(-(d_lip * d_lip));
-		float radial_wobble = min(lip_band * (0.022 + 0.014 * swim_rip * clamp(waterHSpd * 0.25, 0.2, 1.0)) * uWaterSubmersion, uSkinLocal * 0.45);
+		float radial_wobble = min(lip_band * (0.022 + 0.014 * swim_rip * clamp(pre.waterHSpd * 0.25, 0.2, 1.0)) * uWaterSubmersion, uSkinLocal * 0.45);
 		p.xz += normalize(p.xz + vec2(0.0001)) * radial_wobble;
 	}
 	p.y = max(p.y, groundFloor);
@@ -557,22 +571,39 @@ void vertex() {
 		imp2Decay = exp(-uImpulse2Time * 2.5);
 	}
 	float crawlWave = 0.5 + 0.5 * sin(uCrawl);
-	vec2 moveDirXZ = normalize(uMoveDir.xz + vec2(0.0001));
-	float drapeCy = 1.0;
-	float drapeSy = 0.0;
-	if (uDrapeAmt > 0.001) {
-		drapeCy = cos(uDrapeYaw);
-		drapeSy = sin(uDrapeYaw);
+
+	DeformPre pre;
+	pre.scaleYBase = 0.86 - uMelt * 0.22;
+	pre.groundFloor = -uRefRadius * pre.scaleYBase;
+	pre.syCrawl = 1.0 + uMoveAmt * (0.10 * crawlWave - 0.04);
+	pre.invSqrtSy = inversesqrt(pre.syCrawl);
+	pre.splatYScale = clamp(1.0 - uSplat * 0.42, 0.52, 1.42);
+	pre.sdir = normalize(uSplitDir.xz + vec2(0.0001));
+	pre.sperp = vec2(-pre.sdir.y, pre.sdir.x);
+	float pdistSq = (uSplitNeckRadius > 0.001) ? dot(uSplitPartnerLocal.xz, uSplitPartnerLocal.xz) : 0.0;
+	pre.pdist = pdistSq > 1e-5 ? sqrt(pdistSq) : 0.0;
+	pre.pdir = pre.pdist > 0.0 ? (uSplitPartnerLocal.xz / pre.pdist) : vec2(1.0, 0.0);
+	pre.moveDirXZ = normalize(uMoveDir.xz + vec2(0.0001));
+	pre.drapeCy = (uDrapeAmt > 0.001) ? cos(uDrapeYaw) : 1.0;
+	pre.drapeSy = (uDrapeAmt > 0.001) ? sin(uDrapeYaw) : 0.0;
+	pre.waterHSpd = (uWaterSubmersion > 0.01) ? length(uWaterVel.xz) : 0.0;
+	pre.maxBellyR = uRefRadius * 1.24;
+
+	int solidCount = min(uActiveSolidCount, 8);
+	SolidPre spList[8];
+	for (int i = 0; i < solidCount; i++) {
+		if (uSolidParam[i].y > 0.001) {
+			spList[i] = buildSolidPre(uSolidPos[i], uSolidHalf[i], uSolidParam[i].z, pre.groundFloor, pre.maxBellyR);
+		}
 	}
-	float waterHSpd = (uWaterSubmersion > 0.01) ? length(uWaterVel.xz) : 0.0;
 
 	vec3 tangent = normalize(cross(nrm, vec3(0.0, 1.0, 0.1)));
 	vec3 bitangent = normalize(cross(nrm, tangent));
 	float eps = 0.025;
 
-	vec3 p0 = deformSlime(position, nrm, TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
-	vec3 p1 = deformSlime(position + tangent * eps, normalize(position + tangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
-	vec3 p2 = deformSlime(position + bitangent * eps, normalize(position + bitangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, moveDirXZ, drapeCy, drapeSy, waterHSpd);
+	vec3 p0 = deformSlime(position, nrm, TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, pre, spList, solidCount);
+	vec3 p1 = deformSlime(position + tangent * eps, normalize(position + tangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, pre, spList, solidCount);
+	vec3 p2 = deformSlime(position + bitangent * eps, normalize(position + bitangent * eps), TIME, breathe, imp1Osc, imp1Bounce, imp2Osc, crawlWave, pre, spList, solidCount);
 
 	vec3 deformedNormal = normalize(cross(p1 - p0, p2 - p0) + nrm * 1e-4);
 

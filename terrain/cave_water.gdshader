@@ -7,6 +7,8 @@ uniform vec3 deep_color : source_color = vec3(0.02, 0.13, 0.24);
 uniform vec3 foam_color : source_color = vec3(0.84, 0.96, 1.0);
 uniform vec3 waterfall_impact_world = vec3(0.0);
 uniform float flow_speed : hint_range(0.0, 4.0, 0.05) = 0.75;
+uniform float caustic_strength : hint_range(0.0, 2.0, 0.05) = 1.0;
+uniform float swamp_turbidity : hint_range(0.0, 1.0, 0.02) = 0.0;
 
 uniform vec3 slime_pos = vec3(9999.0, -9999.0, 9999.0);
 uniform vec3 slime_vel = vec3(0.0);
@@ -267,7 +269,7 @@ void fragment() {
 
 		// 2. Crisp Dual-Octave Voronoi Filament Caustics (zero axis-aligned grid artifacts)
 		vec2 caust_uv = v_world_pos.xz * 0.42 + vec2(t * 0.12, -t * 0.09 - stream_drift * 0.5) + total_slope * 0.28;
-		float caust = caustic_web(caust_uv, TIME) * (1.0 - smoothstep(0.35, 0.98, depth_t) * 0.65) * mesh_feather;
+		float caust = caustic_web(caust_uv, TIME) * (1.0 - smoothstep(0.35, 0.98, depth_t) * 0.65) * mesh_feather * caustic_strength;
 
 		// 3. Organic Broken Lace Foam (plunge burst + warped shore lap)
 		float lace_lo = value_noise(v_world_pos.xz * 2.5 - vec2(t * 0.40, t * 0.34 + stream_drift));
@@ -302,22 +304,24 @@ void fragment() {
 		vec3 stream_base = mix(stream_shallow, shallow_color * 0.65, smoothstep(0.02, 0.14, water_depth));
 		vec3 base_water = mix(lake_base, stream_base, is_stream);
 		base_water *= (1.0 - slime_shadow) * (1.0 - ripple_trough * 0.16);
-		base_water += vec3(0.16, 0.48, 0.56) * (caust * 0.18) + vec3(0.28, 0.78, 0.90) * (ripple_crest * 0.48 + slime_meniscus * 0.18);
-		base_water = mix(base_water, vec3(0.32, 0.76, 0.88), fresnel * 0.34 * mesh_feather);
+		base_water += vec3(0.16, 0.48, 0.56) * (caust * 0.18) + mix(vec3(0.28, 0.78, 0.90), shallow_color * 1.4, swamp_turbidity) * (ripple_crest * mix(0.48, 0.16, swamp_turbidity) + slime_meniscus * 0.18);
+		vec3 fresnel_tint = mix(vec3(0.32, 0.76, 0.88), mix(shallow_color * 1.6, vec3(0.18, 0.27, 0.20), 0.65), swamp_turbidity);
+		base_water = mix(base_water, fresnel_tint, fresnel * mix(0.34, 0.22, swamp_turbidity) * mesh_feather);
 		vec3 water_col = mix(base_water, foam_color, total_foam);
 
 		float edge_fade_dist = mix(0.38, 0.048, is_stream);
 		float edge_fade = smoothstep(0.0, edge_fade_dist, water_depth) * mesh_feather;
 		float optical_depth = shallow_t * 0.52 + deep_t * 0.48;
 		float lake_alpha = mix(0.17, 0.48, optical_depth) + fresnel * 0.16 + ripple_crest * 0.16;
+		lake_alpha = mix(lake_alpha, mix(0.76, 0.92, optical_depth) + fresnel * 0.06, swamp_turbidity);
 		float stream_alpha = mix(0.24, 0.46, smoothstep(0.02, 0.12, water_depth)) + fresnel * 0.14 + ripple_crest * 0.14;
 		float base_alpha = mix(lake_alpha, stream_alpha, is_stream);
 
 		ALBEDO = water_col;
 		EMISSION = (
-			mix(vec3(0.011, 0.044, 0.064), vec3(0.004, 0.016, 0.034), deep_t) * (1.0 - 0.55 * is_stream) * (1.0 - slime_shadow * 0.7)
-			+ shallow_color * (caust * 0.16 + ripple_crest * 0.30 + slime_meniscus * 0.12 + fresnel * 0.17)
-			+ vec3(0.56, 0.90, 0.98) * (water_glint * 0.22)
+			mix(vec3(0.011, 0.044, 0.064), vec3(0.004, 0.016, 0.034), deep_t) * (1.0 - 0.55 * is_stream) * (1.0 - slime_shadow * 0.7) * (1.0 - swamp_turbidity * 0.88)
+			+ shallow_color * (caust * 0.16 + ripple_crest * mix(0.30, 0.08, swamp_turbidity) + slime_meniscus * 0.12 + fresnel * mix(0.17, 0.05, swamp_turbidity))
+			+ mix(vec3(0.56, 0.90, 0.98), foam_color, swamp_turbidity) * (water_glint * mix(0.22, 0.08, swamp_turbidity))
 			+ foam_color * (total_foam * 0.16)
 		) * mesh_feather;
 		float ripple_rough = clamp(wave_glen * 1.4, 0.0, 0.28);

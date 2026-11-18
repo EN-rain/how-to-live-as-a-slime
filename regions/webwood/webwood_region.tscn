@@ -1,0 +1,45 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://regions/webwood/webwood_region.gd" id="1_region"]
+[ext_resource type="Resource" path="res://regions/webwood/webwood_default_profile.tres" id="2_profile"]
+
+[node name="WebwoodRegion" type="Node3D"]
+script = ExtResource("1_region")
+profile = ExtResource("2_profile")
+
+[node name="TrailStartMarker" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 75, 0, -90)
+
+[node name="TrailBendMarker" type="Marker3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14, 0, -12)
+
+[node name="Snags" type="Node3D" parent="."]
+
+[node name="Snag0" type="Marker3D" parent="Snags"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 0, -6)
+
+[node name="Snag1" type="Marker3D" parent="Snags"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, -13)
+
+[node name="Snag2" type="Marker3D" parent="Snags"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 0, 2)
+
+[node name="Snag3" type="Marker3D" parent="Snags"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 13)
+
+[node name="Snag4" type="Marker3D" parent="Snags"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0, 9)
+
+[node name="Satellites" type="Node3D" parent="."]
+
+[node name="Sat0" type="Marker3D" parent="Satellites"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 48, 0, -75)
+
+[node name="Sat1" type="Marker3D" parent="Satellites"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -88, 0, -14)
+
+[node name="Sat2" type="Marker3D" parent="Satellites"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 0, 86)
+
+[node name="Sat3" type="Marker3D" parent="Satellites"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 82, 0, 34)

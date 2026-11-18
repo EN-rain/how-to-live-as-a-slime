@@ -10,9 +10,9 @@ extends Resource
 
 @export_group("Underground Lake")
 @export var lake_water_y: float = 6.40
-@export var lake_shallow_color: Color = Color(0.12, 0.66, 0.76, 1.0)
-@export var lake_deep_color: Color = Color(0.03, 0.16, 0.34, 1.0)
+@export var lake_shallow_color: Color = Color(0.10, 0.48, 0.55, 1.0)
+@export var lake_deep_color: Color = Color(0.02, 0.08, 0.18, 1.0)
 
 @export_group("Outflow Stream")
-@export_range(0.1, 5.0, 0.05) var stream_flow_speed: float = 1.35
+@export_range(0.1, 5.0, 0.05) var stream_flow_speed: float = 1.45
 

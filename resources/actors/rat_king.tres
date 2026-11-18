@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ActorArchetype" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://resources/actors/actor_archetype.gd" id="1_arch"]
+
+[resource]
+script = ExtResource("1_arch")
+archetype_name = "Plague Rat King"
+glb_path = "res://assets/mobs/Rat.glb"
+scale_factor = 0.68
+max_hp = 185.0
+attack_damage = 18.0
+walk_speed = 3.0
+run_speed = 6.6
+aggro_radius = 21.0
+territory_radius = 15.0
+leash_radius = 26.0
+hp_bar_height = 1.25
+body_radius = 0.62

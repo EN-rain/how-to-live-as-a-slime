@@ -1,0 +1,33 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://regions/waystones/waystones_region.gd" id="1_ws"]
+
+[node name="WaystonesRegion" type="Node3D"]
+script = ExtResource("1_ws")
+
+[node name="BasinSouthFork" type="Marker3D" parent="."]
+transform = Transform3D(0.751806, 0, 0.659385, 0, 1, 0, -0.659385, 0, 0.751806, -75, 0, 108)
+
+[node name="CentralTrailShrine" type="Marker3D" parent="."]
+transform = Transform3D(0.796084, 0, 0.605186, 0, 1, 0, -0.605186, 0, 0.796084, -112, 0, 144)
+
+[node name="RatTrailApproaching" type="Marker3D" parent="."]
+transform = Transform3D(0.836463, 0, 0.548024, 0, 1, 0, -0.548024, 0, 0.836463, -182, 0, 295)
+
+[node name="RatWarrenFork" type="Marker3D" parent="."]
+transform = Transform3D(0.939373, 0, -0.342898, 0, 1, 0, 0.342898, 0, 0.939373, -226, 0, 514)
+
+[node name="WebwoodEdgeCairn" type="Marker3D" parent="."]
+transform = Transform3D(0.777573, 0, 0.628793, 0, 1, 0, -0.628793, 0, 0.777573, -335, 0, 392)
+
+[node name="WesternMoorShrine" type="Marker3D" parent="."]
+transform = Transform3D(0.988771, 0, -0.149438, 0, 1, 0, 0.149438, 0, 0.988771, -525, 0, 310)
+
+[node name="CryptRoadLantern" type="Marker3D" parent="."]
+transform = Transform3D(0.980067, 0, 0.198669, 0, 1, 0, -0.198669, 0, 0.980067, -752, 0, 336)
+
+[node name="WolfTrailFord" type="Marker3D" parent="."]
+transform = Transform3D(0.682221, 0, -0.731146, 0, 1, 0, 0.731146, 0, 0.682221, 142, 0, -118)
+
+[node name="WolfCragThreshold" type="Marker3D" parent="."]
+transform = Transform3D(0.796084, 0, -0.605186, 0, 1, 0, 0.605186, 0, 0.796084, 252, 0, -214)

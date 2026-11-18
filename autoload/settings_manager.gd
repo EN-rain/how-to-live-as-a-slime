@@ -756,8 +756,12 @@ func _apply_to_active_scene() -> void:
 		_apply_terrain_visibility_ranges(terrain, preset)
 
 		if "grass_count" in terrain:
-			var target_grass := int(roundf(float(BASE_GRASS_COUNT) * grass_mult))
 			var current_grass := int(terrain.get("grass_count"))
+			var authored_base := int(terrain.get_meta("authored_grass_count", -1))
+			if authored_base < 0:
+				authored_base = current_grass
+				terrain.set_meta("authored_grass_count", authored_base)
+			var target_grass := int(roundf(float(authored_base) * grass_mult))
 
 			if is_scene_first_run:
 				# Prevent Startup Double-Rebuild Bug:
@@ -779,10 +783,14 @@ func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void
 
 	var apply_group_range := func(node: Node, range_val: float) -> void:
 		if node is GeometryInstance3D:
-			(node as GeometryInstance3D).visibility_range_end = range_val
+			var gi := node as GeometryInstance3D
+			var hd := float(gi.get_meta("half_diag", 0.0))
+			gi.visibility_range_end = (range_val + hd) if range_val > 0.0 else 0.0
 		for child in node.get_children():
 			if child is GeometryInstance3D:
-				(child as GeometryInstance3D).visibility_range_end = range_val
+				var gi := child as GeometryInstance3D
+				var hd := float(gi.get_meta("half_diag", 0.0))
+				gi.visibility_range_end = (range_val + hd) if range_val > 0.0 else 0.0
 
 	# Grass & Wispy grass (chunks are children named Chunk_*)
 	var grass_node := terrain.get_node_or_null("Grass")
@@ -810,15 +818,16 @@ func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void
 		for child in veg_node.get_children():
 			apply_group_range.call(child, vis_veg)
 
-	# Village
+	# Village: scale only spatial prop/lantern/tree cells carrying base_vis_range (never un-centered buildings)
 	var village_node := terrain.get_node_or_null("Village")
 	if village_node:
 		_apply_recursive_vis_range(village_node, vis_trees)
 
 
 func _apply_recursive_vis_range(node: Node, range_val: float) -> void:
-	if node is GeometryInstance3D:
-		(node as GeometryInstance3D).visibility_range_end = range_val
+	if node is GeometryInstance3D and node.has_meta("base_vis_range"):
+		var base_r := float(node.get_meta("base_vis_range"))
+		(node as GeometryInstance3D).visibility_range_end = minf(base_r, range_val + 38.0) if range_val > 0.0 else base_r
 	for child in node.get_children():
 		_apply_recursive_vis_range(child, range_val)
 

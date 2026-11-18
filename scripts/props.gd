@@ -27,6 +27,7 @@ const LAYER_OBSTACLES := 4
 @export var tuning: SlimeTuning
 @export var enable_test_structures := true
 @export var enable_food_cubes := true
+@export var test_fixture_scene: PackedScene = null
 
 @export_group("Simulation Tuning")
 ## Exponential decay rate for prop squeeze resistance when contact is lost.
@@ -79,6 +80,18 @@ var _nearby_scratch: Array[PropData] = []
 var _top_props: Array[PropData] = []
 var _top_dists: PackedFloat32Array = PackedFloat32Array()
 var _top_normals: PackedVector3Array = PackedVector3Array()
+var _relaxing_props: Array[PropData] = []
+var _cn_point := Vector3.ZERO
+var _cn_normal := Vector3.UP
+
+const SN_DISSOLVE := &"uDissolve"
+const SN_SPLAT := &"uSplat"
+const SN_SPREAD := &"uSpread"
+const SN_WALL := &"uWall"
+const SN_SPLAT_DIR := &"uSplatDir"
+const SN_BLOB_COUNT := &"uBlobCount"
+const SN_BLOB_POS := &"uBlobPos"
+const SN_BLOB_SCALE := &"uBlobScale"
 
 
 class PropData extends RefCounted:
@@ -120,6 +133,7 @@ class PropData extends RefCounted:
 	var no_passage_pair := false
 	var use_equiv_dim := false
 	var external_group := &""
+	var _is_relaxing := false
 
 	func _poly_area(r: float) -> float:
 		if sides >= 3 and sides < 12:
@@ -277,8 +291,11 @@ func step(dt: float) -> void:
 	# Press state that no body refreshed this tick (walked away, merged, freed)
 	# relaxes here, so a narrow per-slime query can never leave a prop permanently
 	# non-solid.
-	for p in props:
+	for i in range(_relaxing_props.size() - 1, -1, -1):
+		var p: PropData = _relaxing_props[i]
 		if p.state != STATE_IDLE or (p.pd <= 0.0 and p.engulf_front <= 0.0):
+			p._is_relaxing = false
+			_relaxing_props.remove_at(i)
 			continue
 		var presser: Slime = p.last_presser
 		if presser != null and is_instance_valid(presser) and presser.pressing_props.has(p):
@@ -291,6 +308,8 @@ func step(dt: float) -> void:
 			p.engulf_front = 0.0
 			p.last_presser = null
 			p.hold = 0.0
+			p._is_relaxing = false
+			_relaxing_props.remove_at(i)
 
 	_update_digesting_props(dt)
 	_update_floor_shadows()
@@ -1090,6 +1109,9 @@ func _process_edible_props(s: Slime, dt: float) -> void:
 				continue
 
 		p.last_presser = s
+		if not p._is_relaxing:
+			p._is_relaxing = true
+			_relaxing_props.append(p)
 		var thr := ro * (0.85 + 0.45 * size_ratio) + 0.1 * S
 		var press_depth := maxf(target, 0.12 - gap)
 		var acc := 140.0 * (press_depth - p.pd) - 8.0 * p.pv
@@ -1161,18 +1183,24 @@ func measure_passage_pair(s: Slime, a: PropData, b: PropData) -> Dictionary:
 func _measure_pair_geometry(a: PropData, b: PropData) -> Dictionary:
 	var ya := a.mesh.global_position.y
 	var yb := b.mesh.global_position.y
-	var ca := _closest_and_normal(a, Vector3(b.mesh.global_position.x, ya, b.mesh.global_position.z))
-	var cb := _closest_and_normal(b, Vector3(a.mesh.global_position.x, yb, a.mesh.global_position.z))
-	ca = _closest_and_normal(a, Vector3(cb.point.x, ya, cb.point.z))
-	cb = _closest_and_normal(b, Vector3(ca.point.x, yb, ca.point.z))
+	_compute_closest_and_normal(a, Vector3(b.mesh.global_position.x, ya, b.mesh.global_position.z))
+	var ca_pt := _cn_point
+	_compute_closest_and_normal(b, Vector3(a.mesh.global_position.x, yb, a.mesh.global_position.z))
+	var cb_pt := _cn_point
+	_compute_closest_and_normal(a, Vector3(cb_pt.x, ya, cb_pt.z))
+	ca_pt = _cn_point
+	var ca_n := _cn_normal
+	_compute_closest_and_normal(b, Vector3(ca_pt.x, yb, ca_pt.z))
+	cb_pt = _cn_point
+	var cb_n := _cn_normal
 
-	var gap_vec := Vector3(cb.point.x - ca.point.x, 0.0, cb.point.z - ca.point.z)
+	var gap_vec := Vector3(cb_pt.x - ca_pt.x, 0.0, cb_pt.z - ca_pt.z)
 	var w := gap_vec.length()
 	if w < 1e-3:
 		return {}
 	var gap_dir := gap_vec / w
-	var na := Vector3(ca.normal.x, 0.0, ca.normal.z)
-	var nb := Vector3(cb.normal.x, 0.0, cb.normal.z)
+	var na := Vector3(ca_n.x, 0.0, ca_n.z)
+	var nb := Vector3(cb_n.x, 0.0, cb_n.z)
 	if na.length() < 0.3 or nb.length() < 0.3:
 		return {}
 	na = na.normalized()
@@ -1180,7 +1208,7 @@ func _measure_pair_geometry(a: PropData, b: PropData) -> Dictionary:
 	if na.dot(gap_dir) < 0.9 or nb.dot(gap_dir) > -0.9:
 		return {}
 	var flow := Vector3(-gap_dir.z, 0.0, gap_dir.x)
-	var center := Vector3((ca.point.x + cb.point.x) * 0.5, 0.0, (ca.point.z + cb.point.z) * 0.5)
+	var center := Vector3((ca_pt.x + cb_pt.x) * 0.5, 0.0, (ca_pt.z + cb_pt.z) * 0.5)
 
 	var ea := _flow_extent(a, flow)
 	var eb := _flow_extent(b, flow)
@@ -1255,7 +1283,7 @@ func find_passage(s: Slime) -> Dictionary:
 	return result
 
 
-func _closest_and_normal(p: PropData, target: Vector3) -> Dictionary:
+func _compute_closest_and_normal(p: PropData, target: Vector3) -> void:
 	var m := p.mesh
 	var local := m.to_local(target)
 	var he := p.half
@@ -1295,7 +1323,13 @@ func _closest_and_normal(p: PropData, target: Vector3) -> Dictionary:
 			ln = Vector3(sin(face_ang), 0.0, cos(face_ang))
 		else:
 			ln = Vector3(ux, 0.0, uz)
-	return {"point": m.to_global(lp), "normal": (m.basis * ln).normalized()}
+	_cn_point = m.to_global(lp)
+	_cn_normal = (m.basis * ln).normalized()
+
+
+func _closest_and_normal(p: PropData, target: Vector3) -> Dictionary:
+	_compute_closest_and_normal(p, target)
+	return {"point": _cn_point, "normal": _cn_normal}
 
 
 func _flow_extent(p: PropData, flow: Vector3) -> float:
@@ -1408,10 +1442,10 @@ func _update_slime_splat(s: Slime, dt: float) -> void:
 	if s.spread_x == 0.0 and s.spread_v < 0.0:
 		s.spread_v = 0.0
 
-	s.set_shader_param("uSplat", s.splat_x * (1.0 - 0.7 * s.sharp_amt))
-	s.set_shader_param("uSpread", s.spread_x * (1.0 - 0.5 * s.sharp_amt))
-	s.set_shader_param("uWall", s.contact_r)
-	s.set_shader_param("uSplatDir", s.impact_dir)
+	s.set_shader_param(SN_SPLAT, s.splat_x * (1.0 - 0.7 * s.sharp_amt))
+	s.set_shader_param(SN_SPREAD, s.spread_x * (1.0 - 0.5 * s.sharp_amt))
+	s.set_shader_param(SN_WALL, s.contact_r)
+	s.set_shader_param(SN_SPLAT_DIR, s.impact_dir)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1436,7 +1470,7 @@ func _update_digesting_props(dt: float) -> void:
 			# they only travel into the belly and dissolve via uDissolve.
 			p.mesh.scale = p.base_scale
 			if p.material != null and is_instance_valid(p.material):
-				p.material.set_shader_parameter("uDissolve", 1.0 - dis)
+				p.material.set_shader_parameter(SN_DISSOLVE, 1.0 - dis)
 			p.mesh.rotation.y += dt * 0.4
 
 		var s: Slime = p.eater if p.eater != null and is_instance_valid(p.eater) else player_slime
@@ -1553,12 +1587,12 @@ func _update_solid_uniforms(s: Slime, use_visual_body := false) -> void:
 		var m := p.mesh.global_position
 		if m.y - he.y > top_y + 0.3 or m.y + he.y < foot_y - 0.1:
 			continue
-		var cn := _closest_and_normal(p, Vector3(sp.x, m.y, sp.z))
-		var pt: Vector3 = cn["point"]
+		_compute_closest_and_normal(p, Vector3(sp.x, m.y, sp.z))
+		var pt := _cn_point
 		var surf_dist := Vector2(pt.x - sp.x, pt.z - sp.z).length()
 		if surf_dist > vis_r + 0.12:
 			continue
-		var n_out: Vector3 = cn["normal"]
+		var n_out := _cn_normal
 		if count < 8 or surf_dist < _top_dists[7]:
 			var ins := mini(count, 7)
 			while ins > 0 and surf_dist < _top_dists[ins - 1]:
@@ -1653,9 +1687,9 @@ func _update_floor_shadows() -> void:
 			_blob_pos_buf[i] = Vector3.ZERO
 			_blob_scale_buf[i] = 0.0
 
-	_set_floor_param("uBlobCount", candidates.size())
-	_set_floor_param("uBlobPos", _blob_pos_buf)
-	_set_floor_param("uBlobScale", _blob_scale_buf)
+	_set_floor_param(SN_BLOB_COUNT, candidates.size())
+	_set_floor_param(SN_BLOB_POS, _blob_pos_buf)
+	_set_floor_param(SN_BLOB_SCALE, _blob_scale_buf)
 
 
 func _set_floor_param(param: StringName, value: Variant) -> void:

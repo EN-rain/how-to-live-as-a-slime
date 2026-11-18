@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Rat Warren Before/After</title>
+<style>
+body{background:#111;color:#ddd;font:14px monospace;margin:20px}
+table{border-collapse:collapse}
+td,th{padding:6px 10px;border:1px solid #333;text-align:center}
+img{max-width:520px;image-rendering:auto}
+h3{margin:18px 0 6px;color:#8cf}
+</style></head><body>
+<h2>Rat Warren — BEFORE (left) vs AFTER (right)</h2>
+<div id="g"></div>
+<script>
+const shots=["01_surface_forecourt","02_burrow_mouth","03_descent_tunnel","04_hub_overview","05_hub_eye","06_hub_rear","07_west_cistern","08_east_burrow","09_north_canyon","10_sanctum_approach","11_sanctum_rear","12_aerial_top","13_west_crystals","14_east_crystals","15_sanctum_crystals","16_hub_crystals"];
+const g=document.getElementById('g');
+for(const s of shots){
+  const h=document.createElement('h3');h.textContent=s;g.appendChild(h);
+  const t=document.createElement('table');t.innerHTML=
+    '<tr><th>BEFORE</th><th>AFTER</th></tr>'+
+    '<tr><td><img src="rat_warren_before_'+s+'.png"></td>'+
+        '<td><img src="rat_warren_after_'+s+'.png"></td></tr>';
+  g.appendChild(t);
+}
+</script></body></html>

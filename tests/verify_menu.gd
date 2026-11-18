@@ -44,11 +44,9 @@ func _process(_delta: float) -> bool:
 		print("CHECK 4 - Key Rebind split_follow -> %s (displaced='%s'): OK" % [new_lbl, displaced])
 		sm.reset_keybindings()
 
-		# Exercise Atmosphere & Core X-Ray & Poke
+		# Exercise Atmosphere toggle
 		_menu._toggle_atmosphere()
-		_menu._toggle_core_xray()
-		_menu._poke_all_slimes()
-		print("CHECK 5 - 2D Mascot poke count=%d, NightTarget=%.1f: OK" % [_menu._mascot.poke_count, _menu._night_target])
+		print("CHECK 5 - Atmosphere toggle, NightTarget=%.1f: OK" % [_menu._night_target])
 
 		# Reset night mode back to default false in settings
 		sm.set_value("gameplay", "night_mode", false)

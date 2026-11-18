@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ActorArchetype" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://resources/actors/actor_archetype.gd" id="1_arch"]
+
+[resource]
+script = ExtResource("1_arch")
+archetype_name = "Woodland Wildlife"
+glb_path = "res://assets/animals/Deer.glb"
+scale_factor = 0.62
+max_hp = 65.0
+attack_damage = 6.0
+walk_speed = 2.4
+run_speed = 6.2
+aggro_radius = 14.0
+territory_radius = 36.0
+leash_radius = 72.0
+hp_bar_height = 1.40
+body_radius = 0.60

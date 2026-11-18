@@ -58,7 +58,7 @@
 | **Orbit Camera & Occlusion** | [`scripts/orbit_camera.gd`](file:///d:/slime/scripts/orbit_camera.gd) | `_update_camera()`, `theta`, `phi`, `radius`, occlusion raycast |
 | **Settings, Presets, Keybinds, Sound** | [`autoload/settings_manager.gd`](file:///d:/slime/autoload/settings_manager.gd) | `set_quality_preset()`, `set_action_primary_key()`, procedural WAV bank |
 | **HUD & Debug Overlay** | [`scripts/hud.gd`](file:///d:/slime/scripts/hud.gd) | `_update_debug_overlay()`, `_draw_debug_3d()`, F3 toggle, wireframe mesh |
-| **2D Main Menu & Interactive Mascot** | [`main_menu/main_menu.gd`](file:///d:/slime/main_menu/main_menu.gd)<br>[`main_menu/jelly_mascot_2d.gd`](file:///d:/slime/main_menu/jelly_mascot_2d.gd) | Threaded scene loading, spring-damper mascot physics, `CoreRuleDiagram2D` |
+| **2D Main Menu** | [`main_menu/main_menu.gd`](file:///d:/slime/main_menu/main_menu.gd)<br>[`main_menu/core_rule_diagram_2d.gd`](file:///d:/slime/main_menu/core_rule_diagram_2d.gd) | Threaded scene loading, `CoreRuleDiagram2D` |
 
 ---
 
