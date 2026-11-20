@@ -51,6 +51,7 @@ var _prop_root: Node3D
 var _floor_mat: ShaderMaterial
 var _floor_body: StaticBody3D
 var _body_to_prop := {}
+var _collider_shape_cache := {}
 ## Props currently being digested by a slime (typically 0-2). Uniform updates and
 ## the digestion pass only visit these instead of scanning the whole ecosystem.
 var active_eating_props: Array[PropData] = []
@@ -68,6 +69,11 @@ var _slime_pool: Array[Slime] = []
 # copied into the shader; the win is that nothing is resized or allocated per tick.
 var _eat_pos_buf := PackedVector3Array()
 var _eat_param_buf := PackedVector3Array()
+var _village_edibles: Array[Dictionary] = []
+var _village_edibles_built := false
+var _village_colliders_body: StaticBody3D = null
+var _transient_eaten_nodes: Array[Dictionary] = []
+var _cached_terrain: Node = null
 var _box_half_buf := PackedVector3Array()
 var _solid_pos_buf := PackedVector3Array()
 var _solid_param_buf := PackedVector3Array()
@@ -277,6 +283,7 @@ func step(dt: float) -> void:
 		if not s.is_merging:
 			_register_motor_contacts(s, dt)
 			_process_edible_props(s, dt)
+			_process_world_eating(s, dt)
 		_update_inside_props(s, dt)
 		_update_slime_splat(s, dt)
 
@@ -287,6 +294,8 @@ func step(dt: float) -> void:
 			continue
 		_update_eat_uniforms(s, dt)
 		_update_solid_uniforms(s)
+
+	_update_transient_eaten(dt)
 
 	# Press state that no body refreshed this tick (walked away, merged, freed)
 	# relaxes here, so a narrow per-slime query can never leave a prop permanently
@@ -528,11 +537,15 @@ func _add_floor_collider() -> void:
 
 
 func _make_collider_shape(p: PropData) -> Shape3D:
+	var key := "%d|%.3f,%.3f,%.3f|%.3f|%.3f|%d" % [p.shape, p.half.x, p.half.y, p.half.z, p.base_r, p.radius, p.sides]
+	if _collider_shape_cache.has(key):
+		return _collider_shape_cache[key] as Shape3D
+	var built: Shape3D = null
 	match p.shape:
 		SHAPE_BOX:
 			var box := BoxShape3D.new()
 			box.size = p.half * 2.0
-			return box
+			built = box
 		SHAPE_PRISM:
 			if p.sides >= 3 and p.sides < 12:
 				var pts := PackedVector3Array()
@@ -542,11 +555,12 @@ func _make_collider_shape(p: PropData) -> Shape3D:
 					pts.append(Vector3(sin(a) * p.base_r, p.half.y, cos(a) * p.base_r))
 				var convex := ConvexPolygonShape3D.new()
 				convex.set_points(pts)
-				return convex
-			var cyl := CylinderShape3D.new()
-			cyl.radius = p.base_r
-			cyl.height = p.half.y * 2.0
-			return cyl
+				built = convex
+			else:
+				var cyl := CylinderShape3D.new()
+				cyl.radius = p.base_r
+				cyl.height = p.half.y * 2.0
+				built = cyl
 		SHAPE_CONE:
 			var n := maxi(p.sides, 12)
 			var pts := PackedVector3Array()
@@ -556,10 +570,13 @@ func _make_collider_shape(p: PropData) -> Shape3D:
 			pts.append(Vector3(0.0, p.half.y, 0.0))
 			var convex := ConvexPolygonShape3D.new()
 			convex.set_points(pts)
-			return convex
-	var sphere := SphereShape3D.new()
-	sphere.radius = p.radius
-	return sphere
+			built = convex
+	if built == null:
+		var sphere := SphereShape3D.new()
+		sphere.radius = p.radius
+		built = sphere
+	_collider_shape_cache[key] = built
+	return built
 
 
 func _attach_collider(p: PropData) -> void:
@@ -573,6 +590,7 @@ func _attach_collider(p: PropData) -> void:
 	body.add_child(cs)
 	p.body = body
 	p.collider = cs
+	body.set_meta(&"occluder_visual", p.mesh)
 	_body_to_prop[body] = p
 
 
@@ -1021,6 +1039,193 @@ func is_edible_by_push(s: Slime, p: PropData) -> bool:
 func devour(p: PropData, s: Slime) -> void:
 	if p.state == STATE_IDLE:
 		_begin_eating(p, s)
+
+
+func record_external_eat(count: int = 1) -> void:
+	eaten += count
+	eaten_changed.emit(eaten)
+
+
+func spawn_transient_eat_visual(mesh: Mesh, world_xf: Transform3D, eater: Slime) -> void:
+	if mesh == null or eater == null or not is_instance_valid(eater):
+		return
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_ensure_prop_root().add_child(mi)
+	mi.global_transform = world_xf
+	_transient_eaten_nodes.append({
+		"node": mi,
+		"eater": eater,
+		"start_pos": world_xf.origin,
+		"start_scale": world_xf.basis.get_scale(),
+		"t": 0.0,
+		"dur": 0.42,
+	})
+
+
+func _ensure_village_edibles() -> void:
+	if _village_edibles_built:
+		return
+	_village_edibles_built = true
+	if _cached_terrain == null or not is_instance_valid(_cached_terrain):
+		_cached_terrain = get_parent().get_node_or_null("TerrainScene") if get_parent() != null else null
+	if _cached_terrain == null:
+		return
+	var v_root := _cached_terrain.get_node_or_null("Village")
+	if v_root == null:
+		return
+	_village_colliders_body = v_root.get_node_or_null("VillageColliders") as StaticBody3D
+	var skip_names := {
+		"VillageColliders": true,
+		"CobblestoneNetwork": true,
+		"PierPathway": true,
+		"CottageCobbleSpur": true,
+		"HarborWater": true,
+		"CanalWater": true,
+	}
+	var stack: Array[Node] = []
+	for ch in v_root.get_children():
+		if not skip_names.has(ch.name):
+			stack.append(ch)
+	while not stack.is_empty():
+		var cur: Node = stack.pop_back() as Node
+		if cur == null or not is_instance_valid(cur) or skip_names.has(cur.name):
+			continue
+		# Houses, market stalls, wells, lamps, trees, and prop groups are direct edible units
+		if cur is Node3D and (cur.name.begins_with("House_") or cur.name.begins_with("Cottage") or cur.name.begins_with("Tavern") or cur.name.begins_with("Chapel") or cur.name.begins_with("Town_") or cur.name.begins_with("Market") or cur.name.begins_with("Well") or cur.name.begins_with("Prop") or cur is MeshInstance3D):
+			var n3 := cur as Node3D
+			var aabb := _compute_subtree_world_aabb(n3)
+			if aabb.size.length_squared() > 0.01 and aabb.size.y < 28.0 and maxf(aabb.size.x, aabb.size.z) < 28.0:
+				var half := aabb.size * 0.5
+				var vol := maxf(0.4, half.x * half.y * half.z * 2.4)
+				_village_edibles.append({
+					"node": n3,
+					"pos": aabb.get_center(),
+					"half": half,
+					"vol": vol,
+					"eaten": false,
+				})
+				continue
+		for sub in cur.get_children():
+			stack.append(sub)
+
+
+func _compute_subtree_world_aabb(root: Node3D) -> AABB:
+	var box := AABB()
+	var first := true
+	var q: Array[Node] = [root]
+	while not q.is_empty():
+		var n: Node = q.pop_back() as Node
+		if n is MeshInstance3D and n.is_inside_tree():
+			var mi := n as MeshInstance3D
+			if mi.mesh != null:
+				var lb := mi.mesh.get_aabb()
+				var xf := mi.global_transform
+				var corners := [
+					xf * lb.position,
+					xf * (lb.position + Vector3(lb.size.x, 0, 0)),
+					xf * (lb.position + Vector3(0, lb.size.y, 0)),
+					xf * (lb.position + Vector3(0, 0, lb.size.z)),
+					xf * (lb.position + Vector3(lb.size.x, lb.size.y, 0)),
+					xf * (lb.position + Vector3(lb.size.x, 0, lb.size.z)),
+					xf * (lb.position + Vector3(0, lb.size.y, lb.size.z)),
+					xf * (lb.position + lb.size),
+				]
+				for c in corners:
+					if first:
+						box = AABB(c, Vector3.ZERO)
+						first = false
+					else:
+						box = box.expand(c)
+		for ch in n.get_children():
+			q.append(ch)
+	return box
+
+
+func _disable_village_colliders_in_box(box_center: Vector3, box_half: Vector3) -> void:
+	if _village_colliders_body == null or not is_instance_valid(_village_colliders_body):
+		return
+	var exp_half := box_half + Vector3(0.6, 0.8, 0.6)
+	for ch in _village_colliders_body.get_children():
+		if ch is CollisionShape3D:
+			var cs := ch as CollisionShape3D
+			if cs.disabled:
+				continue
+			var d := (cs.global_position - box_center).abs()
+			if d.x <= exp_half.x and d.y <= exp_half.y and d.z <= exp_half.z:
+				cs.disabled = true
+
+
+func _process_world_eating(s: Slime, _dt: float) -> void:
+	if s.slime_scale < 1.15:
+		return
+	if _cached_terrain == null or not is_instance_valid(_cached_terrain):
+		_cached_terrain = get_parent().get_node_or_null("TerrainScene") if get_parent() != null else null
+	if _cached_terrain != null and s.slime_scale >= 1.65 and _cached_terrain.has_method("try_eat_nearby_trees"):
+		_cached_terrain.call("try_eat_nearby_trees", s, self)
+
+	var sp := s.global_position
+	# Check Village props & buildings when near Slimebrook Village (590, 2120)
+	if Vector2(sp.x - 590.0, sp.z - 2120.0).length() > 175.0:
+		return
+	_ensure_village_edibles()
+	var S := maxf(s.model.scale, 1e-4)
+	var vis_r := s.model.rest_max_radius * S * s.model.spread
+	var sl_vol := s.get_volume()
+	var sl_h := s.model.rest_full_height * S
+	for ve in _village_edibles:
+		if bool(ve["eaten"]):
+			continue
+		var n3 := ve["node"] as Node3D
+		if n3 == null or not is_instance_valid(n3):
+			ve["eaten"] = true
+			continue
+		var pos: Vector3 = ve["pos"]
+		var half: Vector3 = ve["half"]
+		var reach := vis_r + maxf(half.x, half.z) * 0.85 + 0.6
+		if Vector2(pos.x - sp.x, pos.z - sp.z).length() > reach:
+			continue
+		var vol: float = float(ve["vol"])
+		var max_dim := 2.0 * maxf(half.x, maxf(half.y, half.z))
+		var dim_ratio := max_dim / maxf(sl_h, 1e-4)
+		var vol_ratio := vol / maxf(1e-4, sl_vol)
+		if maxf(vol_ratio, pow(dim_ratio, 1.35)) > 0.85:
+			continue
+		ve["eaten"] = true
+		_disable_village_colliders_in_box(pos, half)
+		for ch in n3.find_children("*", "CollisionShape3D", true, false):
+			(ch as CollisionShape3D).disabled = true
+		_transient_eaten_nodes.append({
+			"node": n3,
+			"eater": s,
+			"start_pos": n3.global_position,
+			"start_scale": n3.scale,
+			"t": 0.0,
+			"dur": 0.45,
+		})
+		s.add_volume(vol)
+		record_external_eat(1)
+
+
+func _update_transient_eaten(dt: float) -> void:
+	for i in range(_transient_eaten_nodes.size() - 1, -1, -1):
+		var item: Dictionary = _transient_eaten_nodes[i]
+		var n3 := item["node"] as Node3D
+		var eater := item["eater"] as Slime
+		if n3 == null or not is_instance_valid(n3):
+			_transient_eaten_nodes.remove_at(i)
+			continue
+		var t: float = float(item["t"]) + dt
+		var dur: float = float(item["dur"])
+		item["t"] = t
+		var frac := clampf(t / maxf(dur, 0.01), 0.0, 1.0)
+		var target_pos := eater.global_position + Vector3(0.0, 0.45 * eater.slime_scale, 0.0) if (eater != null and is_instance_valid(eater)) else (item["start_pos"] as Vector3)
+		n3.global_position = (item["start_pos"] as Vector3).lerp(target_pos, frac * frac)
+		n3.scale = (item["start_scale"] as Vector3) * maxf(0.02, 1.0 - frac)
+		if frac >= 1.0:
+			n3.queue_free()
+			_transient_eaten_nodes.remove_at(i)
 
 
 func _begin_eating(p: PropData, s: Slime) -> void:

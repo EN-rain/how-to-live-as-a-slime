@@ -74,6 +74,8 @@ func _run() -> void:
 	if not _check(terrain != null and eco != null and slime != null and sun != null, "Missing core nodes"):
 		return
 	var skel_dungeon := terrain.get_node_or_null("SkeletonDungeonCave")
+	if skel_dungeon == null:
+		skel_dungeon = terrain.get_node_or_null("SkeletonCryptRegion/SkeletonDungeonCave")
 	var territories := terrain.get_node_or_null("BeastTerritories")
 	if not _check(skel_dungeon != null, "SkeletonDungeonCave node missing"):
 		return

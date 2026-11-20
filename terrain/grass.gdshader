@@ -21,12 +21,6 @@ uniform sampler2D grass_map : hint_default_white, filter_linear;
 uniform vec4 grass_map_bounds = vec4(-1200.0, -900.0, 2600.0, 3800.0);
 uniform vec2 u_webwood_center = vec2(-410.0, 480.0);
 
-group_uniforms SlimeInteraction;
-uniform vec3 slime_pos = vec3(0.0, 999.0, 0.0);
-uniform float slime_radius : hint_range(0.5, 24.0, 0.1) = 2.45;
-uniform float slime_height : hint_range(0.5, 24.0, 0.1) = 2.8;
-uniform vec3 slime_vel = vec3(0.0, 0.0, 0.0);
-
 varying vec3 v_ground_root;
 varying float v_blade_height;
 varying float v_grass_map_h;
@@ -70,8 +64,8 @@ void vertex() {
 	v_ground_root = mix(v_ground_root, webwood_moss, webwood_w * 0.94);
 	v_webwood_w = webwood_w;
 
-	// Lush humid swamp sedge & mossy reeds around Sunken Swamp Ruins (-235, 462)
-	float d_ruins = length(xz - vec2(-235.0, 462.0));
+	// Lush humid swamp sedge & mossy reeds around Sunken Swamp Ruins (460, 387)
+	float d_ruins = length(xz - vec2(460.0, 387.0));
 	float ruins_w = 1.0 - smoothstep(55.0, 152.0, d_ruins + (macro_pat - 0.5) * 18.0);
 	vec3 ruins_moss = mix(vec3(0.014, 0.040, 0.015), vec3(0.038, 0.062, 0.020), smoothstep(0.25, 0.78, canopy_blend));
 	v_ground_root = mix(v_ground_root, ruins_moss, ruins_w * 0.84);
@@ -101,31 +95,6 @@ void vertex() {
 	VERTEX.x += breeze;
 	VERTEX.z += breeze * 0.65;
 
-	// Dynamic Slime Body Push: full outer jelly dome parts & flattens grass in true world space
-	vec3 to_slime = world_pos - slime_pos;
-	float dist_slime_xz = length(to_slime.xz);
-	float vert_gap = abs(to_slime.y);
-	float y_clearance = max(2.2, slime_height * 0.75 + slime_radius * 0.35);
-	if (dist_slime_xz < slime_radius && vert_gap < y_clearance) {
-		float radial = 1.0 - smoothstep(slime_radius * 0.15, slime_radius, dist_slime_xz);
-		float height_fade = 1.0 - smoothstep(y_clearance * 0.45, y_clearance, vert_gap);
-		float bend = radial * height_fade * (0.28 + 0.72 * h);
-		vec2 push_dir = (dist_slime_xz > 0.02) ? (to_slime.xz / dist_slime_xz) : vec2(0.707, 0.707);
-		vec2 vel_xz = slime_vel.xz;
-		float vel_spd = length(vel_xz);
-		if (vel_spd > 0.25) {
-			vec2 vel_dir = vel_xz / vel_spd;
-			float wake_mix = clamp(vel_spd / 10.0, 0.0, 0.42) * radial;
-			push_dir = normalize(mix(push_dir, vel_dir, wake_mix));
-		}
-		// Convert world-space push/flatten displacement back into randomly-rotated tuft local space
-		vec3 world_disp = vec3(
-			push_dir.x * bend * 1.45,
-			-bend * (0.58 * h + 0.18),
-			push_dir.y * bend * 1.45
-		);
-		VERTEX += (inverse(mat3(MODEL_MATRIX)) * world_disp);
-	}
 
 	// Normal aligns predominantly skyward with subtle lateral curve for soft Ghibli lighting
 	NORMAL = normalize(vec3(0.0, 0.95, 0.0) + vec3(sin(VERTEX.x * 3.0), 0.0, cos(VERTEX.z * 3.0)) * 0.12);

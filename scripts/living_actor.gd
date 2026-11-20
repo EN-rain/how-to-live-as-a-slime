@@ -87,6 +87,11 @@ var target_actor: LivingActor = null
 var target_slime: Slime = null
 
 var _anim: AnimationPlayer = null
+var _model_root: Node3D = null
+var _model_base_y: float = 0.0
+var proc_gait: String = ""
+var _proc_phase: float = 0.0
+var is_small_critter: bool = false
 var _notifier: VisibleOnScreenNotifier3D = null
 var _meshes: Array[MeshInstance3D] = []
 var _muzzle_node: Node3D = null
@@ -109,6 +114,7 @@ var _respawn_timer: float = 0.0
 var _anim_accum_dt: float = 0.0
 var _ai_accum_dt: float = 0.0
 var _slam_grace: float = 0.0
+var _target_scan_cd: float = 0.0
 var _last_ground_xz := Vector2(1e9, 1e9)
 var _cached_ground_y: float = 0.0
 var _rng := RandomNumberGenerator.new()
@@ -116,7 +122,11 @@ var _rng := RandomNumberGenerator.new()
 
 func setup_visuals(model_root: Node3D, anim_player: AnimationPlayer, meshes: Array[MeshInstance3D], muzzle: Node3D) -> void:
 	_rng.seed = actor_idx * 9173 + 131
+	_target_scan_cd = _rng.randf_range(0.0, 0.36)
+	_proc_phase = _rng.randf_range(0.0, TAU)
 	add_child(model_root)
+	_model_root = model_root
+	_model_base_y = model_root.position.y
 	_anim = anim_player
 	_meshes = meshes
 	_muzzle_node = muzzle
@@ -139,6 +149,8 @@ func install_visuals(model_root: Node3D, anim_player: AnimationPlayer, meshes: A
 		if ch != _notifier and not (ch is CollisionShape3D):
 			ch.queue_free()
 	add_child(model_root)
+	_model_root = model_root
+	_model_base_y = model_root.position.y
 	_anim = anim_player
 	_meshes = meshes
 	_muzzle_node = muzzle
@@ -166,24 +178,24 @@ func _build_anim_map() -> void:
 					return String(a)
 		return fallback
 
-	var idle_c: String = str(find_clip.call(["Idle", "AnimalArmature|Idle", "SpiderArmature|Spider_Idle", "RatArmature|Rat_Idle", "WaspArmature|Wasp_Flying"], String(avail[0]) if avail.size() > 0 else ""))
+	var idle_c: String = str(find_clip.call(["Idle", "CharacterArmature|Idle", "AnimalArmature|Idle", "SpiderArmature|Spider_Idle", "RatArmature|Rat_Idle", "WaspArmature|Wasp_Flying"], String(avail[0]) if avail.size() > 0 else ""))
 	_anim_map["idle"] = idle_c
-	_anim_map["walk"] = find_clip.call(["Walking_D_Skeletons" if faction == Faction.HOSTILE else "Walking_A", "Walking_A", "AnimalArmature|Walk", "SpiderArmature|Spider_Walk", "RatArmature|Rat_Walk", "WaspArmature|Wasp_Flying"], idle_c)
-	_anim_map["run"] = find_clip.call(["Running_A", "AnimalArmature|Gallop", "RatArmature|Rat_Run", "SpiderArmature|Spider_Walk", "WaspArmature|Wasp_Flying"], _anim_map["walk"])
-	_anim_map["attack"] = find_clip.call(["1H_Melee_Attack_Chop", "AnimalArmature|Attack", "AnimalArmature|Attack_Headbutt", "SpiderArmature|Spider_Attack", "RatArmature|Rat_Attack", "WaspArmature|Wasp_Attack"], idle_c)
+	_anim_map["walk"] = find_clip.call(["Walking_D_Skeletons" if faction == Faction.HOSTILE else "Walking_A", "Walking_A", "CharacterArmature|Walk", "AnimalArmature|Walk", "SpiderArmature|Spider_Walk", "RatArmature|Rat_Walk", "WaspArmature|Wasp_Flying", "Walk"], idle_c)
+	_anim_map["run"] = find_clip.call(["Running_A", "CharacterArmature|Run", "CharacterArmature|Jump", "AnimalArmature|Gallop", "RatArmature|Rat_Run", "SpiderArmature|Spider_Walk", "WaspArmature|Wasp_Flying", "Run", "Jump"], _anim_map["walk"])
+	_anim_map["attack"] = find_clip.call(["1H_Melee_Attack_Chop", "CharacterArmature|Bite_Front", "AnimalArmature|Attack", "AnimalArmature|Attack_Headbutt", "SpiderArmature|Spider_Attack", "RatArmature|Rat_Attack", "WaspArmature|Wasp_Attack"], idle_c)
 	_anim_map["ranged"] = find_clip.call(["1H_Ranged_Shoot", "Spellcast_Shoot", "1H_Melee_Attack_Chop"], _anim_map["attack"])
 	_anim_map["spell"] = find_clip.call(["Spellcast_Shoot", "1H_Ranged_Shoot"], _anim_map["attack"])
 	_anim_map["block"] = find_clip.call(["Block", "Idle_Combat", "Idle"], idle_c)
-	_anim_map["hit"] = find_clip.call(["Hit_A", "AnimalArmature|Idle_HitReact_Left"], idle_c)
-	_anim_map["death"] = find_clip.call(["Death_A", "AnimalArmature|Death", "SpiderArmature|Spider_Death", "RatArmature|Rat_Death", "WaspArmature|Wasp_Death"], idle_c)
-	_anim_map["interact"] = find_clip.call([work_anim_hint, "Interact", "Use_Item", "PickUp", "Cheer", "Idle_2"], idle_c)
-	_anim_map["cheer"] = find_clip.call(["Cheer", "Interact", "Idle_2"], idle_c)
+	_anim_map["hit"] = find_clip.call(["Hit_A", "CharacterArmature|HitReact", "CharacterArmature|HitRecieve", "AnimalArmature|Idle_HitReact_Left", "HitReact", "HitRecieve"], idle_c)
+	_anim_map["death"] = find_clip.call(["Death_A", "CharacterArmature|Death", "AnimalArmature|Death", "SpiderArmature|Spider_Death", "RatArmature|Rat_Death", "WaspArmature|Wasp_Death", "Death"], idle_c)
+	_anim_map["interact"] = find_clip.call([work_anim_hint, "Interact", "Use_Item", "PickUp", "Cheer", "Idle_2", "Dance"], idle_c)
+	_anim_map["cheer"] = find_clip.call(["Cheer", "Interact", "Idle_2", "Dance"], idle_c)
 	_anim_map["pickup"] = find_clip.call(["PickUp", "Interact", "Idle_2"], idle_c)
 	_anim_map["use_item"] = find_clip.call(["Use_Item", "Interact", "Idle_2"], idle_c)
 	_anim_map["sit"] = find_clip.call(["Sit_Chair_Idle", "Sit_Floor_Idle", "Idle"], idle_c)
-	_anim_map["eat"] = find_clip.call(["AnimalArmature|Eating", "AnimalArmature|Idle_2", "Idle"], idle_c)
+	_anim_map["eat"] = find_clip.call(["AnimalArmature|Eating", "CharacterArmature|Duck", "AnimalArmature|Idle_2", "Idle"], idle_c)
 	_anim_map["awaken"] = find_clip.call(["Skeletons_Awaken_Floor", "Idle"], idle_c)
-	_anim_map["jump"] = find_clip.call(["SpiderArmature|Spider_Jump"], "")
+	_anim_map["jump"] = find_clip.call(["SpiderArmature|Spider_Jump", "CharacterArmature|Jump", "Jump"], "")
 
 	# Ensure loop flags are properly set on locomotion & idle clips
 	for k in ["idle", "walk", "run", "interact", "cheer", "pickup", "use_item", "sit", "eat", "block"]:
@@ -225,19 +237,36 @@ func trigger_hit_flash(col: Color) -> void:
 	_flash_col = col
 	_flash_timer = 0.20
 	for mi in _meshes:
-		if is_instance_valid(mi):
-			mi.set_instance_shader_parameter(&"hit_flash", Vector4(col.r, col.g, col.b, 0.82))
+		if is_instance_valid(mi) and (mi.material_override != null or mi.get_surface_override_material_count() > 0):
+			if mi.material_override != null or mi.get_active_material(0) != null:
+				mi.set_instance_shader_parameter(&"hit_flash", Vector4(col.r, col.g, col.b, 0.82))
 
 
 func apply_damage(amount: float, push_xz: Vector2, attacker: Node = null, is_slime_hit: bool = false) -> bool:
-	if not is_alive():
+	if not is_alive() or not is_finite(amount):
 		return false
 	hp -= amount
 	_combat_show_timer = 7.0
-	knockback_xz += push_xz
+	if is_finite(push_xz.x) and is_finite(push_xz.y):
+		knockback_xz = (knockback_xz + push_xz).limit_length(14.0)
+
+	var attacker_is_slime := is_slime_hit or (attacker is Slime)
+	if attacker_is_slime:
+		var eco_p := get_parent()
+		var sl_atk: Slime = attacker as Slime if attacker is Slime else (eco_p.get("player_slime") as Slime if eco_p != null else null)
+		if faction == Faction.HOSTILE:
+			if not pack_id.is_empty() and eco_p != null:
+				if eco_p.has_method("provoke_group"):
+					eco_p.call("provoke_group", pack_id, 36.0)
+				if eco_p.has_method("rally_pack"):
+					eco_p.call("rally_pack", self, null, sl_atk)
+		elif faction == Faction.VILLAGE:
+			if eco_p != null and eco_p.has_method("provoke_village"):
+				eco_p.call("provoke_village", 32.0)
+
 	if hp <= 0.0:
 		hp = 0.0
-		_enter_death(is_slime_hit)
+		_enter_death(attacker_is_slime)
 		return true
 
 	trigger_hit_flash(Color(1.0, 0.25, 0.20))
@@ -245,20 +274,31 @@ func apply_damage(amount: float, push_xz: Vector2, attacker: Node = null, is_sli
 		_play_anim("hit", true)
 		_action_lock = 0.22
 
-	if attacker is LivingActor:
+	if attacker is LivingActor and is_instance_valid(attacker):
 		var la := attacker as LivingActor
 		if la.faction != faction and role != RoleKind.ANIMAL:
 			target_actor = la
 			target_slime = null
-	elif is_slime_hit and attacker is Slime:
+	elif attacker_is_slime:
+		var eco_p2 := get_parent()
+		var sl_atk2: Slime = attacker as Slime if attacker is Slime else (eco_p2.get("player_slime") as Slime if eco_p2 != null else null)
 		if faction == Faction.HOSTILE:
-			target_slime = attacker as Slime
+			target_slime = sl_atk2
 			target_actor = null
-			if not pack_id.is_empty():
-				var eco_p := get_parent()
-				if eco_p != null and eco_p.has_method("rally_pack"):
-					eco_p.call("rally_pack", self, null, target_slime)
+			if target_slime != null:
+				ai_state = AIState.CHASE
+		elif faction == Faction.VILLAGE:
+			if role == RoleKind.GUARD or role == RoleKind.DOG:
+				target_slime = sl_atk2
+				target_actor = null
+				if target_slime != null:
+					ai_state = AIState.CHASE
+			else:
+				target_slime = sl_atk2
+				ai_state = AIState.FLEE
+				_state_timer = 4.5
 		elif role == RoleKind.ANIMAL:
+			target_slime = sl_atk2
 			ai_state = AIState.FLEE
 			_state_timer = 4.5
 	return false
@@ -272,7 +312,7 @@ func _enter_death(killed_by_slime: bool = false) -> void:
 	_combat_show_timer = 0.0
 	trigger_hit_flash(Color(1.0, 0.15, 0.15))
 	_play_anim("death", true)
-	if _anim != null:
+	if _anim != null and is_instance_valid(_anim):
 		_anim.advance(0.02)
 	_respawn_timer = _rng.randf_range(24.0, 38.0)
 	if killed_by_slime and (faction == Faction.HOSTILE or role == RoleKind.ANIMAL):
@@ -292,6 +332,8 @@ func respawn(ecosystem: Node) -> void:
 	_combat_show_timer = 0.0
 	visible = true
 	var spawn_y: float = float(ecosystem.sample_ground_y(home_xz.x, home_xz.y, role == RoleKind.FISHERMAN, subterranean_kind))
+	if not is_finite(spawn_y):
+		spawn_y = _cached_ground_y
 	_last_ground_xz = home_xz
 	_cached_ground_y = spawn_y
 	_ai_accum_dt = 0.0
@@ -299,7 +341,7 @@ func respawn(ecosystem: Node) -> void:
 	ai_state = AIState.AWAKEN if is_night_raider else AIState.SCHEDULE_IDLE
 	_state_timer = 1.1 if is_night_raider else 1.5
 	_play_anim("awaken" if is_night_raider else "idle", true)
-	if _anim != null:
+	if _anim != null and is_instance_valid(_anim):
 		_anim.advance(0.05)
 
 
@@ -315,7 +357,7 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 		_flash_timer = maxf(0.0, _flash_timer - dt)
 		var a := (_flash_timer / 0.20) * 0.82
 		for mi in _meshes:
-			if is_instance_valid(mi):
+			if is_instance_valid(mi) and (mi.material_override != null or mi.get_active_material(0) != null):
 				mi.set_instance_shader_parameter(&"hit_flash", Vector4(_flash_col.r, _flash_col.g, _flash_col.b, a))
 
 	if ai_state == AIState.DEAD:
@@ -340,10 +382,14 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 
 	var pos_xz := Vector2(global_position.x, global_position.z)
 
-	# 1. Threat / Target Scanning
+	# 1. Threat / Target Scanning (staggered ~3 Hz for calm patrol/idle to avoid O(N^2) per-frame scans)
+	_target_scan_cd -= dt
 	if role != RoleKind.ANIMAL:
-		_acquire_combat_target(pos_xz, ecosystem, village_provoked)
-	elif ai_state != AIState.FLEE:
+		if target_actor != null or target_slime != null or _target_scan_cd <= 0.0:
+			_target_scan_cd = 0.36
+			_acquire_combat_target(pos_xz, ecosystem, village_provoked)
+	elif ai_state != AIState.FLEE and _target_scan_cd <= 0.0:
+		_target_scan_cd = 0.36
 		# Wildlife flees predators & fast-charging slime
 		var predator: LivingActor = ecosystem.find_nearest_enemy_in_radius(pos_xz, Faction.HOSTILE, 15.0)
 		if predator != null:
@@ -501,14 +547,19 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 	desired_vel += sep * 2.4
 
 	# Decay knockback & integrate XZ position
-	knockback_xz = knockback_xz.move_toward(Vector2.ZERO, dt * 16.0)
+	knockback_xz = knockback_xz.move_toward(Vector2.ZERO, dt * 16.0).limit_length(14.0)
 	var step_v := desired_vel + knockback_xz
+	if not is_finite(step_v.x) or not is_finite(step_v.y):
+		step_v = Vector2.ZERO
+		knockback_xz = Vector2.ZERO
 	if desired_vel.length_squared() > 0.09:
 		desired_yaw = atan2(desired_vel.x, desired_vel.y)
 	if absf(angle_difference(rotation.y, desired_yaw)) > 1e-4:
 		rotation.y = lerp_angle(rotation.y, desired_yaw, clampf(dt * 9.0, 0.0, 1.0))
 
 	var new_xz := pos_xz + step_v * dt
+	if not is_finite(new_xz.x) or not is_finite(new_xz.y):
+		new_xz = pos_xz
 	if has_room_bounds:
 		new_xz.x = clampf(new_xz.x, room_min_xz.x, room_max_xz.x)
 		new_xz.y = clampf(new_xz.y, room_min_xz.y, room_max_xz.y)
@@ -516,9 +567,13 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 	if new_xz.distance_squared_to(_last_ground_xz) > 1e-7:
 		var is_fisherman := (role == RoleKind.FISHERMAN)
 		var probe_y: float = float(ecosystem.sample_ground_y(new_xz.x, new_xz.y, is_fisherman, subterranean_kind))
+		if not is_finite(probe_y):
+			probe_y = _cached_ground_y
 		if probe_y < 0.15 and role != RoleKind.BEAST:
 			if pos_xz.distance_squared_to(_last_ground_xz) > 1e-7:
-				_cached_ground_y = float(ecosystem.sample_ground_y(pos_xz.x, pos_xz.y, is_fisherman, subterranean_kind))
+				var fallback_y := float(ecosystem.sample_ground_y(pos_xz.x, pos_xz.y, is_fisherman, subterranean_kind))
+				if is_finite(fallback_y):
+					_cached_ground_y = fallback_y
 				_last_ground_xz = pos_xz
 		else:
 			global_position.x = new_xz.x
@@ -526,6 +581,7 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 			_cached_ground_y = probe_y
 			_last_ground_xz = new_xz
 
+	vertical_vel = clampf(vertical_vel, -30.0, 14.0)
 	if vertical_offset > 0.0 or vertical_vel > 0.0:
 		vertical_vel -= 22.0 * dt
 		vertical_offset += vertical_vel * dt
@@ -534,14 +590,15 @@ func step_ai(dt: float, ecosystem: Node, rain_intensity: float, is_night: bool, 
 			vertical_vel = 0.0
 
 	var target_y := _cached_ground_y + vertical_offset
-	if absf(global_position.y - target_y) > 1e-5:
+	if is_finite(target_y) and absf(global_position.y - target_y) > 1e-5:
 		global_position.y = target_y
 
 
 func step_animation_lod(delta: float, dist_sq: float, frame_idx: int, cave_hidden: bool) -> void:
-	if _anim == null or not visible:
+	if not visible:
 		return
-	var show_shadows := _on_screen and not cave_hidden and dist_sq < 3025.0  # < 55 m
+	var shadow_sq := 1024.0 if is_small_critter else 3025.0  # 32m for tiny critters, 55m for medium/large actors
+	var show_shadows := _on_screen and not cave_hidden and dist_sq < shadow_sq
 	if show_shadows != _shadows_on:
 		_shadows_on = show_shadows
 		var mode := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if show_shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -549,8 +606,32 @@ func step_animation_lod(delta: float, dist_sq: float, frame_idx: int, cave_hidde
 			if is_instance_valid(mi):
 				mi.cast_shadow = mode
 
-	if cave_hidden or not _on_screen or dist_sq >= 9025.0:  # >= 95 m or offscreen -> freeze animation eval!
+	var freeze_sq := 4900.0 if is_small_critter else 9025.0  # 70m for tiny critters, 95m for medium/large
+	if cave_hidden or not _on_screen or dist_sq >= freeze_sq:
 		_anim_accum_dt = 0.0
+		return
+
+	# Procedural hop/waddle locomotion for static Poly Pizza small animals (Squirrel, Duck, Turtle)
+	if _anim == null or not is_instance_valid(_anim):
+		if _model_root != null and is_instance_valid(_model_root) and not proc_gait.is_empty():
+			var spd := velocity_xz.length()
+			if spd > 0.15:
+				var freq := 10.5 if proc_gait == "hop" else 6.8
+				_proc_phase += delta * freq * clampf(spd / maxf(move_speed, 0.8), 0.7, 1.8)
+				if proc_gait == "hop":
+					var hop := absf(sin(_proc_phase))
+					_model_root.position.y = _model_base_y + hop * 0.16
+					_model_root.rotation.x = cos(_proc_phase) * 0.14
+					_model_root.rotation.z = 0.0
+				else:
+					_model_root.position.y = _model_base_y + absf(sin(_proc_phase)) * 0.035
+					_model_root.rotation.z = sin(_proc_phase) * 0.13
+					_model_root.rotation.x = 0.0
+			else:
+				_proc_phase += delta * 2.4
+				_model_root.position.y = lerpf(_model_root.position.y, _model_base_y + sin(_proc_phase) * 0.012, minf(delta * 10.0, 1.0))
+				_model_root.rotation.x = lerpf(_model_root.rotation.x, 0.0, minf(delta * 10.0, 1.0))
+				_model_root.rotation.z = lerpf(_model_root.rotation.z, 0.0, minf(delta * 10.0, 1.0))
 		return
 
 	_anim_accum_dt += delta
@@ -588,28 +669,39 @@ func _acquire_combat_target(pos_xz: Vector2, ecosystem: Node, village_provoked: 
 					ai_state = AIState.FLEE
 					_state_timer = 3.5
 				return
-		if village_provoked and role == RoleKind.GUARD:
+		if village_provoked:
 			var sl: Node3D = ecosystem.player_slime
-			if sl != null and not bool(sl.get("is_dead")):
-				if pos_xz.distance_to(Vector2(sl.global_position.x, sl.global_position.z)) <= aggro_range:
+			if sl != null and is_instance_valid(sl) and not bool(sl.get("is_dead")):
+				var d_sl := pos_xz.distance_to(Vector2(sl.global_position.x, sl.global_position.z))
+				if role == RoleKind.GUARD or role == RoleKind.DOG:
+					if d_sl <= aggro_range:
+						target_slime = sl
+						ai_state = AIState.CHASE
+						return
+				elif d_sl < 9.5:
 					target_slime = sl
-					ai_state = AIState.CHASE
+					ai_state = AIState.FLEE
+					_state_timer = 3.5
 					return
-		if not village_provoked:
+		else:
 			target_slime = null
 
 	elif faction == Faction.HOSTILE:
-		# Raiders & beasts attack closest Village NPC OR Player Slime!
+		# Raiders & beasts attack Village NPCs on sight,
+		# but remain neutral toward the Slime unless a member of their group was attacked or killed.
 		var npc: LivingActor = ecosystem.find_nearest_enemy_in_radius(pos_xz, Faction.VILLAGE, aggro_range)
 		var d_npc := INF if npc == null else pos_xz.distance_to(Vector2(npc.global_position.x, npc.global_position.z))
 		var sl: Node3D = ecosystem.player_slime
 		var d_slime := INF
-		if sl != null and not bool(sl.get("is_dead")):
+		var slime_provoked := not pack_id.is_empty() and ecosystem.has_method("is_group_provoked") and bool(ecosystem.call("is_group_provoked", pack_id))
+		if not slime_provoked:
+			target_slime = null
+		elif sl != null and is_instance_valid(sl) and not bool(sl.get("is_dead")):
 			d_slime = pos_xz.distance_to(Vector2(sl.global_position.x, sl.global_position.z))
 			# Prevent surface/subterranean actors aggroing vertically across rock ceilings
 			if subterranean_kind != 0 and absf(sl.global_position.y - global_position.y) > 7.5:
 				d_slime = INF
-		if d_slime <= aggro_range and d_slime < d_npc:
+		if slime_provoked and d_slime <= aggro_range and (npc == null or d_slime <= d_npc + 4.0):
 			target_slime = sl
 			target_actor = null
 			ai_state = AIState.CHASE
@@ -629,22 +721,27 @@ func _perform_attack(ecosystem: Node) -> void:
 		var pos_xz := Vector2(global_position.x, global_position.z)
 		if target_actor != null and is_instance_valid(target_actor) and target_actor.is_alive():
 			var t_xz := Vector2(target_actor.global_position.x, target_actor.global_position.z)
-			var push := (t_xz - pos_xz).normalized() * 4.5
+			var delta_xz := t_xz - pos_xz
+			var push := (delta_xz.normalized() if delta_xz.length_squared() > 0.0001 else Vector2(sin(rotation.y), cos(rotation.y))) * 4.5
 			target_actor.apply_damage(attack_damage, push, self, false)
 		elif target_slime != null and is_instance_valid(target_slime) and not target_slime.is_dead:
 			var s_xz := Vector2(target_slime.global_position.x, target_slime.global_position.z)
-			var dir := (s_xz - pos_xz).normalized()
+			var delta_s := s_xz - pos_xz
+			var dir := delta_s.normalized() if delta_s.length_squared() > 0.0001 else Vector2(sin(rotation.y), cos(rotation.y))
 			ecosystem.damage_player_slime(target_slime, Vector3(dir.x * 5.2, 2.2, dir.y * 5.2), attack_damage * 0.045, display_name)
 	else:
 		var anim_key := "spell" if attack_kind == AttackKind.RANGED_SPELL else "ranged"
 		_play_anim(anim_key, true)
 		var origin := get_muzzle_world()
-		var aim_pos := origin + Vector3(sin(rotation.y), 0.0, cos(rotation.y)) * 8.0
+		var fwd_fb := Vector3(sin(rotation.y), 0.0, cos(rotation.y))
+		var aim_pos := origin + fwd_fb * 8.0
 		if target_actor != null and is_instance_valid(target_actor):
 			aim_pos = target_actor.global_position + Vector3(0.0, 1.05, 0.0)
 		elif target_slime != null and is_instance_valid(target_slime):
 			aim_pos = target_slime.global_position + Vector3(0.0, 0.5, 0.0)
-		ecosystem.spawn_projectile(self, origin, (aim_pos - origin).normalized(), attack_kind == AttackKind.RANGED_SPELL, attack_damage)
+		var aim_diff := aim_pos - origin
+		var fire_dir := aim_diff.normalized() if aim_diff.length_squared() > 0.0001 else fwd_fb
+		ecosystem.spawn_projectile(self, origin, fire_dir, attack_kind == AttackKind.RANGED_SPELL, attack_damage)
 
 
 func _set_destination(dest_xz: Vector2, nav: VillageNavGraph) -> void:
@@ -710,8 +807,8 @@ func _pick_next_schedule_destination(_pos_xz: Vector2, ecosystem: Node, is_night
 
 	if role == RoleKind.ANIMAL or role == RoleKind.BEAST or role == RoleKind.DOG:
 		var ang := _rng.randf_range(0.0, TAU)
-		var max_r := 10.5 if role == RoleKind.DOG else (16.0 if role == RoleKind.ANIMAL else 24.0)
-		var min_r := 2.5 if role == RoleKind.DOG else 4.0
+		var max_r := 10.5 if role == RoleKind.DOG else (32.0 if role == RoleKind.ANIMAL else 24.0)
+		var min_r := 2.5 if role == RoleKind.DOG else 6.0
 		var rad := _rng.randf_range(min_r, max_r)
 		var dest := home_xz + Vector2(cos(ang) * rad, sin(ang) * rad)
 		if float(ecosystem.sample_ground_y(dest.x, dest.y, false)) < 0.6:

@@ -692,9 +692,9 @@ float snoise(vec3 v) {
 	return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
 }
 
-// Screen texture is linear in Godot; the HTML worked on display values, so convert on the way in.
-vec3 sampleScreen(vec2 uvGl) {
-	return lin2srgb(texture(tRefraction, vec2(uvGl.x, 1.0 - uvGl.y)).rgb);
+// Screen texture is linear in Godot; fetch linear rgb directly and convert once after assembly.
+vec3 sampleScreenRaw(vec2 uvGl) {
+	return texture(tRefraction, vec2(uvGl.x, 1.0 - uvGl.y)).rgb;
 }
 
 void fragment() {
@@ -707,7 +707,7 @@ void fragment() {
 
 	vec3 noiseCoord = vWorldPosition * uRippleNoiseScale + vec3(0.0, -t * 0.45, t * 0.25);
 	float n1 = snoise(noiseCoord);
-	float n2 = (uShaderLOD > 0.5) ? n1 : snoise(noiseCoord * 1.8 - vec3(t * 0.35));
+	float n2 = (uShaderLOD > 0.5) ? n1 : (0.62 * n1 + 0.38 * sin(noiseCoord.x * 3.1 - t * 0.65 + n1 * 2.1) * cos(noiseCoord.z * 2.9 + noiseCoord.y * 2.2 + t * 0.5));
 
 	float ndotv = max(0.0, dot(normal, viewDir));
 	float edgeFactor = pow(1.0 - ndotv, 1.5);
@@ -725,13 +725,13 @@ void fragment() {
 	vec2 uvG = clamp(screenUV - totalDistortion * 1.0, vec2(0.002), vec2(0.998));
 	vec2 uvB = clamp(screenUV - totalDistortion * (1.0 + 0.22 * uDispersion) - dir * disp * 0.55, vec2(0.002), vec2(0.998));
 
-	vec3 sG = sampleScreen(uvG);
-	vec3 sR = (uShaderLOD > 0.5) ? sG : sampleScreen(uvR);
-	vec3 sB = (uShaderLOD > 0.5) ? sG : sampleScreen(uvB);
+	vec3 sG_lin = sampleScreenRaw(uvG);
+	float sR_r_lin = (uShaderLOD > 0.5) ? sG_lin.r : sampleScreenRaw(uvR).r;
+	float sB_b_lin = (uShaderLOD > 0.5) ? sG_lin.b : sampleScreenRaw(uvB).b;
 
-	vec3 refractedColor = vec3(sR.r, sG.g, sB.b);
-
-	float edgeDelta = clamp(length(sG - sB) * 1.5, 0.0, 0.45);
+	vec3 refractedColor = lin2srgb(vec3(sR_r_lin, sG_lin.g, sB_b_lin));
+	vec3 sG = lin2srgb(sG_lin);
+	float edgeDelta = clamp(abs(sG.b - refractedColor.b) * 1.5 + length(sG.rg - refractedColor.rg) * 0.5, 0.0, 0.45);
 	vec3 greenCyanCaustic = mix(vCausticA, vCausticB, n1 * 0.5 + 0.5);
 	float basalMask = smoothstep(0.05, -0.72, vLocalPos.y) * smoothstep(0.1, 0.85, 1.0 - ndotv);
 	refractedColor += greenCyanCaustic * edgeDelta * 0.45 * uDispersion;

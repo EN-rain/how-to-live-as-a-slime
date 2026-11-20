@@ -68,6 +68,9 @@ var _query_params_excluded: PhysicsShapeQueryParameters3D
 var _query_params_unexcluded: PhysicsShapeQueryParameters3D
 var _deep_ray_query: PhysicsRayQueryParameters3D
 var _exclude: Array[RID] = []
+var _terrain_ref: Node = null
+var has_real_support := false
+var _analytical_floor_y := -45.0
 
 ## Process-wide instrumentation (F3 overlay). Totals; the HUD derives per-tick rates.
 static var debug_cast_count := 0
@@ -156,6 +159,15 @@ func set_exclude(rids: Array[RID]) -> void:
 
 func _space() -> PhysicsDirectSpaceState3D:
 	return owner_node.get_world_3d().direct_space_state
+
+
+func _get_terrain() -> Node:
+	if _terrain_ref == null or not is_instance_valid(_terrain_ref):
+		if owner_node != null and owner_node.get_parent() != null:
+			_terrain_ref = owner_node.get_parent().get_node_or_null("TerrainScene")
+		if _terrain_ref == null and owner_node != null and owner_node.is_inside_tree():
+			_terrain_ref = owner_node.get_tree().get_first_node_in_group("terrain")
+	return _terrain_ref
 
 
 func _sync_foot() -> void:
@@ -369,7 +381,7 @@ func move_horizontal(motion: Vector3) -> void:
 				if rem_len > 1e-5:
 					var horiz_n_len := Vector2(full_n.x, full_n.z).length()
 					var slope_rise := rem_len * (horiz_n_len / maxf(full_n.y, 0.25)) + 0.03
-					var max_climb := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
+					var max_climb := maxf(lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale, 0.22)
 					var step_up := clampf(slope_rise, 0.04, max_climb)
 					if ceiling_clearance_up(step_up, sphere) >= step_up - 1e-4:
 						var fr_up := _cast(core_sweep_origin() + Vector3(0.0, step_up, 0.0), rem_horiz, true, sphere)
@@ -463,8 +475,8 @@ func apply_slime_separation(push: Vector3, normal: Vector3) -> float:
 ## a steep cave wall or passage corner, preventing sudden floor-support dropouts.
 func update_support() -> void:
 	_sync_foot()
-	var reach := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
-	var drop := reach + 2.0 * model.scale
+	var reach := maxf(lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale, 0.22)
+	var drop := maxf(reach + 2.0 * model.scale, 0.95)
 	var start := model.foot + Vector3(0, reach, 0)
 	var best := tuning.floor_y
 	var body: Object = null
@@ -529,11 +541,11 @@ func update_support() -> void:
 						ground_normal = rest_t.normal
 						found = true
 
-	# Deep-water / pit floor ray fallback so seabeds and lake pits deeper than 2.4m still report true support
-	if not found and (in_water or owner_node.global_position.y < 14.0):
+	# Deep ray fallback across all elevations so high-altitude territories never lose terrain below
+	if not found:
 		if _deep_ray_query == null:
 			_deep_ray_query = PhysicsRayQueryParameters3D.new()
-		_deep_ray_query.from = model.foot + Vector3(0.0, reach, 0.0)
+		_deep_ray_query.from = model.foot + Vector3(0.0, reach + 0.5, 0.0)
 		_deep_ray_query.to = Vector3(model.foot.x, tuning.floor_y, model.foot.z)
 		_deep_ray_query.collision_mask = LAYER_TERRAIN | LAYER_OBSTACLES
 		_deep_ray_query.collide_with_bodies = true
@@ -549,6 +561,18 @@ func update_support() -> void:
 				ground_normal = d_norm
 				found = true
 
+	_analytical_floor_y = tuning.floor_y
+	var terrain := _get_terrain()
+	if terrain != null and terrain.has_method(&"sample_support_floor"):
+		var ana: Vector4 = terrain.sample_support_floor(model.foot.x, model.foot.z, model.foot.y)
+		if is_finite(ana.w) and ana.w > tuning.floor_y + 1.0:
+			_analytical_floor_y = ana.w
+			if not found and ana.w <= model.foot.y + reach + tuning.skin and ana.w > best:
+				best = ana.w
+				ground_normal = Vector3(ana.x, ana.y, ana.z).normalized()
+				found = true
+
+	has_real_support = found
 	support_y = best
 	ground_body = body
 
@@ -610,6 +634,39 @@ func jump(impulse_vy: float) -> void:
 	just_jumped = true
 
 
+## Apply a combat knockback impulse through the single transform/velocity writer,
+## clamping magnitudes to prevent extreme multi-mob launch or terrain tunneling.
+func apply_knockback_impulse(impulse: Vector3) -> void:
+	if not impulse.is_finite():
+		return
+	var horiz := Vector2(velocity.x + impulse.x, velocity.z + impulse.z)
+	if horiz.length() > 14.0:
+		horiz = horiz.normalized() * 14.0
+	velocity.x = horiz.x
+	velocity.z = horiz.y
+	vertical_vel = clampf(vertical_vel + clampf(impulse.y, -2.0, 6.5), -18.0, 9.0)
+	if impulse.y > 0.5:
+		on_ground = false
+
+
+## Authoritative teleport writer through SlimeMotor (sets center position from target foot point).
+func teleport_to(dest_foot: Vector3) -> void:
+	if not dest_foot.is_finite():
+		return
+	velocity = Vector3.ZERO
+	vertical_vel = 0.0
+	in_water = false
+	water_submersion = 0.0
+	water_depth = 0.0
+	water_flow_vel = Vector3.ZERO
+	on_ground = true
+	owner_node.global_position = dest_foot + Vector3(0.0, model.rest_half_height * model.scale, 0.0)
+	_sync_foot()
+	if owner_node.is_inside_tree():
+		update_support()
+		recover_overlap()
+
+
 ## Vertical integration anchored to support with speed-coupled hydrodynamics:
 ## walking (`W` or slower) / idle sinks gently down to the underwater floor;
 ## running (`Shift+W`) generates hydrodynamic lift and rises smoothly to the surface.
@@ -627,7 +684,8 @@ func move_vertical(dt: float, target_scale: float) -> void:
 	var deep_water := in_water and (water_y - target_foot) > buoy_depth
 	var max_step_down := lerpf(tuning.climb_reach, tuning.liquid_climb_reach, model.liquid) * model.scale
 	var stick_to_slope := on_ground and vertical_vel <= 0.0 and support_y > tuning.floor_y + 0.5 and (foot_y - target_foot) <= max_step_down
-	if deep_water and foot_y < water_y + 0.12 and not shrinking and vertical_vel <= 0.0:
+	var safe_shrink_snap := shrinking and has_real_support and (foot_y - target_foot) <= max_step_down
+	if deep_water and foot_y < water_y + 0.12 and not safe_shrink_snap and vertical_vel <= 0.0:
 		if is_run_swim:
 			var neutral_foot := maxf(target_foot, water_y - buoy_depth)
 			var b_phase := _water_bob_phase(foot_y) + owner_node.global_position.x * 0.55 + owner_node.global_position.z * 0.42
@@ -659,9 +717,9 @@ func move_vertical(dt: float, target_scale: float) -> void:
 				on_ground = true
 				var follow_rate := 120.0 if target_foot > foot_y else 16.0
 				desired = (target_foot - foot_y) * (1.0 - exp(-follow_rate * dt))
-	elif ((foot_y > target_foot + 0.02 and not stick_to_slope) or vertical_vel > 0.0) and not shrinking:
+	elif ((foot_y > target_foot + 0.02 and not stick_to_slope) or vertical_vel > 0.0) and not safe_shrink_snap:
 		on_ground = false
-		vertical_vel -= tuning.gravity * dt
+		vertical_vel = clampf(vertical_vel - tuning.gravity * dt, -24.0, 14.0)
 		desired = vertical_vel * dt
 	else:
 		if was_airborne:
@@ -671,6 +729,7 @@ func move_vertical(dt: float, target_scale: float) -> void:
 		on_ground = true
 		var follow_rate := 120.0
 		desired = (target_foot - foot_y) * (1.0 - exp(-follow_rate * dt))
+	desired = clampf(desired, -1.6, 1.6)
 	if absf(desired) <= 1e-7:
 		_sync_foot()
 		return
@@ -684,6 +743,11 @@ func move_vertical(dt: float, target_scale: float) -> void:
 			landing_impact_speed = absf(vertical_vel)
 		vertical_vel = 0.0
 		if desired < 0.0:
+			on_ground = true
+	if _analytical_floor_y > tuning.floor_y + 1.0:
+		if foot_y >= _analytical_floor_y - 0.65 and next_foot < _analytical_floor_y + tuning.skin:
+			next_foot = _analytical_floor_y + tuning.skin
+			vertical_vel = maxf(vertical_vel, 0.0)
 			on_ground = true
 	owner_node.global_position.y = next_foot + model.rest_half_height * model.scale
 	_sync_foot()

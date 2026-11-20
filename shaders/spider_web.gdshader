@@ -42,16 +42,16 @@ float line_mask(float wave, float half_w) {
 }
 
 vec2 eval_fiber_web(vec2 uv, float n_macro, float n_fine, float sc, float seed, float clump) {
-	vec2 w_uv = uv + vec2(n_macro - 0.5, n_fine - 0.5) * 0.22;
-	float f1 = abs(fract((w_uv.x * 0.88 + w_uv.y * 0.47) * 11.0 * sc + n_fine * 0.55) - 0.5) * 2.0;
-	float f2 = abs(fract((w_uv.x * -0.62 + w_uv.y * 0.78) * 13.5 * sc - n_macro * 0.50) - 0.5) * 2.0;
-	float f3 = abs(fract((w_uv.x * 0.28 - w_uv.y * 0.96) * 16.0 * sc + n_fine * 0.42) - 0.5) * 2.0;
-	float f4 = abs(fract((w_uv.x * 0.95 - w_uv.y * 0.31) * 8.5 * sc + n_macro * 0.65) - 0.5) * 2.0;
-	float f5 = abs(fract((w_uv.y + sin(w_uv.x * 6.0 + seed) * 0.14) * 7.0 * sc) - 0.5) * 2.0;
-	float thick_cables = max(line_mask(f4, 0.105), line_mask(f5, 0.095));
-	float med_fibers = max(line_mask(f1, 0.082), line_mask(f2, 0.078));
-	float fine_mesh = line_mask(f3, 0.065);
-	float fiber_web = max(thick_cables * 0.95, max(med_fibers * mix(0.55, 1.0, clump), fine_mesh * clump * 0.85));
+	vec2 w_uv = uv + vec2(n_macro - 0.5, n_fine - 0.5) * 0.24;
+	float f1 = abs(fract((w_uv.x * 0.88 + w_uv.y * 0.47) * 12.0 * sc + n_fine * 0.60) - 0.5) * 2.0;
+	float f2 = abs(fract((w_uv.x * -0.62 + w_uv.y * 0.78) * 14.5 * sc - n_macro * 0.55) - 0.5) * 2.0;
+	float f3 = abs(fract((w_uv.x * 0.28 - w_uv.y * 0.96) * 17.5 * sc + n_fine * 0.48) - 0.5) * 2.0;
+	float f4 = abs(fract((w_uv.x * 0.95 - w_uv.y * 0.31) * 9.0 * sc + n_macro * 0.65) - 0.5) * 2.0;
+	float f5 = abs(fract((w_uv.y + sin(w_uv.x * 6.0 + seed) * 0.14) * 7.5 * sc) - 0.5) * 2.0;
+	float thick_cables = max(line_mask(f4, 0.085), line_mask(f5, 0.075));
+	float med_fibers = max(line_mask(f1, 0.062), line_mask(f2, 0.058));
+	float fine_mesh = line_mask(f3, 0.048);
+	float fiber_web = max(thick_cables * 0.96, max(med_fibers * mix(0.55, 1.0, clump), fine_mesh * clump * 0.85));
 	return vec2(fiber_web, thick_cables);
 }
 
@@ -77,9 +77,7 @@ void vertex() {
 }
 
 void fragment() {
-	if (!FRONT_FACING) {
-		NORMAL = -NORMAL;
-	}
+	// Keep Godot's view-facing cull_disabled NORMAL untouched (flipping on !FRONT_FACING caused black backfaces)
 	float eff_mode = max(web_mode, is_funnel);
 	float strand = 0.0;
 	float veil = 0.0;
@@ -120,76 +118,80 @@ void fragment() {
 	float sc = clamp(v_mode_var, 0.75, 2.2);
 
 	if (eff_mode < 1.5) {
-		// MODE 0 & 1: Thick Matted Ground/Boulder Funnel-Sheet & Stretched Nest Blanket (ZERO radial spokes!)
+		// MODE 0 & 1: Lacy gossamer funnel/ground web with crisp silk threads & light anchor wisps
 		vec2 fw = eval_fiber_web(uv, n_macro, n_fine, sc, v_seed, clump);
 		float fiber_web = fw.x;
 		float thick_cables = fw.y;
 
 		vec2 p = (uv - vec2(0.5)) * 2.0;
 		float r = length(p * vec2(1.0, 1.05));
-		float edge_warp = (n_macro - 0.5) * 0.42 + (n_fine - 0.5) * 0.22;
-		float edge_fade = 1.0 - smoothstep(0.58, 0.98, r + edge_warp);
-		// Stretched anchor tendrils reaching past the edge onto rocks/bark/soil
-		float tendrils = smoothstep(0.42, 0.95, thick_cables * (1.0 - smoothstep(0.72, 1.12, r + edge_warp * 0.7)));
-		float env = max(edge_fade, tendrils * 0.78);
-		// Dense milky funnel throat & thick matted silk sheet pockets
-		float funnel_core = (1.0 - smoothstep(0.08, 0.62, r + (n_macro - 0.5) * 0.25)) * 0.58;
-		float holes = smoothstep(0.16, 0.42, n_macro * 0.7 + n_fine * 0.3);
-		strand = max(fiber_web * mix(0.45, 1.0, holes), funnel_core * 0.85) * env;
-		veil = (0.34 * clump * holes + funnel_core * 0.62) * edge_fade;
+		float edge_warp = (n_macro - 0.5) * 0.44 + (n_fine - 0.5) * 0.24;
+		float edge_fade = 1.0 - smoothstep(0.56, 0.98, r + edge_warp);
+		float tendrils = smoothstep(0.45, 0.95, thick_cables * (1.0 - smoothstep(0.72, 1.12, r + edge_warp * 0.7)));
+		float env = max(edge_fade, tendrils * 0.82);
+		float funnel_core = (1.0 - smoothstep(0.06, 0.48, r + (n_macro - 0.5) * 0.22)) * 0.38;
+		float holes = smoothstep(0.24, 0.55, n_macro * 0.65 + n_fine * 0.35);
+		strand = max(fiber_web * mix(0.40, 1.0, holes), funnel_core * 0.65) * env;
+		veil = (0.06 * clump * holes + funnel_core * 0.22) * edge_fade;
 	} else if (eff_mode < 2.5) {
-		// MODE 2: Heavy Hanging Tattered Cobweb Curtains & Festoon Drapes
+		// MODE 2: Airy tattered cobweb curtains & festoon silk drapes
 		float fiber_web = eval_fiber_web(uv, n_macro, n_fine, sc, v_seed, clump).x;
 
 		float u = uv.x;
 		float v = uv.y;
-		float top_rope = 1.0 - smoothstep(0.02, 0.09, v + (n_fine - 0.5) * 0.04);
+		float top_rope = 1.0 - smoothstep(0.015, 0.075, v + (n_fine - 0.5) * 0.04);
 		float taper = 0.55 + 0.30 * sin(u * 6.28318 * 2.0 + v_seed) + 0.18 * (n_macro - 0.5);
 		taper = clamp(taper, 0.32, 0.98);
 		float side_fade = smoothstep(0.0, 0.10, u) * (1.0 - smoothstep(0.90, 1.0, u));
 		float v_fade = (1.0 - smoothstep(taper - 0.28, taper, v)) * side_fade;
-		float swag = abs(fract((v + 0.16 * sin(u * 9.0 + v_seed) + n_macro * 0.18) * 7.5 * sc) - 0.5) * 2.0;
-		float vert_strands = abs(fract((u + (n_fine - 0.5) * 0.10) * 18.0 * sc) - 0.5) * 2.0;
-		float drape_mesh = max(line_mask(swag, 0.095), max(line_mask(vert_strands, 0.080) * clump, fiber_web * 0.85));
+		float swag = abs(fract((v + 0.16 * sin(u * 9.0 + v_seed) + n_macro * 0.18) * 8.0 * sc) - 0.5) * 2.0;
+		float vert_strands = abs(fract((u + (n_fine - 0.5) * 0.10) * 19.0 * sc) - 0.5) * 2.0;
+		float drape_mesh = max(line_mask(swag, 0.072), max(line_mask(vert_strands, 0.058) * clump, fiber_web * 0.88));
 		float bottom_fade = 1.0 - smoothstep(0.84, 1.0, v);
-		strand = max(top_rope * side_fade * 0.90, drape_mesh * v_fade) * bottom_fade;
-		veil = v_fade * (1.0 - v * 0.65) * (0.28 + 0.32 * clump) * bottom_fade;
+		strand = max(top_rope * side_fade * 0.92, drape_mesh * v_fade) * bottom_fade;
+		veil = v_fade * (1.0 - v * 0.72) * (0.05 + 0.07 * clump) * bottom_fade;
 	} else if (eff_mode < 3.5) {
-		// MODE 3: Dense Tree-Trunk Silk Shroud Collar & Flared Root Skirt (skips unused f1..f5 fiber_web!)
+		// MODE 3: Lacy tree-trunk silk collar (open lacy strands, no opaque plastic cone)
 		float u = uv.x;
 		float v = uv.y;
-		float s1 = abs(fract(u * 6.0 + v * 4.0 + (n_macro - 0.5) * 0.45) - 0.5) * 2.0;
-		float s2 = abs(fract(u * 6.0 - v * 3.5 + (n_fine - 0.5) * 0.45) - 0.5) * 2.0;
-		float s3 = abs(fract(v * 8.0 + sin(u * 6.28318 * 3.0 + v_seed) * 0.22) - 0.5) * 2.0;
-		float wrap_fibers = max(max(line_mask(s1, 0.115), line_mask(s2, 0.110)), line_mask(s3, 0.095));
-		float hole_m = smoothstep(0.24, 0.62, n_macro * 0.65 + n_fine * 0.35);
+		float s1 = abs(fract(u * 6.5 + v * 4.5 + (n_macro - 0.5) * 0.45) - 0.5) * 2.0;
+		float s2 = abs(fract(u * 6.5 - v * 4.0 + (n_fine - 0.5) * 0.45) - 0.5) * 2.0;
+		float s3 = abs(fract(v * 9.0 + sin(u * 6.28318 * 3.0 + v_seed) * 0.22) - 0.5) * 2.0;
+		float wrap_fibers = max(max(line_mask(s1, 0.082), line_mask(s2, 0.078)), line_mask(s3, 0.068));
+		float hole_m = smoothstep(0.28, 0.66, n_macro * 0.65 + n_fine * 0.35);
 		float v_prof = smoothstep(0.01, 0.14, v) * (1.0 - smoothstep(0.72, 0.99, v + (n_macro - 0.5) * 0.22));
 		strand = wrap_fibers * v_prof * mix(0.45, 1.0, hole_m);
-		veil = (0.14 + 0.18 * clump * hole_m) * v_prof;
+		veil = (0.04 + 0.06 * clump * hole_m) * v_prof;
 	} else {
-		// MODE 4 & 5: Thick Billowing Overhead Canopy Silk Hammocks & Tangled Sheet Tunnels
+		// MODE 4 & 5: Suspended overhead lacy silk hammocks & breathing open windows
 		float fiber_web = eval_fiber_web(uv, n_macro, n_fine, sc, v_seed, clump).x;
 
 		float skin = smoothstep(0.0, 0.14, uv.x) * (1.0 - smoothstep(0.86, 1.0, uv.x));
 		skin *= smoothstep(0.0, 0.14, uv.y) * (1.0 - smoothstep(0.82, 1.0, uv.y + (n_macro - 0.5) * 0.22));
-		// Organic stretched fenestrations (open breathing pockets between thick matted silk ribs)
-		float fenestration = smoothstep(0.26, 0.56, n_macro * 0.65 + n_fine * 0.35);
-		strand = fiber_web * skin * mix(0.42, 1.0, fenestration);
-		veil = skin * (0.16 + 0.24 * clump) * fenestration;
+		float fenestration = smoothstep(0.30, 0.62, n_macro * 0.65 + n_fine * 0.35);
+		strand = fiber_web * skin * mix(0.40, 1.0, fenestration);
+		veil = skin * (0.04 + 0.07 * clump) * fenestration;
 	}
 
-	float alpha = clamp(strand * 0.85 + veil * 0.85, 0.0, 0.84) * silk_color.a;
-	if (alpha < 0.020) {
+	float alpha = clamp(strand * 0.92 + veil * 0.55, 0.0, 0.88) * silk_color.a;
+	if (alpha < 0.055) {
 		discard;
 	}
 
-	float rim = pow(1.0 - clamp(abs(dot(normalize(NORMAL), normalize(VIEW))), 0.0, 1.0), 1.6);
-	float glint = smoothstep(0.60, 0.95, strand) * (0.30 + 0.42 * rim);
+	float rim = pow(1.0 - clamp(abs(dot(normalize(NORMAL), normalize(VIEW))), 0.0, 1.0), 1.5);
+	float glint = smoothstep(0.52, 0.92, strand) * (0.35 + 0.45 * rim);
 
-	ALBEDO = mix(vec3(0.74, 0.81, 0.87), silk_color.rgb, 0.65) * mix(0.92, 1.08, clump);
-	ROUGHNESS = 0.34;
-	METALLIC = 0.02;
-	SPECULAR = 0.40;
-	EMISSION = silk_color.rgb * (0.28 + 0.16 * strand + 0.12 * rim + glint * 0.12);
+	ALBEDO = mix(vec3(0.86, 0.91, 0.96), silk_color.rgb, 0.65) * mix(0.95, 1.08, clump);
+	ROUGHNESS = 0.28;
+	METALLIC = 0.0;
+	SPECULAR = 0.45;
+	EMISSION = silk_color.rgb * (0.32 + 0.24 * strand + 0.14 * rim + glint * 0.16);
 	ALPHA = alpha;
+}
+
+void light() {
+	float ndl = abs(dot(NORMAL, LIGHT));
+	float wrap_lit = 0.44 + 0.56 * ndl;
+	float back_trans = pow(clamp(dot(-LIGHT, VIEW) * 0.5 + 0.5, 0.0, 1.0), 2.0) * 0.45;
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * (wrap_lit + back_trans) * mix(0.45, 1.0, ATTENUATION);
 }

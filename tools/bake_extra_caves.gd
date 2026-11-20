@@ -345,26 +345,26 @@ func _rat_eval_void(x: float, y: float, z: float) -> float:
 		Vector3(-234.2, 15.81, 261.5),
 		Vector3(-235.5, 14.5, 258.0),
 		Vector3(-236.5, 14.5, 253.0),
-	], 4.7, 6.2)
-	var d_flare := _sd_organic_cavern(Vector3(x + wx * 0.4, y, z), Vector2(-240.0, 278.5), 5.6, 4.6, 0.12, 21.95, 28.0, 0.38)
+	], 6.0, 8.2)
+	var d_flare := _sd_organic_cavern(Vector3(x + wx * 0.4, y, z), Vector2(-240.0, 278.5), 6.8, 5.4, 0.12, 21.95, 29.5, 0.38)
 	var d := _smin(d_ent, d_flare, 1.6)
 
-	# 2. Asymmetrical Central Confluence Dome (-239.5, 244, floor y=14.5, vaulted ceil ~24.6m)
-	var d_hub := _sd_organic_cavern(p, Vector2(-239.5, 244.0), 18.8, 15.2, -0.32, 14.50, 24.6 + wy * 0.55, 0.44)
+	# 2. Asymmetrical Central Confluence Dome (-239.5, 244, floor y=14.5, vaulted ceil ~27.0m)
+	var d_hub := _sd_organic_cavern(p, Vector2(-239.5, 244.0), 20.5, 16.5, -0.32, 14.50, 27.0 + wy * 0.55, 0.44)
 	d = _smin(d, d_hub, 2.2)
 
 	# Single NE Elevated Scavenger Shelf above Crossroads water cove (-228.5, 234.0, floor y=17.4)
-	var d_ne_alcove := _sd_organic_cavern(p, Vector2(-228.5, 234.0), 6.0, 5.0, -0.45, 17.40, 24.6, 0.42)
+	var d_ne_alcove := _sd_organic_cavern(p, Vector2(-228.5, 234.0), 6.8, 5.6, -0.45, 17.40, 27.0, 0.42)
 	d = _smin(d, d_ne_alcove, 1.4)
 
 	# Asymmetrical Submerged Water Coves carved naturally around central rocks (bed y=12.15, water=13.35)
-	var d_cove_sw := _sd_organic_cavern(Vector3(x + wx * 0.35, y, z + wz * 0.35), Vector2(-250.8, 246.5), 5.4, 5.8, 0.48, 12.15, 22.8, 0.42)
-	var d_cove_se := _sd_organic_cavern(Vector3(x + wx * 0.35, y, z + wz * 0.35), Vector2(-231.5, 247.2), 4.2, 4.4, 0.62, 12.15, 22.8, 0.42)
+	var d_cove_sw := _sd_organic_cavern(Vector3(x + wx * 0.35, y, z + wz * 0.35), Vector2(-250.8, 246.5), 5.8, 6.2, 0.48, 12.15, 25.2, 0.42)
+	var d_cove_se := _sd_organic_cavern(Vector3(x + wx * 0.35, y, z + wz * 0.35), Vector2(-231.5, 247.2), 4.6, 4.8, 0.62, 12.15, 25.2, 0.42)
 	d = _smin(d, d_cove_sw, 1.1)
 	d = _smin(d, d_cove_se, 1.1)
 
 	# Natural Skylight Chimney Dome above (-240, 244.5) without piercing outer ground overburden
-	var d_sky_shaft := _sd_organic_cavern(Vector3(x, y, z), Vector2(-240.0, 244.5), 3.4, 3.1, 0.2, 18.0, 25.8, 0.28)
+	var d_sky_shaft := _sd_organic_cavern(Vector3(x, y, z), Vector2(-240.0, 244.5), 3.8, 3.5, 0.2, 18.0, 27.8, 0.28)
 	d = _smin(d, d_sky_shaft, 1.2)
 
 	# 3. WEST WING: Stronger S-Bend Squeeze -> Crescent Flooded Sump Grotto (-276, 243) + NW Bolt-Hole Loop
@@ -373,16 +373,16 @@ func _rat_eval_void(x: float, y: float, z: float) -> float:
 		Vector3(-257.5, 14.5, 238.2),
 		Vector3(-266.5, 14.5, 245.2),
 		Vector3(-275.0, 14.5, 242.5),
-	], 3.9, 6.2)
-	var d_w_grotto := _sd_organic_cavern(p, Vector2(-276.0, 243.0), 14.5, 16.0, 0.42, 14.50, 24.4 + wy * 0.50, 0.44)
-	var d_w_spout := _sd_organic_cavern(p, Vector2(-287.2, 243.5), 4.2, 4.8, 0.1, 16.0, 23.6, 0.38)
-	var d_w_lagoon_n := _sd_organic_cavern(Vector3(x + wx * 0.3, y, z + wz * 0.3), Vector2(-280.5, 234.5), 9.5, 5.8, -0.35, 12.05, 22.5, 0.40)
-	var d_w_lagoon_s := _sd_organic_cavern(Vector3(x + wx * 0.3, y, z + wz * 0.3), Vector2(-275.0, 252.8), 10.5, 5.6, 0.28, 12.05, 22.5, 0.40)
+	], 5.2, 8.2)
+	var d_w_grotto := _sd_organic_cavern(p, Vector2(-276.0, 243.0), 15.8, 17.4, 0.42, 14.50, 26.8 + wy * 0.50, 0.44)
+	var d_w_spout := _sd_organic_cavern(p, Vector2(-287.2, 243.5), 4.8, 5.4, 0.1, 16.0, 25.8, 0.38)
+	var d_w_lagoon_n := _sd_organic_cavern(Vector3(x + wx * 0.3, y, z + wz * 0.3), Vector2(-280.5, 234.5), 10.2, 6.4, -0.35, 12.05, 24.8, 0.40)
+	var d_w_lagoon_s := _sd_organic_cavern(Vector3(x + wx * 0.3, y, z + wz * 0.3), Vector2(-275.0, 252.8), 11.2, 6.2, 0.28, 12.05, 24.8, 0.40)
 	var d_nw_loop := _sd_curved_tunnel(Vector3(x, y, z + wz * 0.4), [
 		Vector3(-268.5, 14.5, 234.0),
 		Vector3(-261.0, 13.65, 226.5),
 		Vector3(-252.0, 13.03, 222.5),
-	], 3.6, 5.6)
+	], 4.8, 7.6)
 	d = _smin(d, d_w_corr, 1.6)
 	d = _smin(d, d_w_grotto, 1.9)
 	d = _smin(d, d_w_spout, 1.2)
@@ -396,16 +396,16 @@ func _rat_eval_void(x: float, y: float, z: float) -> float:
 		Vector3(-221.0, 14.8, 247.8),
 		Vector3(-211.0, 15.0, 239.8),
 		Vector3(-203.0, 14.5, 242.0),
-	], 4.2, 6.4)
-	var d_e_nest := _sd_organic_cavern(p, Vector2(-202.5, 242.0), 15.8, 17.2, -0.38, 14.50, 24.6 + wy * 0.50, 0.44)
+	], 5.5, 8.4)
+	var d_e_nest := _sd_organic_cavern(p, Vector2(-202.5, 242.0), 17.2, 18.6, -0.38, 14.50, 27.0 + wy * 0.50, 0.44)
 	# Elevated natural fungal root-burrow terrace shelf along East curve (floor y=16.0)
-	var d_e_shelf := _sd_organic_cavern(p, Vector2(-194.2, 241.5), 6.2, 9.2, -0.25, 16.0, 24.4, 0.40)
+	var d_e_shelf := _sd_organic_cavern(p, Vector2(-194.2, 241.5), 7.0, 10.0, -0.25, 16.0, 26.8, 0.40)
 	var d_e_loop := _sd_curved_tunnel(Vector3(x, y, z + wz * 0.4), [
 		Vector3(-204.5, 14.34, 231.0),
 		Vector3(-209.5, 12.64, 220.0),
 		Vector3(-218.0, 11.32, 211.5),
 		Vector3(-228.5, 11.01, 209.5),
-	], 4.2, 6.4)
+	], 5.5, 8.4)
 	d = _smin(d, d_e_corr, 1.6)
 	d = _smin(d, d_e_nest, 1.9)
 	d = _smin(d, d_e_shelf, 1.4)
@@ -421,7 +421,7 @@ func _rat_eval_void(x: float, y: float, z: float) -> float:
 		Vector3(-249.0, 11.47, 212.5),
 		Vector3(-243.0, 10.0, 203.0),
 		Vector3(-242.5, 10.0, 201.5),
-	], 4.6, 7.0)
+	], 5.8, 9.0)
 	var d_ne_burrow := _sd_curved_tunnel(Vector3(x + wx * 0.4, y, z), [
 		Vector3(-233.5, 14.5, 233.5),
 		Vector3(-231.5, 14.5, 232.0),
@@ -429,12 +429,12 @@ func _rat_eval_void(x: float, y: float, z: float) -> float:
 		Vector3(-228.5, 11.24, 211.0),
 		Vector3(-235.0, 10.0, 203.0),
 		Vector3(-235.5, 10.0, 201.0),
-	], 4.8, 7.4)
+	], 6.0, 9.4)
 	var plateau_w := (1.0 - smoothstep(7.5, 11.5, absf(x + 240.0))) * smoothstep(190.0, 185.0, z)
 	var floor_cathedral := 10.0 + 1.45 * plateau_w
-	var d_ncath := _sd_organic_cavern(p, Vector2(-239.0, 194.0), 23.5, 16.8, 0.34, floor_cathedral, 23.8 + wy * 0.55, 0.48)
+	var d_ncath := _sd_organic_cavern(p, Vector2(-239.0, 194.0), 25.0, 18.2, 0.34, floor_cathedral, 26.6 + wy * 0.55, 0.48)
 	# Single asymmetrical NW dark seepage pool hugging outer curve (bed y=8.25, water=9.20)
-	var d_nmoat_w := _sd_organic_cavern(Vector3(x + wx * 0.28, y, z + wz * 0.28), Vector2(-257.5, 193.5), 5.2, 12.5, 0.22, 8.25, 21.5, 0.40)
+	var d_nmoat_w := _sd_organic_cavern(Vector3(x + wx * 0.28, y, z + wz * 0.28), Vector2(-257.5, 193.5), 5.8, 13.2, 0.22, 8.25, 24.0, 0.40)
 	d = _smin(d, d_nw_burrow, 1.8)
 	d = _smin(d, d_ne_burrow, 1.8)
 	d = _smin(d, d_ncath, 2.4)
@@ -472,7 +472,7 @@ func _bake_rat_warren() -> bool:
 	var cfg := {
 		"name": "rat_warren",
 		"x_min": -298.0, "x_max": -182.0,
-		"y_min": 6.5, "y_max": 33.5,
+		"y_min": 6.5, "y_max": 37.0,
 		"z_min": 172.0, "z_max": 286.0,
 		"voxel": 0.62,
 		# Baked-frame coords (world = baked + WorldLandmarks.RAT_WARREN_OFFSET)

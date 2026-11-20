@@ -59,12 +59,34 @@ vec2 rot2d(vec2 uv, float s_ang, float c_ang) {
 	return vec2(uv.x * c_ang - uv.y * s_ang, uv.x * s_ang + uv.y * c_ang);
 }
 
+vec3 sample_triplanar_fast(sampler2D tex, vec3 wp, vec3 wn, float sc) {
+	vec3 b = abs(wn);
+	b = b * b * b * b;
+	b /= max(b.x + b.y + b.z, 1e-4);
+
+	vec3 col = vec3(0.0);
+	float w_sum = 0.0;
+	if (b.x > 0.14) {
+		col += texture(tex, wp.zy * sc).rgb * b.x;
+		w_sum += b.x;
+	}
+	if (b.y > 0.14) {
+		col += texture(tex, wp.xz * sc).rgb * b.y;
+		w_sum += b.y;
+	}
+	if (b.z > 0.14) {
+		col += texture(tex, wp.xy * sc).rgb * b.z;
+		w_sum += b.z;
+	}
+	return col / max(w_sum, 1e-4);
+}
+
 // Non-repeating domain-warped dual-scale rotated triplanar sampler:
-// Axis-weight culling skips unnecessary texture fetches on dominant planes (cuts up to 66% fetches).
+// Axis-weight culling skips unnecessary texture fetches on dominant planes.
 vec3 sample_triplanar_nonrepeating(sampler2D tex, vec3 wp, vec3 wn, float sc, float mask_noise) {
 	vec3 b = abs(wn);
-	b = pow(max(b, vec3(0.0001)), vec3(3.2));
-	b /= (b.x + b.y + b.z);
+	b = b * b * b * b;
+	b /= max(b.x + b.y + b.z, 1e-4);
 
 	// Organic domain warp breaks up straight UV grid lines
 	vec3 warp = vec3(
@@ -82,21 +104,21 @@ vec3 sample_triplanar_nonrepeating(sampler2D tex, vec3 wp, vec3 wn, float sc, fl
 	vec3 col_a = vec3(0.0);
 	vec3 col_b = vec3(0.0);
 	float w_sum = 0.0;
-	if (b.x > 0.045) {
+	if (b.x > 0.14) {
 		col_a += texture(tex, p1.zy * sc).rgb * b.x;
 		if (blend_w > 0.01) {
 			col_b += texture(tex, rot2d(p2.zy * sc, s37, c37)).rgb * b.x;
 		}
 		w_sum += b.x;
 	}
-	if (b.y > 0.045) {
+	if (b.y > 0.14) {
 		col_a += texture(tex, p1.xz * sc).rgb * b.y;
 		if (blend_w > 0.01) {
 			col_b += texture(tex, rot2d(p2.xz * sc, s37, c37)).rgb * b.y;
 		}
 		w_sum += b.y;
 	}
-	if (b.z > 0.045) {
+	if (b.z > 0.14) {
 		col_a += texture(tex, p1.xy * sc).rgb * b.z;
 		if (blend_w > 0.01) {
 			col_b += texture(tex, rot2d(p2.xy * sc, s37, c37)).rgb * b.z;
@@ -109,30 +131,55 @@ vec3 sample_triplanar_nonrepeating(sampler2D tex, vec3 wp, vec3 wn, float sc, fl
 
 // Per-pixel exterior meadow coverage so curved Skylight & Entrance collars have crisp,
 // organic transitions without 0.8 m triangle sawteeth while matching terrain.gdshader at seams.
+float eval_mouth_pt(vec2 lus) {
+	float du = abs(lus.x) / 16.5;
+	float ds = abs(lus.y - 3.5) / 13.5;
+	float warp = 0.025 * sin(lus.x * 0.23 + lus.y * 0.17) + 0.015 * cos(lus.x * 0.37 - lus.y * 0.29);
+	return pow(du * du * du + ds * ds * ds, 1.0 / 3.0) + warp;
+}
+
+float eval_sky_pt(vec2 lus) {
+	float d_sky = length(lus - (skylight_local_xz + vec2(-0.8, 0.0))) / 18.0;
+	float d_exit = length(lus - vec2(-52.8, 70.2)) / 11.4;
+	return min(d_sky, d_exit);
+}
+
+float eval_ext_daylight(vec3 wp, vec2 lus) {
+	float mouth_pt = eval_mouth_pt(lus);
+	float sky_pt = eval_sky_pt(lus);
+	float d_mouth_front = (1.0 - smoothstep(-2.5, 11.5, lus.y)) * smoothstep(25.5, 28.0, wp.y);
+	float d_mouth_collar = smoothstep(0.45, 0.62, mouth_pt) * (1.0 - smoothstep(1.05, 1.35, mouth_pt)) * smoothstep(26.2, 29.0, wp.y);
+	float d_sky_collar = smoothstep(0.42, 0.62, sky_pt) * (1.0 - smoothstep(1.05, 1.35, sky_pt)) * smoothstep(48.5, 53.0, wp.y);
+	return clamp(max(d_mouth_front, max(d_mouth_collar, d_sky_collar)), 0.0, 1.0);
+}
+
 float eval_ext_meadow(vec3 wp, vec3 wn, vec2 lus, float sky_vis, float med_pat) {
 	float upness = clamp(normalize(wn).y, 0.0, 1.0);
 	float slope_grass = smoothstep(0.40, 0.52, upness);
 	float collar_slope = smoothstep(0.18, 0.42, upness);
 	float w = (med_pat - 0.5);
+	float mouth_pt = eval_mouth_pt(lus);
+	float sky_pt = eval_sky_pt(lus);
 
 	// Entrance apron (in front of mouth)
 	float ext_outside_apron = (1.0 - smoothstep(-5.8 + w * 0.7, -1.6 + w * 0.7, lus.y)) * collar_slope;
 
-	// Flanks: blend to meadow green before the 0.64 terrain cutout (|x| ~ 10.5m)
-	// so rectangular terrain quad edges never create a gray-vs-green staircase.
+	// Flanks & mouth collar: blend to meadow green before the 0.64 terrain cutout
+	// without depending on baked sky_vis (prevents dark rock patches z-fighting green terrain).
 	float flank_dist = abs(lus.x) - 7.0 - w * 1.2;
 	float outer_seam_fill = smoothstep(8.2, 10.2, abs(lus.x) + w * 0.8);
 	float flank_slope = mix(collar_slope, 1.0, outer_seam_fill);
-	float ext_flanks = smoothstep(0.0, 2.8, flank_dist) * smoothstep(0.15, 0.52, sky_vis) * flank_slope;
+	float ext_flanks = smoothstep(0.0, 2.8, flank_dist) * (1.0 - smoothstep(12.0, 18.0, lus.y)) * flank_slope;
+	float ext_mouth_seam = smoothstep(0.56, 0.64, mouth_pt) * (1.0 - smoothstep(1.10, 1.35, mouth_pt)) * smoothstep(26.2, 28.5, wp.y) * collar_slope;
 
 	// Back/brow top & mountain crest above mouth:
 	float ext_brow_cap = smoothstep(3.5, 9.5, lus.y) * smoothstep(37.5 + w * 0.7, 41.0 + w * 0.7, wp.y) * collar_slope;
 
-	// Skylight Rim
+	// Skylight Rim & Spiral Ledge exit collar
 	float d_sky = length(lus - (skylight_local_xz + vec2(-0.8, 0.0))) - w * 0.45;
-	float ext_sky_rim = smoothstep(7.8, 9.4, d_sky) * smoothstep(51.5, 54.6, wp.y) * slope_grass;
+	float ext_sky_rim = max(smoothstep(6.8, 9.2, d_sky), smoothstep(0.56, 0.64, sky_pt)) * smoothstep(50.5, 54.4, wp.y) * slope_grass;
 
-	return clamp(max(max(ext_outside_apron, ext_flanks), max(ext_brow_cap, ext_sky_rim)), 0.0, 1.0);
+	return clamp(max(max(ext_outside_apron, max(ext_flanks, ext_mouth_seam)), max(ext_brow_cap, ext_sky_rim)), 0.0, 1.0);
 }
 
 void vertex() {
@@ -143,17 +190,33 @@ void vertex() {
 	vec2 d_xz = v_world_pos.xz - cave_origin_xz;
 	v_local_us = vec2(dot(d_xz, cave_right_xz), dot(d_xz, cave_fwd_xz));
 
+	// Depress outer overlap skirt (patch_t > 0.67) cleanly beneath uncut TerrainChunks
+	// so CaveShell and Terrain never coplanarly z-fight or cast shadow acne at the entrance/skylight.
+	float m_pt = eval_mouth_pt(v_local_us);
+	float s_pt = eval_sky_pt(v_local_us);
+	float p_t = min(m_pt, s_pt);
+	float in_collar_zone = max(
+		(1.0 - smoothstep(1.05, 1.30, m_pt)) * smoothstep(25.5, 27.0, v_world_pos.y),
+		(1.0 - smoothstep(1.05, 1.30, s_pt)) * smoothstep(48.0, 52.0, v_world_pos.y)
+	);
+	if (p_t > 0.67 && in_collar_zone > 0.001 && v_world_nrm.y > 0.12) {
+		float skirt_tuck = smoothstep(0.67, 0.77, p_t) * smoothstep(0.12, 0.45, v_world_nrm.y) * in_collar_zone * 1.15;
+		VERTEX.y -= skirt_tuck;
+		v_world_pos.y -= skirt_tuck;
+	}
+
 	v_macro_pat = fbm2(v_world_pos.xz * 0.025);
 	v_med_pat = fbm2(v_world_pos.xz * 0.25 + vec2(5.2, -8.7));
 	v_flow_streak = fbm2(v_local_us * 0.14 + vec2(3.7, -5.1));
 	v_geo_mask = fbm2(v_world_pos.xz * 0.09 + vec2(v_world_pos.y * 0.17, -v_world_pos.y * 0.13));
 	v_patch_mask = fbm2(v_local_us * 0.065 + vec2(13.4, -8.2));
-	v_ext_hint = (v_local_us.y < 10.0 || v_world_pos.y > 35.0 || v_baked.g > 0.25) ? 1.0 : 0.0;
+	v_ext_hint = (v_local_us.y < 14.0 || v_world_pos.y > 35.0 || v_baked.g > 0.25) ? 1.0 : 0.0;
 }
 
 void fragment() {
-	float ao = clamp(v_baked.r, 0.08, 1.0);
-	float sky_vis = clamp(v_baked.g, 0.0, 1.0);
+	float ext_day = (v_ext_hint > 0.001) ? eval_ext_daylight(v_world_pos, v_local_us) : 0.0;
+	float ao = clamp(max(v_baked.r, ext_day * 0.86), 0.08, 1.0);
+	float sky_vis = clamp(max(v_baked.g, ext_day), 0.0, 1.0);
 	float wet = clamp(v_baked.b, 0.0, 1.0);
 	float curv = clamp(v_baked.a, 0.0, 1.0);
 
@@ -187,17 +250,17 @@ void fragment() {
 
 			vec3 rock_sample = sample_triplanar_nonrepeating(rock_texture, v_world_pos, wn, triplanar_scale, geo_mask);
 			vec3 micro_sample = rock_sample;
-			if (cam_dist < 58.0) {
-				vec3 ms_raw = sample_triplanar_nonrepeating(rock_texture, v_world_pos * 2.45 + vec3(4.3, -2.1, 7.8), wn, triplanar_scale, 1.0 - geo_mask);
-				micro_sample = mix(ms_raw, rock_sample, smoothstep(38.0, 58.0, cam_dist));
+			if (cam_dist < 36.0) {
+				vec3 ms_raw = sample_triplanar_fast(rock_texture, v_world_pos * 2.45 + vec3(4.3, -2.1, 7.8), wn, triplanar_scale);
+				micro_sample = mix(ms_raw, rock_sample, smoothstep(22.0, 36.0, cam_dist));
 			}
 
 			float floor_blend = smoothstep(0.58, 0.84, upness);
 			vec3 floor_sample = rock_sample;
 			// Mask floor gravel by low-frequency sediment patches so it never tiles across the floor
 			float sediment_mask = smoothstep(0.32, 0.72, patch_mask);
-			if (floor_blend > 0.02 && sediment_mask > 0.005 && cam_dist < 62.0) {
-				floor_sample = sample_triplanar_nonrepeating(floor_texture, v_world_pos, wn, triplanar_scale * 1.15, patch_mask);
+			if (floor_blend > 0.06 && sediment_mask > 0.04 && cam_dist < 46.0) {
+				floor_sample = sample_triplanar_fast(floor_texture, v_world_pos, wn, triplanar_scale * 1.15);
 			}
 
 			// Sedimentary karst strata bands + diagonal fracture lines break up vertical walls & ceilings
@@ -281,7 +344,8 @@ void fragment() {
 				cave_emission += vec3(0.06, 0.34, 0.48) * pit_glow * (0.58 + 0.42 * smoothstep(0.30, 0.72, curv));
 			}
 
-			cave_albedo = col * ridge_shade * mix(0.52, 1.0, ao);
+			float ridge_fade = mix(ridge_shade, 1.0, smoothstep(0.05, 0.55, ext_meadow));
+			cave_albedo = mix(col, mix(col, vec3(dot(col, vec3(0.3333))), 0.15), ext_meadow * 0.3) * ridge_fade * mix(mix(0.52, 1.0, ao), 1.0, smoothstep(0.05, 0.55, ext_meadow));
 		}
 
 		vec3 final_albedo = cave_albedo;
@@ -303,13 +367,13 @@ void fragment() {
 			final_ao_affect = mix(0.68, 0.0, ext_meadow);
 			final_rough = mix(final_rough, 0.92, ext_meadow);
 			final_spec = mix(final_spec, 0.5, ext_meadow);
-			vec3 view_hill_up = normalize((VIEW_MATRIX * vec4(-0.18, 0.96, 0.21, 0.0)).xyz);
-			NORMAL = normalize(mix(NORMAL, view_hill_up, ext_meadow * 0.82));
+			vec3 view_up = normalize((VIEW_MATRIX * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+			NORMAL = normalize(mix(NORMAL, view_up, ext_meadow * 0.55));
 		}
 
 		// Mikkelsen screen-space derivative 3D normal perturbation:
 		// Gives cave walls, ceilings, and floors real 3D rock facets and crevice relief under cave lights
-		float bump_mask = (1.0 - ext_meadow) * normal_bump_strength;
+		float bump_mask = (1.0 - smoothstep(0.0, 0.45, ext_meadow)) * normal_bump_strength;
 		if (bump_mask > 0.01) {
 			vec3 dpdx = dFdx(VERTEX);
 			vec3 dpdy = dFdy(VERTEX);
@@ -335,8 +399,12 @@ void fragment() {
 }
 
 void light() {
-	float sky_vis_l = clamp(v_baked.g, 0.0, 1.0);
-	float ext_m = (v_ext_hint > 0.001) ? eval_ext_meadow(v_world_pos, v_world_nrm, v_local_us, sky_vis_l, v_med_pat) : 0.0;
+	float ext_day_l = (v_ext_hint > 0.001) ? eval_ext_daylight(v_world_pos, v_local_us) : 0.0;
+	float sky_vis_l = clamp(max(v_baked.g, ext_day_l), 0.0, 1.0);
+	float ext_m = 0.0;
+	if (LIGHT_IS_DIRECTIONAL) {
+		ext_m = (v_ext_hint > 0.001) ? eval_ext_meadow(v_world_pos, v_world_nrm, v_local_us, sky_vis_l, v_med_pat) : 0.0;
+	}
 
 	// Block outdoor directional sunlight from leaking through solid underground mountain rock
 	// (even when directional shadows are disabled on the Low quality preset!)

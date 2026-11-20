@@ -6,6 +6,8 @@
 [ext_resource type="Shader" path="res://terrain/water.gdshader" id="4_water_shader"]
 [ext_resource type="Texture2D" path="res://assets/nature/Grass.png" id="5_grass_texture"]
 [ext_resource type="PackedScene" path="res://terrain/cave/cave.tscn" id="6_cave_scene"]
+[ext_resource type="PackedScene" path="res://regions/skeleton_crypt/skeleton_crypt_region.tscn" id="7_skel_scene"]
+[ext_resource type="PackedScene" path="res://regions/rat_warren/rat_warren_region.tscn" id="8_rat_scene"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_terrain"]
 render_priority = 0
@@ -122,10 +124,6 @@ cast_shadow = 1
 visibility_range_end = 550.0
 visibility_range_end_margin = 60.0
 
-[node name="TrunkColliders" type="StaticBody3D" parent="Trees"]
-collision_layer = 4
-collision_mask = 0
-
 [node name="Rocks" type="Node3D" parent="."]
 
 [node name="Rock1" type="MultiMeshInstance3D" parent="Rocks"]
@@ -137,10 +135,6 @@ visibility_range_end_margin = 50.0
 cast_shadow = 1
 visibility_range_end = 450.0
 visibility_range_end_margin = 50.0
-
-[node name="RockColliders" type="StaticBody3D" parent="Rocks"]
-collision_layer = 4
-collision_mask = 0
 
 [node name="Vegetation" type="Node3D" parent="."]
 
@@ -160,6 +154,10 @@ visibility_range_end = 220.0
 visibility_range_end_margin = 35.0
 
 [node name="Cave" parent="." instance=ExtResource("6_cave_scene")]
+
+[node name="SkeletonCryptRegion" parent="." instance=ExtResource("7_skel_scene")]
+
+[node name="RatWarrenRegion" parent="." instance=ExtResource("8_rat_scene")]
 
 
 

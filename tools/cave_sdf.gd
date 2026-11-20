@@ -221,9 +221,13 @@ static func eval_karst_hill_height(u: float, s: float, base_h: float) -> float:
 		var target_brow := clampf(41.8 + asym, 40.5, 43.2)
 		h = lerpf(h, maxf(h, target_brow), brow_w)
 
-	# 4. Gentle karst basin right at the Skylight Rim (-62, 68) so ledge route exits flush at y ~ 56 m
+	# 4. Gentle karst basin right at the Skylight Rim (-62, 68) -> (-50.5, 69.5) so ledge route exits flush at y ~ 56 m
 	var sky_c_hill: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var d_sky: float = Vector2(u - sky_c_hill.x, s - sky_c_hill.z).length()
+	var seg_a := Vector2(sky_c_hill.x, sky_c_hill.z)
+	var seg_b := Vector2(-50.5, 69.5)
+	var ab := seg_b - seg_a
+	var t_ab := clampf(Vector2(u - seg_a.x, s - seg_a.y).dot(ab) / maxf(ab.length_squared(), 1e-5), 0.0, 1.0)
+	var d_sky: float = Vector2(u, s).distance_to(seg_a + ab * t_ab)
 	if d_sky < 18.0:
 		var sky_w := 1.0 - smoothstep(6.0, 18.0, d_sky)
 		h = lerpf(h, CaveLayout.MOUNTAIN_SURFACE_OVER_HALL - 0.5, sky_w)
@@ -240,8 +244,8 @@ static func is_quad_in_cave_cutout(v00: Vector3, v10: Vector3, v01: Vector3, v11
 	if cl.x < -235.0 or cl.x > 85.0 or cl.z < -45.0 or cl.z > 245.0:
 		return false
 
-	# A. Skylight Rim + Spiral Ledge exit ramp cutout (matched to eval_sky_patch_t < 0.60)
-	if eval_sky_patch_t(cl.x, cl.z) < 0.60:
+	# A. Skylight Rim + Spiral Ledge exit ramp cutout (matched to eval_sky_patch_t < 0.64)
+	if eval_sky_patch_t(cl.x, cl.z) < 0.64:
 		return true
 
 	# B. Entrance Mouth Arch cutout: matched to mouth surface patch boundary (0.64)
@@ -277,7 +281,7 @@ static func is_in_overworld_scatter_exclusion(wx: float, wz: float, is_grass: bo
 
 	# Keep random trees/grass/vegetation out of the Skylight opening, rock collar, and Spiral Ledge exit ramp
 	if is_grass:
-		if eval_sky_patch_t(p.x, p.z) < 0.60:
+		if eval_sky_patch_t(p.x, p.z) < 0.68:
 			return true
 	else:
 		var sky_c_ex: Vector3 = CaveLayout.SKYLIGHT["c"]
@@ -678,7 +682,7 @@ static func eval_mouth_patch_t(u: float, s: float) -> float:
 static func eval_sky_patch_t(u: float, s: float) -> float:
 	var sky_c_pt: Vector3 = CaveLayout.SKYLIGHT["c"]
 	var d_sky := Vector2(u - (sky_c_pt.x - 0.8), s - sky_c_pt.z).length() / 18.0
-	var d_exit := Vector2(u - (-53.0), s - 70.0).length() / 10.5
+	var d_exit := Vector2(u - (-52.8), s - 70.2).length() / 11.4
 	return minf(d_sky, d_exit)
 
 
@@ -693,18 +697,29 @@ func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 	var d_cave := eval_cave_void_smooth(u, y, s)
 
 	# Continuous union of subterranean cave air and open sky air at Entrance & Skylight surface patches.
-	# Holds a slight +0.04m collar across the cutout edge (0.56..0.70) so Terrain never hovers above CaveShell,
-	# then tucks cleanly beneath Terrain across 0.70..0.94.
-	var patch_t := eval_surface_patch_t(u, s)
-	var rim_collar := 0.04 * smoothstep(0.52, 0.60, patch_t) * (1.0 - smoothstep(0.68, 0.76, patch_t))
-	var skirt_drop := smoothstep(0.70, 0.94, patch_t) * 3.80 - rim_collar
+	# Holds a slight +0.06m collar across the cutout edge (0.50..0.76) so tucked Terrain never hovers above CaveShell,
+	# then tucks cleanly beneath unbroken Terrain across 0.76..0.98.
+	var sky_pt := eval_sky_patch_t(u, s)
+	var mouth_pt := eval_mouth_patch_t(u, s)
+	var patch_t := minf(mouth_pt, sky_pt)
+	var rim_collar := 0.06 * smoothstep(0.50, 0.58, patch_t) * (1.0 - smoothstep(0.74, 0.84, patch_t))
+	var skirt_drop := smoothstep(0.76, 0.98, patch_t) * 3.80 - rim_collar
 	var d_sky_air := (karst_h - skirt_drop) - y # < 0 above ground (air), > 0 underground (rock)
+
+	# Shield the Skylight & Spiral Ledge rim overburden (sky_pt >= 0.56) so d_ledge_air / Collapse Hall dome
+	# never undermines uncut overworld Terrain (sky_pt >= 0.64) — sealing Terrain-to-CaveShell with solid rock.
+	if sky_pt >= 0.56 and sky_pt < 1.35 and y > 44.0:
+		var seal_w := smoothstep(0.56, 0.66, sky_pt) * (1.0 - smoothstep(1.10, 1.35, sky_pt))
+		var thick := lerpf(0.35, 2.6, smoothstep(0.56, 0.72, sky_pt))
+		var seal_y := (karst_h - skirt_drop) - thick
+		var d_sealed := smax(d_cave, y - seal_y, 0.55)
+		d_cave = lerpf(d_cave, d_sealed, seal_w)
+
 	# Keep smin k tight around the entire Entrance Rim, mouth floor, and Skylight Rim so rims stay flush with terrain
 	var mouth_floor_w := (1.0 - smoothstep(-1.5, 2.5, s)) * (1.0 - smoothstep(28.0, 30.5, y))
-	var mouth_pt := eval_mouth_patch_t(u, s)
-	var mouth_rim_w := smoothstep(0.45, 0.58, mouth_pt) * (1.0 - smoothstep(0.72, 0.88, mouth_pt))
-	var sky_rim_w := smoothstep(44.0, 51.0, y) * (1.0 - smoothstep(0.42, 0.72, eval_sky_patch_t(u, s)))
-	var k_union := lerpf(2.0, 0.18, maxf(maxf(mouth_floor_w, mouth_rim_w), sky_rim_w * 0.92))
+	var mouth_rim_w := smoothstep(0.45, 0.58, mouth_pt) * (1.0 - smoothstep(0.78, 0.94, mouth_pt))
+	var sky_rim_w := smoothstep(44.0, 51.0, y) * (1.0 - smoothstep(0.78, 0.94, sky_pt))
+	var k_union := lerpf(2.0, 0.18, maxf(maxf(mouth_floor_w, mouth_rim_w), sky_rim_w * 0.94))
 	var d := smin(d_cave, d_sky_air, k_union)
 
 	# Skip expensive 3D noise far from the zero-isosurface
@@ -731,7 +746,8 @@ func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 	var floor_atten := lerpf(0.88, 0.42, sub_lake)
 	# Calm high vaulted lake dome noise (> 10.0m) to avoid wasting thousands of hidden ceiling triangles
 	var lake_ceil_calm := 1.0 - 0.85 * smoothstep(10.0, 13.8, y) * smoothstep(128.0, 138.0, s) * smoothstep(-62.0, -52.0, u)
-	var wall_ceil_weight := (1.0 - floor_atten * smoothstep(0.30, 0.80, up_grad)) * (1.0 - smoothstep(0.50, 0.64, patch_t) * smoothstep(0.0, 0.55, up_grad)) * lake_ceil_calm
+	var rim_calm := 1.0 - smoothstep(0.48, 0.62, patch_t) * (1.0 - smoothstep(0.80, 0.94, patch_t)) * smoothstep(0.0, 0.30, up_grad)
+	var wall_ceil_weight := (1.0 - floor_atten * smoothstep(0.30, 0.80, up_grad)) * rim_calm * lake_ceil_calm
 
 	# 1. Broad water-worn phreatic scallops & dissolution pockets
 	var n_mac := _noise_macro.get_noise_3d(u * 1.1, y * 1.35, s * 1.1)
@@ -740,6 +756,6 @@ func eval_sdf_full(u: float, y: float, s: float, karst_h: float) -> float:
 	var strata := sin(y * 0.85 + n_mac * 2.2 + u * 0.10 - s * 0.08) * (0.12 + 0.12 * sub_lake)
 
 	var disp := (n_mac * 1.15 + (n_frac - 0.5) * (0.55 + 0.30 * sub_lake) + strata) * wall_ceil_weight * crawl_calm * ledge_calm
-	if up_grad > 0.15 and patch_t > 0.50 and sub_lake < 0.05:
-		disp = minf(disp, -0.02 * smoothstep(0.52, 0.68, patch_t))
+	if up_grad > 0.15 and (mouth_pt < 0.90 or (sky_pt < 0.90 and y > 44.0)) and patch_t > 0.50 and sub_lake < 0.05:
+		disp = clampf(disp, -0.05, -0.01 * smoothstep(0.52, 0.72, patch_t))
 	return d + disp

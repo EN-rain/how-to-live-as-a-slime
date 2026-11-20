@@ -3,6 +3,11 @@ extends Node3D
 
 const WorldLandmarks = preload("res://scripts/world_landmarks.gd")
 const ActorArchetype = preload("res://resources/actors/actor_archetype.gd")
+const WildlifeHabitatMap = preload("res://scripts/wildlife_habitat_map.gd")
+
+@export_group("Wildlife Habitat Weight-Paint")
+## Optional RGBA weight-paint mask texture (R=Meadow Glade, G=Dense Canopy, B=Forest Ecotone, A=Wetland Shore).
+@export var wildlife_weight_mask_override: Texture2D = null
 
 @export_group("Actor Archetypes")
 @export var wolf_alpha_archetype: ActorArchetype = preload("res://resources/actors/wolf_alpha.tres")
@@ -40,11 +45,15 @@ var _dock_fwd := Vector2.UP
 var _dock_right := Vector2.RIGHT
 var _actor_shader := preload("res://shaders/actor_matte.gdshader")
 var _mat_cache: Dictionary = {}
+var _normalized_mesh_cache: Dictionary = {}
+var _model_y_bounds_cache: Dictionary = {}
 var _weapon_cache: Dictionary = {}
 var _mat_glow_eye: StandardMaterial3D
 var _spatial_grid: Dictionary = {}  # Vector2i -> Array[LivingActor]
 
 var _village_provoked_timer: float = 0.0
+var _group_provoked_timers: Dictionary = {}  # StringName pack_id -> float seconds remaining
+var _slime_bounce_cd: float = 0.0
 var _frame_counter: int = 0
 
 ## Auto-detected registry of every shipped actor model (see actor_model_library.gd).
@@ -55,6 +64,7 @@ var model_library := ActorModels.new()
 
 # Pooled projectiles (arrows & arcane bolts)
 var _projectiles: Array[Dictionary] = []
+var _active_projectile_count: int = 0
 var _hp_bar_mm: MultiMeshInstance3D = null
 var _hp_bar_im_quad: QuadMesh = null
 
@@ -196,7 +206,7 @@ func _spawn_all_populations() -> void:
 			"name": "Crossbow Guard" if is_ranged else "Town Guard",
 			"category": "npc",
 			"glb": glb,
-			"scale": 0.84,
+			"scale": 1.30,
 			"faction": LivingActor.Faction.VILLAGE,
 			"role": LivingActor.RoleKind.GUARD,
 			"attack_kind": LivingActor.AttackKind.RANGED_BOW if is_ranged else LivingActor.AttackKind.MELEE,
@@ -205,10 +215,12 @@ func _spawn_all_populations() -> void:
 			"hp": 145.0,
 			"walk_spd": 2.9,
 			"run_spd": 5.9,
-			"range": 13.0 if is_ranged else 2.1,
+			"range": 14.0 if is_ranged else 2.5,
 			"aggro": 24.0,
 			"dmg": 18.0 if not is_ranged else 14.0,
 			"cd": 1.35 if is_ranged else 1.10,
+			"hp_h": 3.25,
+			"rad": 0.85,
 			"eq_r": "res://assets/npcs/crossbow_1handed.gltf" if is_ranged else "res://assets/npcs/sword_1handed.gltf",
 			"eq_l": "" if is_ranged else "res://assets/npcs/shield_badge.gltf",
 		})
@@ -216,20 +228,20 @@ func _spawn_all_populations() -> void:
 	# --- 2. 15 Lively Villagers (Stallkeepers, Shoppers, Inn/Smithy Folk, Fisherman) ---
 	var fallback_yaw := PI * 0.5
 	var villager_defs := [
-		{"name": "Market Merchant", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[0]["pos"] if stalls.size() > 0 else vc + Vector2(-10.4, -8.6), "yaw": stalls[0]["yaw"] if stalls.size() > 0 else fallback_yaw, "work": "Cheer", "start_work": true},
-		{"name": "Produce Vendor", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[1]["pos"] if stalls.size() > 1 else vc + Vector2(-10.4, -4.6), "yaw": stalls[1]["yaw"] if stalls.size() > 1 else fallback_yaw, "work": "Interact", "start_work": true},
-		{"name": "Tea & Herb Seller", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[2]["pos"] if stalls.size() > 2 else vc + Vector2(-10.4, 4.6), "yaw": stalls[2]["yaw"] if stalls.size() > 2 else fallback_yaw, "work": "Use_Item", "start_work": true},
-		{"name": "Bakery Keeper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[3]["pos"] if stalls.size() > 3 else vc + Vector2(10.4, -4.6), "yaw": stalls[3]["yaw"] if stalls.size() > 3 else -fallback_yaw, "work": "Cheer", "start_work": true},
-		{"name": "Spice & Barrel Trader", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[4]["pos"] if stalls.size() > 4 else vc + Vector2(10.4, 4.6), "yaw": stalls[4]["yaw"] if stalls.size() > 4 else -fallback_yaw, "work": "Interact", "start_work": true},
-		{"name": "Market Shopper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[0]["pos"] if socials.size() > 0 else vc + Vector2(-6.3, -8.6), "yaw": socials[0]["yaw"] if socials.size() > 0 else -fallback_yaw, "work": "Interact", "start_work": true},
-		{"name": "Town Browser", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[3]["pos"] if socials.size() > 3 else vc + Vector2(6.3, -8.6), "yaw": socials[3]["yaw"] if socials.size() > 3 else fallback_yaw, "work": "Use_Item", "start_work": true},
-		{"name": "Well Gossip", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[6]["pos"] if socials.size() > 6 else vc + Vector2(-2.8, 2.8), "yaw": socials[6]["yaw"] if socials.size() > 6 else -0.8, "work": "Cheer", "start_work": true},
-		{"name": "Villager Guest", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[7]["pos"] if socials.size() > 7 else vc + Vector2(2.8, -2.8), "yaw": socials[7]["yaw"] if socials.size() > 7 else 2.3, "work": "Interact", "start_work": true},
-		{"name": "Innkeeper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": vc + Vector2(-15.2, -7.8), "yaw": fallback_yaw, "work": "Cheer", "start_work": true},
-		{"name": "Inn Patron", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[9]["pos"] if socials.size() > 9 else vc + Vector2(-13.1, -9.8), "yaw": socials[9]["yaw"] if socials.size() > 9 else -fallback_yaw, "work": "Sit_Chair_Idle", "start_work": true},
-		{"name": "Village Blacksmith", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/axe_1handed.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": vc + Vector2(6.9, 14.5), "yaw": -fallback_yaw, "work": "Interact", "start_work": true},
-		{"name": "Town Apothecary", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/staff.gltf", "eq_l": "res://assets/npcs/spellbook_open.gltf", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": socials[4]["pos"] if socials.size() > 4 else vc + Vector2(6.3, -4.6), "yaw": socials[4]["yaw"] if socials.size() > 4 else fallback_yaw, "work": "Use_Item", "start_work": true},
-		{"name": "Court Scholar", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/spellbook_open.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": socials[12]["pos"] if socials.size() > 12 else vc + Vector2(-5.2, -13.8), "yaw": socials[12]["yaw"] if socials.size() > 12 else 0.2, "work": "Use_Item", "start_work": true},
+		{"name": "Market Merchant", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[0]["pos"] if stalls.size() > 0 else vc + Vector2(-10.4, -8.6) * 1.4, "yaw": stalls[0]["yaw"] if stalls.size() > 0 else fallback_yaw, "work": "Cheer", "start_work": true},
+		{"name": "Produce Vendor", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[1]["pos"] if stalls.size() > 1 else vc + Vector2(-10.4, -4.6) * 1.4, "yaw": stalls[1]["yaw"] if stalls.size() > 1 else fallback_yaw, "work": "Interact", "start_work": true},
+		{"name": "Tea & Herb Seller", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[2]["pos"] if stalls.size() > 2 else vc + Vector2(-10.4, 4.6) * 1.4, "yaw": stalls[2]["yaw"] if stalls.size() > 2 else fallback_yaw, "work": "Use_Item", "start_work": true},
+		{"name": "Bakery Keeper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[3]["pos"] if stalls.size() > 3 else vc + Vector2(10.4, -4.6) * 1.4, "yaw": stalls[3]["yaw"] if stalls.size() > 3 else -fallback_yaw, "work": "Cheer", "start_work": true},
+		{"name": "Spice & Barrel Trader", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": stalls[4]["pos"] if stalls.size() > 4 else vc + Vector2(10.4, 4.6) * 1.4, "yaw": stalls[4]["yaw"] if stalls.size() > 4 else -fallback_yaw, "work": "Interact", "start_work": true},
+		{"name": "Market Shopper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[0]["pos"] if socials.size() > 0 else vc + Vector2(-6.3, -8.6) * 1.4, "yaw": socials[0]["yaw"] if socials.size() > 0 else -fallback_yaw, "work": "Interact", "start_work": true},
+		{"name": "Town Browser", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[3]["pos"] if socials.size() > 3 else vc + Vector2(6.3, -8.6) * 1.4, "yaw": socials[3]["yaw"] if socials.size() > 3 else fallback_yaw, "work": "Use_Item", "start_work": true},
+		{"name": "Well Gossip", "glb": "res://assets/npcs/Rogue_Hooded.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[6]["pos"] if socials.size() > 6 else vc + Vector2(-2.8, 2.8) * 1.4, "yaw": socials[6]["yaw"] if socials.size() > 6 else -0.8, "work": "Cheer", "start_work": true},
+		{"name": "Villager Guest", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[7]["pos"] if socials.size() > 7 else vc + Vector2(2.8, -2.8) * 1.4, "yaw": socials[7]["yaw"] if socials.size() > 7 else 2.3, "work": "Interact", "start_work": true},
+		{"name": "Innkeeper", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.MERCHANT, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": vc + Vector2(-15.2, -7.8) * 1.4, "yaw": fallback_yaw, "work": "Cheer", "start_work": true},
+		{"name": "Inn Patron", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/mug_full.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": socials[9]["pos"] if socials.size() > 9 else vc + Vector2(-13.1, -9.8) * 1.4, "yaw": socials[9]["yaw"] if socials.size() > 9 else -fallback_yaw, "work": "Sit_Chair_Idle", "start_work": true},
+		{"name": "Village Blacksmith", "glb": "res://assets/npcs/Barbarian.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/axe_1handed.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": vc + Vector2(6.9, 14.5) * 1.4, "yaw": -fallback_yaw, "work": "Interact", "start_work": true},
+		{"name": "Town Apothecary", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/staff.gltf", "eq_l": "res://assets/npcs/spellbook_open.gltf", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": socials[4]["pos"] if socials.size() > 4 else vc + Vector2(6.3, -4.6) * 1.4, "yaw": socials[4]["yaw"] if socials.size() > 4 else fallback_yaw, "work": "Use_Item", "start_work": true},
+		{"name": "Court Scholar", "glb": "res://assets/npcs/Mage.glb", "role": LivingActor.RoleKind.ARTISAN, "eq_r": "res://assets/npcs/spellbook_open.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": socials[12]["pos"] if socials.size() > 12 else vc + Vector2(-5.2, -13.8) * 1.4, "yaw": socials[12]["yaw"] if socials.size() > 12 else 0.2, "work": "Use_Item", "start_work": true},
 		{"name": "Harbor Fisherman", "glb": "res://assets/npcs/Rogue.glb", "role": LivingActor.RoleKind.FISHERMAN, "eq_r": "", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": fisher_route[fisher_route.size() - 1] if not fisher_route.is_empty() else vc + Vector2(80, 120), "patrol": fisher_route},
 	]
 	for vd in villager_defs:
@@ -237,7 +249,7 @@ func _spawn_all_populations() -> void:
 			"name": vd["name"],
 			"category": "npc",
 			"glb": vd["glb"],
-			"scale": 0.84,
+			"scale": 1.30,
 			"faction": LivingActor.Faction.VILLAGE,
 			"role": vd["role"],
 			"attack_kind": vd["kind"],
@@ -246,10 +258,12 @@ func _spawn_all_populations() -> void:
 			"hp": 95.0,
 			"walk_spd": 2.45,
 			"run_spd": 4.9,
-			"range": 11.0 if vd["kind"] == LivingActor.AttackKind.RANGED_SPELL else 1.85,
+			"range": 12.0 if vd["kind"] == LivingActor.AttackKind.RANGED_SPELL else 2.35,
 			"aggro": 15.0,
 			"dmg": 12.0,
 			"cd": 1.35,
+			"hp_h": 3.25,
+			"rad": 0.85,
 			"eq_r": vd["eq_r"],
 			"eq_l": vd["eq_l"],
 			"work": vd.get("work", "Interact"),
@@ -261,13 +275,13 @@ func _spawn_all_populations() -> void:
 
 	# --- 3. 14 Animals (Livestock in Village Paddocks, Plaza Dogs & Wild Deer/Stags/Foxes in Meadows) ---
 	var livestock := [
-		{"name": "Village Cow", "glb": "res://assets/animals/Cow.glb", "scale": 0.36, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[0] if paddocks.size() > 0 else vc + Vector2(-44, 68)},
-		{"name": "Spotted Cow", "glb": "res://assets/animals/Cow.glb", "scale": 0.35, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[1] if paddocks.size() > 1 else vc + Vector2(44, 68)},
-		{"name": "Chestnut Horse", "glb": "res://assets/animals/Horse.glb", "scale": 0.43, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[2] if paddocks.size() > 2 else vc + Vector2(-78, -28)},
-		{"name": "White Horse", "glb": "res://assets/animals/Horse_White.glb", "scale": 0.43, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[3] if paddocks.size() > 3 else vc + Vector2(78, -28)},
-		{"name": "Plaza Pup", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.27, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(-2.6, 5.6)},
-		{"name": "Inn Hound", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.28, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(-12.6, -4.0)},
-		{"name": "Gatehouse Hound", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.28, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(3.5, 48.0)},
+		{"name": "Village Cow", "glb": "res://assets/animals/Cow.glb", "scale": 0.64, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[0] if paddocks.size() > 0 else vc + Vector2(-44, 68) * 1.4, "h": 2.6, "rad": 1.05},
+		{"name": "Spotted Cow", "glb": "res://assets/animals/Cow.glb", "scale": 0.62, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[1] if paddocks.size() > 1 else vc + Vector2(44, 68) * 1.4, "h": 2.55, "rad": 1.05},
+		{"name": "Chestnut Horse", "glb": "res://assets/animals/Horse.glb", "scale": 0.70, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[2] if paddocks.size() > 2 else vc + Vector2(-78, -28) * 1.4, "h": 3.0, "rad": 1.05},
+		{"name": "White Horse", "glb": "res://assets/animals/Horse_White.glb", "scale": 0.70, "role": LivingActor.RoleKind.ANIMAL, "pos": paddocks[3] if paddocks.size() > 3 else vc + Vector2(78, -28) * 1.4, "h": 3.0, "rad": 1.05},
+		{"name": "Plaza Pup", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.46, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(-2.6, 5.6) * 1.4, "h": 1.75, "rad": 0.75},
+		{"name": "Inn Hound", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.48, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(-12.6, -4.0) * 1.4, "h": 1.80, "rad": 0.75},
+		{"name": "Gatehouse Hound", "glb": "res://assets/animals/ShibaInu.glb", "scale": 0.48, "role": LivingActor.RoleKind.DOG, "pos": vc + Vector2(3.5, 48.0) * 1.4, "h": 1.80, "rad": 0.75},
 	]
 	for a in livestock:
 		var is_dog: bool = a["role"] == LivingActor.RoleKind.DOG
@@ -283,91 +297,97 @@ func _spawn_all_populations() -> void:
 			"hp": 80.0 if is_dog else 65.0,
 			"walk_spd": 2.2,
 			"run_spd": 6.4,
-			"range": 1.6,
+			"range": 2.1,
 			"aggro": 15.0 if is_dog else 0.0,
 			"dmg": 10.0,
 			"cd": 1.0,
-			"hp_h": 1.5,
-			"rad": 0.65,
+			"hp_h": a.get("h", 2.2),
+			"rad": a.get("rad", 0.90),
 		})
 
-	var wild_specs := [
-		{"name": "Meadow Stag", "glb": "res://assets/animals/Stag.glb", "scale": 0.40, "pos": Vector2(420.0, 2060.0), "h": 2.1},
-		{"name": "Meadow Doe", "glb": "res://assets/animals/Deer.glb", "scale": 0.42, "pos": Vector2(436.0, 2048.0), "h": 1.8},
-		{"name": "Meadow Doe", "glb": "res://assets/animals/Deer.glb", "scale": 0.41, "pos": Vector2(-58.0, 62.0), "h": 1.8},
-		{"name": "Hillside Stag", "glb": "res://assets/animals/Stag.glb", "scale": 0.40, "pos": Vector2(180.0, 2120.0), "h": 2.1},
-		{"name": "Red Fox", "glb": "res://assets/animals/Fox.glb", "scale": 0.30, "pos": Vector2(84.0, -52.0), "h": 1.0},
-		{"name": "Coastline Fox", "glb": "res://assets/animals/Fox.glb", "scale": 0.30, "pos": Vector2(695.0, 2295.0), "h": 1.0},
-		{"name": "Forest Doe", "glb": "res://assets/animals/Deer.glb", "scale": 0.42, "pos": Vector2(725.0, 2085.0), "h": 1.8},
-	]
+	# --- 3b. Weight-Painted Ecological Wildlife (Hybrid Quaternius CC0 + Poly Pizza Small Animals & Forest Herds) ---
+	var dock_shore_xz := _dock_shore_xy if _has_dock else Vector2(656.6, 2448.0)
+	if not _has_dock and _village_root != null and _village_root.has_meta("dock_shore_xy"):
+		var dv: Variant = _village_root.get_meta("dock_shore_xy")
+		if dv is Vector2:
+			dock_shore_xz = dv as Vector2
+	var habitat_map := WildlifeHabitatMap.new()
+	habitat_map.build_from_terrain(_terrain, vc, dock_shore_xz, wildlife_weight_mask_override)
+	var wild_specs: Array[Dictionary] = habitat_map.generate_wildlife_spawns()
 	for wa in wild_specs:
-		_spawn_actor({
+		var w_cfg := {
 			"name": wa["name"],
 			"category": "animal",
 			"glb": wa["glb"],
-			"scale": wa["scale"],
+			"scale": float(wa.get("scale", 1.0)),
 			"faction": LivingActor.Faction.NEUTRAL,
 			"role": LivingActor.RoleKind.ANIMAL,
 			"attack_kind": LivingActor.AttackKind.MELEE,
 			"pos_xz": wa["pos"],
-			"hp": 55.0,
-			"walk_spd": 2.5,
-			"run_spd": 7.6,
-			"range": 1.5,
+			"tc": wa.get("tc", wa["pos"]),
+			"tr": float(wa.get("tr", 38.0)),
+			"hp": float(wa.get("hp", 55.0)),
+			"walk_spd": float(wa.get("walk_spd", 2.6)),
+			"run_spd": float(wa.get("run_spd", 7.2)),
+			"range": 1.6,
 			"aggro": 0.0,
 			"dmg": 0.0,
 			"cd": 1.5,
-			"hp_h": wa["h"],
-			"rad": 0.60,
-		})
+			"hp_h": float(wa.get("hp_h", wa.get("h", 1.4))),
+			"rad": float(wa.get("rad", 0.55)),
+		}
+		if wa.has("target_height"):
+			w_cfg["target_height"] = float(wa["target_height"])
+		if wa.has("gait"):
+			w_cfg["gait"] = String(wa["gait"])
+		_spawn_actor(w_cfg)
 
 	# --- 4. Beast Territories (Wolf Pack Crag, Spider Silk Forest, Underground Rat Warren) ---
+	var rw_shift := WorldLandmarks.RAT_WARREN_MOUTH - Vector2(-235.0, 415.0)
 	var beast_specs := [
 		# Wolf Pack Crag ((290, -240), expanded Howlcrest ridge territory, pack_id="wolf_pack")
-		{"name": "Alpha Dire Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.54, "pos": Vector2(290.0, -244.0), "tc": Vector2(290.0, -240.0), "tr": 34.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 185.0, "dmg": 20.0, "h": 1.65},
-		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.41, "pos": Vector2(278.0, -234.0), "tc": Vector2(290.0, -240.0), "tr": 42.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 1.30},
-		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.40, "pos": Vector2(302.0, -236.0), "tc": Vector2(290.0, -240.0), "tr": 42.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 1.30},
-		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.42, "pos": Vector2(292.0, -220.0), "tc": Vector2(290.0, -240.0), "tr": 46.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 1.30},
-		{"name": "Crag Ridge Stalker", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.42, "pos": Vector2(270.0, -226.0), "tc": Vector2(280.0, -230.0), "tr": 44.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 100.0, "dmg": 15.0, "h": 1.32},
-		{"name": "Howlcrest Sentinel", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.43, "pos": Vector2(312.0, -234.0), "tc": Vector2(304.0, -236.0), "tr": 44.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 100.0, "dmg": 15.0, "h": 1.32},
-		{"name": "Pine Gorge Hunter", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.40, "pos": Vector2(296.0, -210.0), "tc": Vector2(290.0, -222.0), "tr": 48.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 92.0, "dmg": 14.0, "h": 1.30},
+		{"name": "Alpha Dire Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.98, "pos": Vector2(290.0, -244.0), "tc": Vector2(290.0, -240.0), "tr": 34.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 185.0, "dmg": 20.0, "h": 2.85, "rad": 1.05},
+		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.76, "pos": Vector2(278.0, -234.0), "tc": Vector2(290.0, -240.0), "tr": 42.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 2.25, "rad": 0.90},
+		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.74, "pos": Vector2(302.0, -236.0), "tc": Vector2(290.0, -240.0), "tr": 42.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 2.20, "rad": 0.90},
+		{"name": "Timber Wolf", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.78, "pos": Vector2(292.0, -220.0), "tc": Vector2(290.0, -240.0), "tr": 46.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 95.0, "dmg": 14.0, "h": 2.30, "rad": 0.90},
+		{"name": "Crag Ridge Stalker", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.76, "pos": Vector2(270.0, -226.0), "tc": Vector2(280.0, -230.0), "tr": 44.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 100.0, "dmg": 15.0, "h": 2.25, "rad": 0.90},
+		{"name": "Howlcrest Sentinel", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.78, "pos": Vector2(312.0, -234.0), "tc": Vector2(304.0, -236.0), "tr": 44.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 100.0, "dmg": 15.0, "h": 2.30, "rad": 0.90},
+		{"name": "Pine Gorge Hunter", "glb": "res://assets/mobs/Wolf.glb", "scale": 0.74, "pos": Vector2(296.0, -210.0), "tc": Vector2(290.0, -222.0), "tr": 48.0, "lr": 105.0, "pack": &"wolf_pack", "hp": 92.0, "dmg": 14.0, "h": 2.20, "rad": 0.90},
 
 		# Wide Webwood Spider Domain ((-410, 480), R = 165m, pack_id="spider_brood")
 		# Central Broodmother Cathedral Nest
-		{"name": "Broodmother Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.58, "pos": Vector2(-410.0, 480.0), "tc": Vector2(-410.0, 480.0), "tr": 42.0, "lr": 152.0, "pack": &"spider_brood", "hp": 240.0, "dmg": 22.0, "h": 1.85, "rad": 0.88, "aggro": 26.0, "run_spd": 7.0},
-		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.40, "pos": Vector2(-426.0, 466.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 115.0, "dmg": 15.0, "h": 1.24, "rad": 0.72, "aggro": 24.0, "run_spd": 7.2},
-		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.38, "pos": Vector2(-394.0, 496.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 110.0, "dmg": 15.0, "h": 1.22, "rad": 0.72, "aggro": 24.0, "run_spd": 7.2},
-		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.39, "pos": Vector2(-424.0, 494.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 112.0, "dmg": 15.0, "h": 1.22, "rad": 0.72, "aggro": 24.0, "run_spd": 7.2},
-		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.37, "pos": Vector2(-396.0, 464.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 110.0, "dmg": 15.0, "h": 1.22, "rad": 0.72, "aggro": 24.0, "run_spd": 7.2},
-		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.33, "pos": Vector2(-394.0, 474.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 86.0, "dmg": 13.0, "h": 1.06, "run_spd": 7.4},
-		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.32, "pos": Vector2(-426.0, 488.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.05, "run_spd": 7.4},
-		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.31, "pos": Vector2(-412.0, 460.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.05, "run_spd": 7.4},
-		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.31, "pos": Vector2(-408.0, 502.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.05, "run_spd": 7.4},
+		{"name": "Broodmother Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 1.18, "pos": Vector2(-410.0, 480.0), "tc": Vector2(-410.0, 480.0), "tr": 42.0, "lr": 152.0, "pack": &"spider_brood", "hp": 240.0, "dmg": 22.0, "h": 3.00, "rad": 1.30, "aggro": 26.0, "run_spd": 7.0},
+		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.88, "pos": Vector2(-426.0, 466.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 115.0, "dmg": 15.0, "h": 2.25, "rad": 1.00, "aggro": 24.0, "run_spd": 7.2},
+		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.84, "pos": Vector2(-394.0, 496.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 110.0, "dmg": 15.0, "h": 2.20, "rad": 1.00, "aggro": 24.0, "run_spd": 7.2},
+		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.86, "pos": Vector2(-424.0, 494.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 112.0, "dmg": 15.0, "h": 2.20, "rad": 1.00, "aggro": 24.0, "run_spd": 7.2},
+		{"name": "Broodguard Weaver", "glb": "res://assets/mobs/Spider.glb", "scale": 0.84, "pos": Vector2(-396.0, 464.0), "tc": Vector2(-410.0, 480.0), "tr": 54.0, "lr": 152.0, "pack": &"spider_brood", "hp": 110.0, "dmg": 15.0, "h": 2.20, "rad": 1.00, "aggro": 24.0, "run_spd": 7.2},
+		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.74, "pos": Vector2(-394.0, 474.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 86.0, "dmg": 13.0, "h": 2.00, "rad": 0.92, "run_spd": 7.4},
+		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.72, "pos": Vector2(-426.0, 488.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.95, "rad": 0.92, "run_spd": 7.4},
+		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.70, "pos": Vector2(-412.0, 460.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.95, "rad": 0.92, "run_spd": 7.4},
+		{"name": "Webwood Spider", "glb": "res://assets/mobs/Spider.glb", "scale": 0.70, "pos": Vector2(-408.0, 502.0), "tc": Vector2(-410.0, 480.0), "tr": 78.0, "lr": 155.0, "pack": &"spider_brood", "hp": 84.0, "dmg": 13.0, "h": 1.95, "rad": 0.92, "run_spd": 7.4},
 
-		# Surface Gnawed Ruins Rat Swarm (subterranean_kind=0, patrolling gatehouse, courtyard, cloister & watchtower)
-		{"name": "Ruin Courtyard Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.40, "pos": Vector2(-241.0, 434.0), "tc": Vector2(-235.0, 436.0), "tr": 16.0, "lr": 32.0, "pack": &"rat_swarm", "hp": 56.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Cloister Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.41, "pos": Vector2(-252.0, 434.0), "tc": Vector2(-252.0, 434.0), "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Watchtower Ruin Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.41, "pos": Vector2(-218.0, 431.0), "tc": Vector2(-220.0, 433.0), "tr": 14.0, "lr": 28.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Gatehouse Gnawer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.39, "pos": Vector2(-231.0, 450.0), "tc": Vector2(-235.0, 448.0), "tr": 15.0, "lr": 30.0, "pack": &"rat_swarm", "hp": 54.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Barbican Sentry Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.42, "pos": Vector2(-236.0, 486.0), "tc": Vector2(-235.0, 486.0), "tr": 14.0, "lr": 28.0, "pack": &"rat_swarm", "hp": 60.0, "dmg": 12.0, "h": 0.82},
-		{"name": "Granary Ruin Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.40, "pos": Vector2(-264.0, 442.0), "tc": Vector2(-264.0, 442.0), "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Belfry Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.41, "pos": Vector2(-206.0, 441.0), "tc": Vector2(-206.0, 441.0), "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 0.80},
+		# Surface Gnawed Ruins Rat Swarm (relocated far east of Webwood via rw_shift, subterranean_kind=0)
+		{"name": "Ruin Courtyard Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.00, "pos": Vector2(-241.0, 434.0) + rw_shift, "tc": Vector2(-235.0, 436.0) + rw_shift, "tr": 16.0, "lr": 32.0, "pack": &"rat_swarm", "hp": 56.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Cloister Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.02, "pos": Vector2(-252.0, 434.0) + rw_shift, "tc": Vector2(-252.0, 434.0) + rw_shift, "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Watchtower Ruin Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.02, "pos": Vector2(-218.0, 431.0) + rw_shift, "tc": Vector2(-220.0, 433.0) + rw_shift, "tr": 14.0, "lr": 28.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Gatehouse Gnawer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.98, "pos": Vector2(-231.0, 450.0) + rw_shift, "tc": Vector2(-235.0, 448.0) + rw_shift, "tr": 15.0, "lr": 30.0, "pack": &"rat_swarm", "hp": 54.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Barbican Sentry Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.06, "pos": Vector2(-236.0, 486.0) + rw_shift, "tc": Vector2(-235.0, 486.0) + rw_shift, "tr": 14.0, "lr": 28.0, "pack": &"rat_swarm", "hp": 60.0, "dmg": 12.0, "h": 1.60, "rad": 0.80},
+		{"name": "Granary Ruin Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.00, "pos": Vector2(-264.0, 442.0) + rw_shift, "tc": Vector2(-264.0, 442.0) + rw_shift, "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Belfry Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.02, "pos": Vector2(-206.0, 441.0) + rw_shift, "tc": Vector2(-206.0, 441.0) + rw_shift, "tr": 12.0, "lr": 26.0, "pack": &"rat_swarm", "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
 
-		# Expanded Underground Rat Warren Under-Empire (deepwoods east of Webwood, subterranean_kind=2, pack_id="rat_swarm")
-		{"name": "Plague Rat King", "glb": "res://assets/mobs/Rat.glb", "scale": 0.68, "pos": Vector2(-235.0, 320.0), "tc": Vector2(-235.0, 323.0), "tr": 15.0, "lr": 26.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0), "bmax": Vector2(-213.0, 349.0), "hp": 185.0, "dmg": 18.0, "h": 1.25},
-		{"name": "Sanctum Gnaw-Guard", "glb": "res://assets/mobs/Rat.glb", "scale": 0.44, "pos": Vector2(-243.5, 327.5), "tc": Vector2(-235.0, 329.0), "tr": 15.0, "lr": 24.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0), "bmax": Vector2(-213.0, 349.0), "hp": 72.0, "dmg": 13.0, "h": 0.90},
-		{"name": "Sanctum Gnaw-Guard", "glb": "res://assets/mobs/Rat.glb", "scale": 0.43, "pos": Vector2(-226.5, 328.0), "tc": Vector2(-235.0, 329.0), "tr": 15.0, "lr": 24.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0), "bmax": Vector2(-213.0, 349.0), "hp": 72.0, "dmg": 13.0, "h": 0.90},
-		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.38, "pos": Vector2(-243.0, 375.0), "tc": Vector2(-235.0, 378.0), "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0), "bmax": Vector2(-219.0, 391.0), "hp": 50.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.36, "pos": Vector2(-227.0, 376.0), "tc": Vector2(-235.0, 378.0), "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0), "bmax": Vector2(-219.0, 391.0), "hp": 50.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.40, "pos": Vector2(-241.0, 385.0), "tc": Vector2(-235.0, 378.0), "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0), "bmax": Vector2(-219.0, 391.0), "hp": 50.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.37, "pos": Vector2(-228.0, 387.0), "tc": Vector2(-235.0, 378.0), "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0), "bmax": Vector2(-219.0, 391.0), "hp": 50.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Burrow Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.39, "pos": Vector2(-235.0, 368.0), "tc": Vector2(-235.0, 378.0), "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0), "bmax": Vector2(-219.0, 391.0), "hp": 50.0, "dmg": 10.0, "h": 0.78},
-		{"name": "Cistern Bilge Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.40, "pos": Vector2(-267.0, 376.0), "tc": Vector2(-270.0, 378.0), "tr": 11.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-283.0, 365.0), "bmax": Vector2(-257.0, 390.0), "hp": 58.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Cistern Bilge Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.38, "pos": Vector2(-273.0, 382.0), "tc": Vector2(-270.0, 378.0), "tr": 11.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-283.0, 365.0), "bmax": Vector2(-257.0, 390.0), "hp": 58.0, "dmg": 11.0, "h": 0.80},
-		{"name": "Nest Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.41, "pos": Vector2(-199.0, 374.0), "tc": Vector2(-198.0, 377.0), "tr": 12.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-211.0, 364.0), "bmax": Vector2(-185.0, 390.0), "hp": 60.0, "dmg": 11.0, "h": 0.82},
-		{"name": "Nest Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.39, "pos": Vector2(-195.0, 383.0), "tc": Vector2(-198.0, 377.0), "tr": 12.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-211.0, 364.0), "bmax": Vector2(-185.0, 390.0), "hp": 60.0, "dmg": 11.0, "h": 0.82},
-		# Crypt Rat in Skeleton Cave East Ossuary
-		{"name": "Crypt Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.40, "pos": Vector2(-786.0, 266.0), "tc": Vector2(-790.0, 272.0), "tr": 10.0, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-802.0, 258.0), "bmax": Vector2(-778.0, 287.0), "hp": 55.0, "dmg": 10.0, "h": 0.78},
+		# Expanded Underground Rat Warren Under-Empire (subterranean_kind=2, pack_id="rat_swarm")
+		{"name": "Plague Rat King", "glb": "res://assets/mobs/Rat.glb", "scale": 1.65, "pos": Vector2(-235.0, 320.0) + rw_shift, "tc": Vector2(-235.0, 323.0) + rw_shift, "tr": 15.0, "lr": 26.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0) + rw_shift, "bmax": Vector2(-213.0, 349.0) + rw_shift, "hp": 185.0, "dmg": 18.0, "h": 2.40, "rad": 1.15},
+		{"name": "Sanctum Gnaw-Guard", "glb": "res://assets/mobs/Rat.glb", "scale": 1.10, "pos": Vector2(-243.5, 327.5) + rw_shift, "tc": Vector2(-235.0, 329.0) + rw_shift, "tr": 15.0, "lr": 24.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0) + rw_shift, "bmax": Vector2(-213.0, 349.0) + rw_shift, "hp": 72.0, "dmg": 13.0, "h": 1.68, "rad": 0.84},
+		{"name": "Sanctum Gnaw-Guard", "glb": "res://assets/mobs/Rat.glb", "scale": 1.08, "pos": Vector2(-226.5, 328.0) + rw_shift, "tc": Vector2(-235.0, 329.0) + rw_shift, "tr": 15.0, "lr": 24.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-257.0, 313.0) + rw_shift, "bmax": Vector2(-213.0, 349.0) + rw_shift, "hp": 72.0, "dmg": 13.0, "h": 1.68, "rad": 0.84},
+		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.96, "pos": Vector2(-243.0, 375.0) + rw_shift, "tc": Vector2(-235.0, 378.0) + rw_shift, "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0) + rw_shift, "bmax": Vector2(-219.0, 391.0) + rw_shift, "hp": 50.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.94, "pos": Vector2(-227.0, 376.0) + rw_shift, "tc": Vector2(-235.0, 378.0) + rw_shift, "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0) + rw_shift, "bmax": Vector2(-219.0, 391.0) + rw_shift, "hp": 50.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.00, "pos": Vector2(-241.0, 385.0) + rw_shift, "tc": Vector2(-235.0, 378.0) + rw_shift, "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0) + rw_shift, "bmax": Vector2(-219.0, 391.0) + rw_shift, "hp": 50.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Sewer Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.95, "pos": Vector2(-228.0, 387.0) + rw_shift, "tc": Vector2(-235.0, 378.0) + rw_shift, "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0) + rw_shift, "bmax": Vector2(-219.0, 391.0) + rw_shift, "hp": 50.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Burrow Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.98, "pos": Vector2(-235.0, 368.0) + rw_shift, "tc": Vector2(-235.0, 378.0) + rw_shift, "tr": 13.0, "lr": 22.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-251.0, 364.0) + rw_shift, "bmax": Vector2(-219.0, 391.0) + rw_shift, "hp": 50.0, "dmg": 10.0, "h": 1.50, "rad": 0.78},
+		{"name": "Cistern Bilge Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.00, "pos": Vector2(-267.0, 376.0) + rw_shift, "tc": Vector2(-270.0, 378.0) + rw_shift, "tr": 11.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-283.0, 365.0) + rw_shift, "bmax": Vector2(-257.0, 390.0) + rw_shift, "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Cistern Bilge Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.96, "pos": Vector2(-273.0, 382.0) + rw_shift, "tc": Vector2(-270.0, 378.0) + rw_shift, "tr": 11.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-283.0, 365.0) + rw_shift, "bmax": Vector2(-257.0, 390.0) + rw_shift, "hp": 58.0, "dmg": 11.0, "h": 1.55, "rad": 0.78},
+		{"name": "Nest Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 1.02, "pos": Vector2(-199.0, 374.0) + rw_shift, "tc": Vector2(-198.0, 377.0) + rw_shift, "tr": 12.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-211.0, 364.0) + rw_shift, "bmax": Vector2(-185.0, 390.0) + rw_shift, "hp": 60.0, "dmg": 11.0, "h": 1.58, "rad": 0.78},
+		{"name": "Nest Scavenger Rat", "glb": "res://assets/mobs/Rat.glb", "scale": 0.98, "pos": Vector2(-195.0, 383.0) + rw_shift, "tc": Vector2(-198.0, 377.0) + rw_shift, "tr": 12.0, "lr": 18.0, "pack": &"rat_swarm", "sub": 2, "bmin": Vector2(-211.0, 364.0) + rw_shift, "bmax": Vector2(-185.0, 390.0) + rw_shift, "hp": 60.0, "dmg": 11.0, "h": 1.58, "rad": 0.78},
 	]
 	# Dense Webwood spider swarm clusters: egg-cache spiderlings, trail ambushers, outer nests & mid-wood glades
 	for i in range(10):
@@ -376,17 +396,17 @@ func _spawn_all_populations() -> void:
 		var pos := Vector2(-412.0, 481.0) + Vector2(cos(ang), sin(ang)) * r
 		beast_specs.append({
 			"name": "Brood Spiderling", "glb": "res://assets/mobs/Spider.glb",
-			"scale": 0.17 + float(i % 3) * 0.02, "pos": pos, "tc": Vector2(-410.0, 480.0),
+			"scale": 0.40 + float(i % 3) * 0.02, "pos": pos, "tc": Vector2(-410.0, 480.0),
 			"tr": 28.0, "lr": 115.0, "pack": &"spider_brood",
-			"hp": 36.0, "dmg": 7.5, "h": 0.65, "rad": 0.42, "aggro": 22.0, "run_spd": 8.4,
+			"hp": 36.0, "dmg": 7.5, "h": 1.25, "rad": 0.68, "aggro": 22.0, "run_spd": 8.4,
 		})
 	var trail_spiders := [
-		{"name": "Webwood Ambush Spider", "pos": Vector2(-362.0, 418.0), "scale": 0.34, "hp": 94.0, "dmg": 14.0, "h": 1.10, "rad": 0.64, "spd": 7.5},
-		{"name": "Webwood Skitterer", "pos": Vector2(-355.0, 428.0), "scale": 0.24, "hp": 54.0, "dmg": 10.0, "h": 0.82, "rad": 0.50, "spd": 8.1},
-		{"name": "Brood Spiderling", "pos": Vector2(-374.0, 434.0), "scale": 0.19, "hp": 36.0, "dmg": 7.5, "h": 0.65, "rad": 0.42, "spd": 8.5},
-		{"name": "Webwood Ambush Spider", "pos": Vector2(-382.0, 446.0), "scale": 0.35, "hp": 96.0, "dmg": 14.0, "h": 1.12, "rad": 0.65, "spd": 7.5},
-		{"name": "Webwood Skitterer", "pos": Vector2(-376.0, 456.0), "scale": 0.25, "hp": 58.0, "dmg": 10.5, "h": 0.85, "rad": 0.52, "spd": 8.0},
-		{"name": "Brood Spiderling", "pos": Vector2(-390.0, 450.0), "scale": 0.20, "hp": 38.0, "dmg": 8.0, "h": 0.68, "rad": 0.44, "spd": 8.4},
+		{"name": "Webwood Ambush Spider", "pos": Vector2(-362.0, 418.0), "scale": 0.76, "hp": 94.0, "dmg": 14.0, "h": 2.05, "rad": 0.94, "spd": 7.5},
+		{"name": "Webwood Skitterer", "pos": Vector2(-355.0, 428.0), "scale": 0.54, "hp": 54.0, "dmg": 10.0, "h": 1.55, "rad": 0.76, "spd": 8.1},
+		{"name": "Brood Spiderling", "pos": Vector2(-374.0, 434.0), "scale": 0.42, "hp": 36.0, "dmg": 7.5, "h": 1.25, "rad": 0.68, "spd": 8.5},
+		{"name": "Webwood Ambush Spider", "pos": Vector2(-382.0, 446.0), "scale": 0.78, "hp": 96.0, "dmg": 14.0, "h": 2.10, "rad": 0.96, "spd": 7.5},
+		{"name": "Webwood Skitterer", "pos": Vector2(-376.0, 456.0), "scale": 0.56, "hp": 58.0, "dmg": 10.5, "h": 1.60, "rad": 0.78, "spd": 8.0},
+		{"name": "Brood Spiderling", "pos": Vector2(-390.0, 450.0), "scale": 0.44, "hp": 38.0, "dmg": 8.0, "h": 1.30, "rad": 0.70, "spd": 8.4},
 	]
 	for ts in trail_spiders:
 		beast_specs.append({
@@ -402,11 +422,11 @@ func _spawn_all_populations() -> void:
 		Vector2(-328.0, 514.0), # East Hollow Nest
 	]
 	var nest_roles := [
-		{"name": "Webwood Ambush Spider", "scale": 0.35, "hp": 96.0, "dmg": 14.0, "h": 1.12, "rad": 0.65, "spd": 7.4, "off": Vector2(0.0, 0.0)},
-		{"name": "Webwood Stalker", "scale": 0.30, "hp": 78.0, "dmg": 13.0, "h": 1.00, "rad": 0.60, "spd": 7.6, "off": Vector2(10.0, 7.0)},
-		{"name": "Webwood Stalker", "scale": 0.29, "hp": 76.0, "dmg": 12.0, "h": 0.98, "rad": 0.58, "spd": 7.6, "off": Vector2(-9.0, 9.0)},
-		{"name": "Brood Spiderling", "scale": 0.20, "hp": 38.0, "dmg": 8.0, "h": 0.68, "rad": 0.44, "spd": 8.4, "off": Vector2(6.0, -8.0)},
-		{"name": "Brood Spiderling", "scale": 0.18, "hp": 34.0, "dmg": 7.0, "h": 0.64, "rad": 0.42, "spd": 8.5, "off": Vector2(-7.0, -7.0)},
+		{"name": "Webwood Ambush Spider", "scale": 0.78, "hp": 96.0, "dmg": 14.0, "h": 2.10, "rad": 0.96, "spd": 7.4, "off": Vector2(0.0, 0.0)},
+		{"name": "Webwood Stalker", "scale": 0.66, "hp": 78.0, "dmg": 13.0, "h": 1.85, "rad": 0.88, "spd": 7.6, "off": Vector2(10.0, 7.0)},
+		{"name": "Webwood Stalker", "scale": 0.64, "hp": 76.0, "dmg": 12.0, "h": 1.80, "rad": 0.86, "spd": 7.6, "off": Vector2(-9.0, 9.0)},
+		{"name": "Brood Spiderling", "scale": 0.44, "hp": 38.0, "dmg": 8.0, "h": 1.30, "rad": 0.70, "spd": 8.4, "off": Vector2(6.0, -8.0)},
+		{"name": "Brood Spiderling", "scale": 0.40, "hp": 34.0, "dmg": 7.0, "h": 1.22, "rad": 0.68, "spd": 8.5, "off": Vector2(-7.0, -7.0)},
 	]
 	for nc in outer_nests:
 		for nr in nest_roles:
@@ -423,10 +443,10 @@ func _spawn_all_populations() -> void:
 		Vector2(-364.0, 444.0), # NE Silk Glade
 	]
 	var glade_roles := [
-		{"name": "Webwood Weaver", "scale": 0.34, "hp": 92.0, "dmg": 14.0, "h": 1.10, "rad": 0.64, "spd": 7.4, "off": Vector2(0.0, 0.0)},
-		{"name": "Webwood Stalker", "scale": 0.29, "hp": 76.0, "dmg": 12.0, "h": 0.98, "rad": 0.58, "spd": 7.6, "off": Vector2(9.0, -6.0)},
-		{"name": "Webwood Skitterer", "scale": 0.24, "hp": 54.0, "dmg": 10.0, "h": 0.82, "rad": 0.50, "spd": 8.1, "off": Vector2(-8.0, 6.0)},
-		{"name": "Brood Spiderling", "scale": 0.19, "hp": 36.0, "dmg": 7.5, "h": 0.65, "rad": 0.42, "spd": 8.4, "off": Vector2(5.0, 8.0)},
+		{"name": "Webwood Weaver", "scale": 0.74, "hp": 92.0, "dmg": 14.0, "h": 2.00, "rad": 0.92, "spd": 7.4, "off": Vector2(0.0, 0.0)},
+		{"name": "Webwood Stalker", "scale": 0.64, "hp": 76.0, "dmg": 12.0, "h": 1.80, "rad": 0.86, "spd": 7.6, "off": Vector2(9.0, -6.0)},
+		{"name": "Webwood Skitterer", "scale": 0.54, "hp": 54.0, "dmg": 10.0, "h": 1.55, "rad": 0.76, "spd": 8.1, "off": Vector2(-8.0, 6.0)},
+		{"name": "Brood Spiderling", "scale": 0.42, "hp": 36.0, "dmg": 7.5, "h": 1.25, "rad": 0.68, "spd": 8.4, "off": Vector2(5.0, 8.0)},
 	]
 	for gc in glade_packs:
 		for gr in glade_roles:
@@ -472,12 +492,12 @@ func _spawn_all_populations() -> void:
 			"hp": arch.max_hp if arch != null else bm["hp"],
 			"walk_spd": arch.walk_speed if arch != null else float(bm.get("walk_spd", 3.0)),
 			"run_spd": arch.run_speed if arch != null else float(bm.get("run_spd", 6.6)),
-			"range": 1.9,
+			"range": 2.4,
 			"aggro": arch.aggro_radius if arch != null else float(bm.get("aggro", 21.0)),
 			"dmg": arch.attack_damage if arch != null else bm["dmg"],
 			"cd": 1.15,
 			"hp_h": arch.hp_bar_height if arch != null else bm["h"],
-			"rad": arch.body_radius if arch != null else float(bm.get("rad", 0.62)),
+			"rad": arch.body_radius if arch != null else float(bm.get("rad", 0.90)),
 		}
 		if bm.has("bmin"):
 			b_cfg["bmin"] = bm["bmin"]
@@ -486,33 +506,60 @@ func _spawn_all_populations() -> void:
 
 	var skeleton_specs := [
 		# Village Raiders (outside Slimebrook gates)
-		{"name": "Skeleton Warrior", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[0] + Vector2(-22, -26)) if gate_outs.size() > 0 else vc + Vector2(-22, -96), "night_only": false},
-		{"name": "Skeleton Minion", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[2] + Vector2(-24, 16)) if gate_outs.size() > 2 else vc + Vector2(-102, 16), "night_only": false},
-		{"name": "Skeleton Marksman", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": (gate_outs[3] + Vector2(24, -18)) if gate_outs.size() > 3 else vc + Vector2(102, -18), "night_only": false},
-		{"name": "Skeleton Necromancer", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": (gate_outs[0] + Vector2(24, -30)) if gate_outs.size() > 0 else vc + Vector2(24, -100), "night_only": true},
-		{"name": "Skeleton Raider", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[2] + Vector2(-28, -20)) if gate_outs.size() > 2 else vc + Vector2(-104, -20), "night_only": true},
-		{"name": "Skeleton Skirmisher", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[3] + Vector2(26, 22)) if gate_outs.size() > 3 else vc + Vector2(104, 22), "night_only": true},
+		{"name": "Skeleton Warrior", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[0] + Vector2(-22, -26)) if gate_outs.size() > 0 else vc + Vector2(-22, -134), "pack": &"skel_raiders", "night_only": false},
+		{"name": "Skeleton Minion", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[2] + Vector2(-24, 16)) if gate_outs.size() > 2 else vc + Vector2(-142, 16), "pack": &"skel_raiders", "night_only": false},
+		{"name": "Skeleton Marksman", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": (gate_outs[3] + Vector2(24, -18)) if gate_outs.size() > 3 else vc + Vector2(142, -18), "pack": &"skel_raiders", "night_only": false},
+		{"name": "Skeleton Necromancer", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": (gate_outs[0] + Vector2(24, -30)) if gate_outs.size() > 0 else vc + Vector2(24, -140), "pack": &"skel_raiders", "night_only": true},
+		{"name": "Skeleton Raider", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[2] + Vector2(-28, -20)) if gate_outs.size() > 2 else vc + Vector2(-146, -20), "pack": &"skel_raiders", "night_only": true},
+		{"name": "Skeleton Skirmisher", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": (gate_outs[3] + Vector2(26, 22)) if gate_outs.size() > 3 else vc + Vector2(146, 22), "pack": &"skel_raiders", "night_only": true},
 
-		# Second Cave Exterior Sentries (South Crypt Courtyard z >= 329, pack_id="skel_gate")
-		{"name": "Crypt Gate Warrior", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-829.0, 331.0), "tc": Vector2(-820.0, 340.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 115.0},
-		{"name": "Crypt Gate Scout", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": Vector2(-811.0, 332.0), "tc": Vector2(-820.0, 340.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 90.0},
-		{"name": "Crypt Gate Minion", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-820.0, 338.0), "tc": Vector2(-820.0, 340.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 85.0},
-
-		# Subterranean Skeleton Cave Legion (subterranean_kind=1, constrained to Crypt Rooms)
-		{"name": "Atrium Bone Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-826.0, 282.0), "tc": Vector2(-820.0, 284.0), "tr": 12.0, "lr": 22.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-833.0, 271.0), "bmax": Vector2(-807.0, 297.0), "night_only": false, "hp": 125.0},
-		{"name": "Atrium Crypt Marksman", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": Vector2(-813.0, 280.0), "tc": Vector2(-820.0, 284.0), "tr": 12.0, "lr": 22.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-833.0, 271.0), "bmax": Vector2(-807.0, 297.0), "night_only": false, "hp": 95.0},
-		{"name": "Cistern Necro-Acolyte", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": Vector2(-844.0, 277.0), "tc": Vector2(-845.0, 277.0), "tr": 9.0, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-852.0, 260.0), "bmax": Vector2(-837.0, 287.0), "night_only": false, "hp": 110.0},
-		{"name": "Ossuary Stalker", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-791.0, 278.0), "tc": Vector2(-791.0, 275.0), "tr": 9.0, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-802.0, 259.0), "bmax": Vector2(-779.0, 287.0), "night_only": false, "hp": 110.0},
-		{"name": "Skeleton Overlord", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": Vector2(-820.0, 225.0), "tc": Vector2(-820.0, 232.0), "tr": 12.0, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": Vector2(-836.0, 215.0), "bmax": Vector2(-804.0, 249.0), "night_only": false, "hp": 340.0, "dmg": 22.0, "scale": 1.18, "hp_h": 3.2},
-		{"name": "Overlord Honor Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-828.0, 233.0), "tc": Vector2(-820.0, 232.0), "tr": 12.0, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": Vector2(-836.0, 215.0), "bmax": Vector2(-804.0, 249.0), "night_only": false, "hp": 145.0, "dmg": 18.0},
-		{"name": "Overlord Honor Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-812.0, 233.0), "tc": Vector2(-820.0, 232.0), "tr": 12.0, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": Vector2(-836.0, 215.0), "bmax": Vector2(-804.0, 249.0), "night_only": false, "hp": 145.0, "dmg": 18.0},
+		# Second Cave Exterior Sentries (Ravine approach z >= 335, pack_id="skel_gate")
+		{"name": "Crypt Gate Warrior", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-828.5, 336.0), "tc": Vector2(-820.0, 342.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 115.0},
+		{"name": "Crypt Gate Scout", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": Vector2(-811.5, 337.0), "tc": Vector2(-820.0, 342.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 90.0},
+		{"name": "Crypt Gate Minion", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-820.0, 345.0), "tc": Vector2(-820.0, 342.0), "tr": 12.0, "lr": 36.0, "pack": &"skel_gate", "night_only": false, "hp": 85.0},
 	]
+	# Dynamically populate Skeleton Catacombs rooms from procedural WorldLandmarks.skel_dungeon_rooms
+	var skel_rooms: Array[Dictionary] = WorldLandmarks.skel_dungeon_rooms
+	if skel_rooms.is_empty():
+		skeleton_specs.append_array([
+			{"name": "Atrium Bone Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": Vector2(-824.0, 282.0), "tc": Vector2(-820.0, 280.0), "tr": 8.5, "lr": 18.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(-830.0, 270.0), "bmax": Vector2(-810.0, 290.0), "night_only": false, "hp": 125.0},
+			{"name": "Skeleton Overlord", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": Vector2(-820.0, 184.0), "tc": Vector2(-820.0, 184.0), "tr": 10.0, "lr": 18.0, "pack": &"skel_boss", "sub": 1, "bmin": Vector2(-832.0, 172.0), "bmax": Vector2(-808.0, 196.0), "night_only": false, "hp": 340.0, "dmg": 22.0, "scale": 1.68, "hp_h": 4.55, "rad": 1.10},
+		])
+	else:
+		for rm in skel_rooms:
+			var theme := String(rm.get("theme", "nave"))
+			var rc: Vector2 = rm["center"]
+			var rh: Vector2 = rm["half"]
+			var bmin := rc - rh + Vector2(2.5, 2.5)
+			var bmax := rc + rh - Vector2(2.5, 2.5)
+			var patrol_r := minf(rh.x, rh.y) - 2.8
+			match theme:
+				"vestibule":
+					skeleton_specs.append({"name": "Vestibule Bone Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": rc + Vector2(-4.2, 2.8), "tc": rc, "tr": patrol_r, "lr": 18.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 125.0})
+					skeleton_specs.append({"name": "Vestibule Marksman", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": rc + Vector2(4.4, -2.5), "tc": rc, "tr": patrol_r, "lr": 18.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 95.0})
+				"sanctum":
+					skeleton_specs.append({"name": "Skeleton Overlord", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": rc, "tc": rc, "tr": patrol_r, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 340.0, "dmg": 22.0, "scale": 1.68, "hp_h": 4.55, "rad": 1.10})
+					skeleton_specs.append({"name": "Overlord Honor Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": rc + Vector2(-5.5, 3.2), "tc": rc, "tr": patrol_r, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 145.0, "dmg": 18.0})
+					skeleton_specs.append({"name": "Overlord Honor Guard", "glb": "res://assets/mobs/Skeleton_Warrior.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "res://assets/mobs/Skeleton_Shield_Large_A.gltf", "kind": LivingActor.AttackKind.MELEE, "pos": rc + Vector2(5.5, 3.2), "tc": rc, "tr": patrol_r, "lr": 20.0, "pack": &"skel_boss", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 145.0, "dmg": 18.0})
+				"cistern":
+					# Keep Cistern Acolyte on dry stone perimeter walkway clear of water pool
+					var edge_pos := rc + Vector2(0.0, rh.y - 2.8)
+					skeleton_specs.append({"name": "Cistern Necro-Acolyte", "glb": "res://assets/mobs/Skeleton_Mage.glb", "eq_r": "res://assets/mobs/Skeleton_Staff.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_SPELL, "pos": edge_pos, "tc": edge_pos, "tr": 4.0, "lr": 15.0, "pack": &"skel_crypt", "sub": 1, "bmin": Vector2(bmin.x, bmax.y - 3.2), "bmax": bmax, "night_only": false, "hp": 110.0})
+				"ossuary":
+					skeleton_specs.append({"name": "Ossuary Stalker", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Blade.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": rc + Vector2(-3.0, 2.0), "tc": rc, "tr": patrol_r, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 110.0})
+					_spawn_actor({"name": "Crypt Rat", "category": "mob", "glb": "res://assets/mobs/Rat.glb", "scale": 1.00, "faction": LivingActor.Faction.HOSTILE, "role": LivingActor.RoleKind.BEAST, "attack_kind": LivingActor.AttackKind.MELEE, "pos_xz": rc + Vector2(3.0, -2.2), "tc": rc, "tr": patrol_r, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "hp": 55.0, "walk_spd": 2.9, "run_spd": 6.4, "range": 2.2, "aggro": 20.0, "dmg": 10.0, "cd": 1.1, "hp_h": 1.55, "rad": 0.78})
+				"spike_gallery":
+					skeleton_specs.append({"name": "Trap-Hall Marksman", "glb": "res://assets/mobs/Skeleton_Rogue.glb", "eq_r": "res://assets/mobs/Skeleton_Crossbow.gltf", "eq_l": "", "kind": LivingActor.AttackKind.RANGED_BOW, "pos": rc + Vector2(4.5, 4.0), "tc": rc, "tr": patrol_r, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 100.0})
+				"squeeze_vault":
+					pass
+				_:
+					skeleton_specs.append({"name": "Catacomb Sentinel", "glb": "res://assets/mobs/Skeleton_Minion.glb", "eq_r": "res://assets/mobs/Skeleton_Axe.gltf", "eq_l": "", "kind": LivingActor.AttackKind.MELEE, "pos": rc + Vector2(2.0, -2.0), "tc": rc, "tr": patrol_r, "lr": 16.0, "pack": &"skel_crypt", "sub": 1, "bmin": bmin, "bmax": bmax, "night_only": false, "hp": 105.0})
 	for sm in skeleton_specs:
 		var s_cfg := {
 			"name": sm["name"],
 			"category": "mob",
 			"glb": sm["glb"],
-			"scale": sm.get("scale", 0.82),
+			"scale": sm.get("scale", 1.28),
 			"faction": LivingActor.Faction.HOSTILE,
 			"role": LivingActor.RoleKind.RAIDER,
 			"attack_kind": sm["kind"],
@@ -525,11 +572,12 @@ func _spawn_all_populations() -> void:
 			"hp": sm.get("hp", 95.0),
 			"walk_spd": 2.8,
 			"run_spd": 5.5,
-			"range": 13.0 if sm["kind"] != LivingActor.AttackKind.MELEE else 2.0,
+			"range": 14.0 if sm["kind"] != LivingActor.AttackKind.MELEE else 2.6,
 			"aggro": 26.0,
 			"dmg": sm.get("dmg", 14.0),
 			"cd": 1.35,
-			"hp_h": sm.get("hp_h", 2.35),
+			"hp_h": sm.get("hp_h", 3.50),
+			"rad": sm.get("rad", 0.85),
 			"eq_r": sm["eq_r"],
 			"eq_l": sm["eq_l"],
 			"night_only": sm["night_only"],
@@ -564,10 +612,24 @@ func _spawn_actor(cfg: Dictionary) -> LivingActor:
 	if model_root == null:
 		return null
 	var s_val: float = float(cfg.get("scale", 1.0))
+	var is_small := false
+	if cfg.has("target_height"):
+		var target_h := float(cfg["target_height"])
+		is_small = target_h <= 0.75
+		var bounds: Vector2
+		if _model_y_bounds_cache.has(model_path):
+			bounds = _model_y_bounds_cache[model_path] as Vector2
+		else:
+			bounds = _measure_local_y_bounds(model_root)
+			_model_y_bounds_cache[model_path] = bounds
+		var raw_h := bounds.y - bounds.x
+		if raw_h > 0.001:
+			s_val = target_h / raw_h
+			model_root.position.y = -bounds.x * s_val
 	model_root.scale = Vector3.ONE * s_val
 
 	var meshes: Array[MeshInstance3D] = []
-	_normalize_node_materials(model_root, meshes)
+	_normalize_node_materials(model_root, meshes, 95.0 if is_small else 165.0, 10.0 if is_small else 16.0)
 	var anim := _find_anim_player(model_root)
 	var skel := _find_skeleton(model_root)
 
@@ -617,6 +679,9 @@ func _spawn_actor(cfg: Dictionary) -> LivingActor:
 	actor.attack_cooldown = float(cfg.get("cd", 1.25))
 	actor.hp_bar_height = float(cfg.get("hp_h", 2.35))
 	actor.body_radius = float(cfg.get("rad", 0.55))
+	actor.is_small_critter = is_small
+	if cfg.has("gait"):
+		actor.proc_gait = String(cfg["gait"])
 	if cfg.has("work"):
 		actor.work_anim_hint = String(cfg["work"])
 	if cfg.has("yaw"):
@@ -733,15 +798,43 @@ func reroll_actor_model(actor: LivingActor) -> bool:
 	return true
 
 
+func _measure_local_y_bounds(root_node: Node3D) -> Vector2:
+	var min_y := INF
+	var max_y := -INF
+	var stack: Array = [[root_node, Transform3D.IDENTITY]]
+	while not stack.is_empty():
+		var pair: Array = stack.pop_back()
+		var cur: Node = pair[0]
+		var xf: Transform3D = pair[1]
+		if cur is MeshInstance3D:
+			var mi := cur as MeshInstance3D
+			if mi.mesh != null:
+				var ab := mi.mesh.get_aabb()
+				for i in range(8):
+					var pt: Vector3 = xf * ab.get_endpoint(i)
+					min_y = minf(min_y, pt.y)
+					max_y = maxf(max_y, pt.y)
+		for ch in cur.get_children():
+			var next_xf := xf * (ch as Node3D).transform if (ch is Node3D) else xf
+			stack.append([ch, next_xf])
+	if min_y == INF:
+		return Vector2(0.0, 1.0)
+	return Vector2(min_y, max_y)
+
+
 func _normalize_node_materials(node: Node, out_meshes: Array[MeshInstance3D] = [], vis_end: float = 165.0, vis_margin: float = 16.0) -> void:
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
 		if mi.mesh != null:
-			var dup := mi.mesh.duplicate() as Mesh
-			for si in range(dup.get_surface_count()):
-				var sm := dup.surface_get_material(si)
-				dup.surface_set_material(si, _to_actor_matte(sm))
-			mi.mesh = dup
+			var src_id: int = mi.mesh.get_instance_id()
+			var shared_mesh: Mesh = _normalized_mesh_cache.get(src_id, null) as Mesh
+			if shared_mesh == null:
+				shared_mesh = mi.mesh.duplicate() as Mesh
+				for si in range(shared_mesh.get_surface_count()):
+					var sm := shared_mesh.surface_get_material(si)
+					shared_mesh.surface_set_material(si, _to_actor_matte(sm))
+				_normalized_mesh_cache[src_id] = shared_mesh
+			mi.mesh = shared_mesh
 		if vis_end > 0.0:
 			mi.visibility_range_end = vis_end
 			mi.visibility_range_end_margin = vis_margin
@@ -833,6 +926,16 @@ func _process(delta: float) -> void:
 	var dt := minf(delta, 0.05)
 	_frame_counter += 1
 	_village_provoked_timer = maxf(0.0, _village_provoked_timer - dt)
+	if not _group_provoked_timers.is_empty():
+		var expired_packs: Array[StringName] = []
+		for pk in _group_provoked_timers.keys():
+			var rem: float = float(_group_provoked_timers[pk]) - dt
+			if rem <= 0.0:
+				expired_packs.append(pk as StringName)
+			else:
+				_group_provoked_timers[pk] = rem
+		for pk in expired_packs:
+			_group_provoked_timers.erase(pk)
 
 	var rain_val := _time_weather.rain_intensity if _time_weather != null else 0.0
 	var night_val := _time_weather.is_night if _time_weather != null else false
@@ -840,7 +943,7 @@ func _process(delta: float) -> void:
 
 	var vp := get_viewport()
 	var cam := vp.get_camera_3d() if vp != null else null
-	var cam_pos := cam.global_position if cam != null else (player_slime.global_position if player_slime != null else Vector3.ZERO)
+	var cam_pos := cam.global_position if cam != null else (player_slime.global_position if player_slime != null and is_instance_valid(player_slime) else Vector3.ZERO)
 	var cave_hidden := false
 	var in_extra_cave := false
 	if _cave_atm != null and "get" in _cave_atm:
@@ -852,39 +955,77 @@ func _process(delta: float) -> void:
 	if visible == cave_hidden:
 		visible = not cave_hidden
 
-	# Rebuild 6 m spatial hash in place for O(1) crowd separation & slime slam checks
-	for b in _spatial_grid.values():
-		(b as Array).clear()
-	for act in actors:
-		if not act.is_alive():
-			continue
-		var c := _cell_of(Vector2(act.global_position.x, act.global_position.z))
-		var bucket: Variant = _spatial_grid.get(c)
-		if bucket == null:
-			_spatial_grid[c] = [act]
-		else:
-			(bucket as Array).append(act)
+	# Rebuild 6 m spatial hash in place for active actors within 180 m (skips distant dormant actors for O(1) cost)
+	if not cave_hidden or ((_frame_counter & 7) == 0):
+		for b in _spatial_grid.values():
+			(b as Array).clear()
+		for act in actors:
+			if not is_instance_valid(act) or not act.is_alive():
+				continue
+			if cam_pos.distance_squared_to(act.global_position) > 32400.0 and act.ai_state != LivingActor.AIState.CHASE and act.ai_state != LivingActor.AIState.ATTACK:
+				continue
+			var c := _cell_of(Vector2(act.global_position.x, act.global_position.z))
+			var bucket: Variant = _spatial_grid.get(c)
+			if bucket == null:
+				_spatial_grid[c] = [act]
+			else:
+				(bucket as Array).append(act)
 
-	# Step actor AI (throttled when deep underground or far > 160m outside combat) & LOD-sliced animations
+	# Step actor AI (high-rate < 68m, throttled 68..170m, ultra-low-power dormant > 170m) & LOD-sliced animations
+	var any_hp_bar := false
 	for act in actors:
+		if not is_instance_valid(act):
+			continue
+		if act.is_alive() and (act._combat_show_timer > 0.0 or act.hp < act.max_hp * 0.99):
+			any_hp_bar = true
 		var d_sq := cam_pos.distance_squared_to(act.global_position)
+		var in_combat := act.ai_state == LivingActor.AIState.CHASE or act.ai_state == LivingActor.AIState.ATTACK or act.ai_state == LivingActor.AIState.FLEE
+		# Dormant far-offscreen actors (> 170m, outside visibility_range_end) skip animation & tick at 1/30 rate
+		if d_sq > 28900.0 and not in_combat:
+			act._ai_accum_dt += dt
+			if ((act.actor_idx + _frame_counter) % 30) == 0:
+				var d_dt := minf(act._ai_accum_dt, 0.5)
+				act._ai_accum_dt = 0.0
+				act.step_ai(d_dt, self, rain_val, night_val, provoked)
+			if act._shadows_on:
+				act.step_animation_lod(dt, d_sq, _frame_counter, true)
+			continue
 		var act_hidden := cave_hidden or (in_extra_cave and act.subterranean_kind == 0 and d_sq > 1225.0)
-		var high_rate := (not act_hidden and d_sq < 25600.0) or act.ai_state == LivingActor.AIState.CHASE or act.ai_state == LivingActor.AIState.ATTACK or act.ai_state == LivingActor.AIState.FLEE
+		var high_rate := (not act_hidden and d_sq < 4624.0) or in_combat
 		if high_rate:
 			var step_dt := dt + act._ai_accum_dt
 			act._ai_accum_dt = 0.0
 			act.step_ai(step_dt, self, rain_val, night_val, provoked)
 		else:
 			act._ai_accum_dt += dt
-			if ((act.actor_idx + _frame_counter) % 6) == 0:
+			var mod_n := 12 if (cave_hidden and act.subterranean_kind == 0) else 6
+			if ((act.actor_idx + _frame_counter) % mod_n) == 0:
 				var step_dt := act._ai_accum_dt
 				act._ai_accum_dt = 0.0
 				act.step_ai(step_dt, self, rain_val, night_val, provoked)
 		act.step_animation_lod(dt, d_sq, _frame_counter, act_hidden)
 
-	_check_slime_body_slam()
-	_step_projectiles(dt)
-	_update_hp_bars(cam_pos, cave_hidden)
+	if _active_projectile_count > 0:
+		_step_projectiles(dt)
+	_update_hp_bars(cam_pos, cave_hidden, any_hp_bar)
+
+
+func _physics_process(delta: float) -> void:
+	if actors.is_empty():
+		return
+	var dt := minf(delta, 0.05)
+	_slime_bounce_cd = maxf(0.0, _slime_bounce_cd - dt)
+	var cave_hidden := false
+	var in_extra_cave := false
+	if _cave_atm != null and "get" in _cave_atm:
+		var ec_v: Variant = _cave_atm.get("_in_extra_cave")
+		in_extra_cave = ec_v != null and bool(ec_v)
+		var cf: Variant = _cave_atm.get("_cave_factor")
+		if cf != null and float(cf) > 0.72 and not in_extra_cave:
+			cave_hidden = true
+	if not cave_hidden or in_extra_cave:
+		_check_slime_body_slam()
+		_resolve_slime_actor_overlap(dt)
 
 
 func _cell_of(pos_xz: Vector2) -> Vector2i:
@@ -894,9 +1035,26 @@ func _cell_of(pos_xz: Vector2) -> Vector2i:
 func find_nearest_enemy_in_radius(pos_xz: Vector2, target_faction: int, radius: float) -> LivingActor:
 	var best: LivingActor = null
 	var best_sq := radius * radius
+	if radius <= 18.0:
+		var span := int(ceil(radius / SPATIAL_CELL_SIZE))
+		var base := _cell_of(pos_xz)
+		for dx in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var bucket: Variant = _spatial_grid.get(Vector2i(base.x + dx, base.y + dz))
+				if bucket == null:
+					continue
+				for item in (bucket as Array):
+					var act := item as LivingActor
+					if act == null or not is_instance_valid(act) or act.faction != target_faction or not act.is_alive():
+						continue
+					var dsq := pos_xz.distance_squared_to(Vector2(act.global_position.x, act.global_position.z))
+					if dsq < best_sq:
+						best_sq = dsq
+						best = act
+		return best
 	var pool: Array[LivingActor] = _village_actors if target_faction == LivingActor.Faction.VILLAGE else (_hostile_actors if target_faction == LivingActor.Faction.HOSTILE else actors)
 	for act in pool:
-		if act.faction != target_faction or not act.is_alive():
+		if not is_instance_valid(act) or act.faction != target_faction or not act.is_alive():
 			continue
 		var axz := Vector2(act.global_position.x, act.global_position.z)
 		var dsq := pos_xz.distance_squared_to(axz)
@@ -917,7 +1075,7 @@ func compute_separation(self_actor: LivingActor, pos_xz: Vector2) -> Vector2:
 			var bucket := _spatial_grid[c] as Array
 			for item in bucket:
 				var other := item as LivingActor
-				if other == self_actor:
+				if other == null or other == self_actor or not is_instance_valid(other) or not other.is_alive():
 					continue
 				var oxz := Vector2(other.global_position.x, other.global_position.z)
 				var dvec := pos_xz - oxz
@@ -930,6 +1088,41 @@ func compute_separation(self_actor: LivingActor, pos_xz: Vector2) -> Vector2:
 					else:
 						push += Vector2(0.5, 0.5)
 	return push
+
+
+func _resolve_slime_actor_overlap(dt: float) -> void:
+	if player_slime == null or not is_instance_valid(player_slime) or player_slime.is_dead or player_slime.motor == null:
+		return
+	var sl_pos := player_slime.global_position
+	var sl_xz := Vector2(sl_pos.x, sl_pos.z)
+	var sl_rad := 0.92 * player_slime.slime_scale
+	var base := _cell_of(sl_xz)
+	var slime_push_xz := Vector2.ZERO
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			var c := Vector2i(base.x + dx, base.y + dz)
+			if not _spatial_grid.has(c):
+				continue
+			for item in (_spatial_grid[c] as Array):
+				var act := item as LivingActor
+				if act == null or not is_instance_valid(act) or not act.is_alive():
+					continue
+				if absf(act.global_position.y + 0.8 - sl_pos.y) > 2.4 * player_slime.slime_scale:
+					continue
+				var axz := Vector2(act.global_position.x, act.global_position.z)
+				var dvec := axz - sl_xz
+				var min_d := sl_rad + act.body_radius
+				var dsq := dvec.length_squared()
+				if dsq < min_d * min_d:
+					var dist := sqrt(dsq) if dsq > 0.0004 else 0.02
+					var n_xz := dvec / dist if dsq > 0.0004 else Vector2(1.0, 0.0)
+					var pen_ratio := clampf((min_d - dist) / maxf(min_d, 0.1), 0.0, 1.0)
+					act.knockback_xz = (act.knockback_xz + n_xz * (14.0 * pen_ratio * dt)).limit_length(12.0)
+					slime_push_xz -= n_xz * (5.5 * pen_ratio)
+	if slime_push_xz.length_squared() > 0.0001:
+		var clamped_push := slime_push_xz.limit_length(4.0)
+		player_slime.motor.velocity.x += clamped_push.x * dt * 8.0
+		player_slime.motor.velocity.z += clamped_push.y * dt * 8.0
 
 
 func _check_slime_body_slam() -> void:
@@ -953,7 +1146,7 @@ func _check_slime_body_slam() -> void:
 				continue
 			for item in (_spatial_grid[c] as Array):
 				var act := item as LivingActor
-				if not act.is_alive() or act._slam_grace > 0.0:
+				if act == null or not is_instance_valid(act) or not act.is_alive() or act._slam_grace > 0.0:
 					continue
 				if absf(act.global_position.y + 0.8 - sl_pos.y) > 2.6 * player_slime.slime_scale:
 					continue
@@ -963,16 +1156,44 @@ func _check_slime_body_slam() -> void:
 					act._slam_grace = 0.55
 					var push_dir := (axz - sl_xz).normalized() if sl_xz.distance_squared_to(axz) > 0.001 else Vector2(1.0, 0.0)
 					var dmg := (22.0 + horiz_spd * 2.4 + maxf(-vert_spd, 0.0) * 1.8) * player_slime.slime_scale
-					act.vertical_vel = maxf(act.vertical_vel, 4.8)
+					act.vertical_vel = clampf(maxf(act.vertical_vel, 4.4), -30.0, 14.0)
 					act.apply_damage(dmg, push_dir * 8.5, player_slime, true)
 					if act.faction == LivingActor.Faction.VILLAGE:
-						provoke_village(24.0)
-					player_slime.motor.vertical_vel = maxf(player_slime.motor.vertical_vel, 5.2)
-					player_slime.trigger_poke(Vector3(0.0, -0.3, 0.0), Vector3(-push_dir.x * 0.4, -0.6, -push_dir.y * 0.4))
+						provoke_village(32.0)
+					if _slime_bounce_cd <= 0.0:
+						_slime_bounce_cd = 0.28
+						player_slime.motor.vertical_vel = clampf(maxf(player_slime.motor.vertical_vel, 4.6), -24.0, 14.0)
+						player_slime.trigger_poke(Vector3(0.0, -0.3, 0.0), Vector3(-push_dir.x * 0.4, -0.6, -push_dir.y * 0.4))
 
 
-func provoke_village(duration: float = 24.0) -> void:
+func provoke_village(duration: float = 32.0) -> void:
 	_village_provoked_timer = maxf(_village_provoked_timer, duration)
+
+
+func provoke_group(pack_id: StringName, duration: float = 36.0) -> void:
+	if pack_id.is_empty():
+		return
+	var cur := float(_group_provoked_timers.get(pack_id, 0.0))
+	_group_provoked_timers[pack_id] = maxf(cur, duration)
+
+
+func is_group_provoked(pack_id: StringName) -> bool:
+	if pack_id.is_empty():
+		return false
+	return float(_group_provoked_timers.get(pack_id, 0.0)) > 0.0
+
+
+func clear_all_slime_aggro() -> void:
+	_village_provoked_timer = 0.0
+	_group_provoked_timers.clear()
+	for act in actors:
+		if not is_instance_valid(act):
+			continue
+		if act.target_slime != null:
+			act.target_slime = null
+			if act.target_actor == null and (act.ai_state == LivingActor.AIState.CHASE or act.ai_state == LivingActor.AIState.ATTACK):
+				act.ai_state = LivingActor.AIState.SCHEDULE_IDLE
+				act._state_timer = 1.0
 
 
 func damage_player_slime(slime: Slime, impulse: Vector3, volume_loss: float, attacker_name: String) -> void:
@@ -991,20 +1212,26 @@ func _on_slime_defeated_actor(act: LivingActor) -> void:
 
 
 func spawn_projectile(shooter: LivingActor, origin: Vector3, dir: Vector3, is_spell: bool, dmg: float) -> void:
+	if not is_finite(origin.x) or not is_finite(origin.y) or not is_finite(origin.z):
+		return
+	var d := dir.normalized() if dir.length_squared() > 0.0001 else Vector3.FORWARD
+	if not is_finite(d.x) or not is_finite(d.y) or not is_finite(d.z):
+		d = Vector3.FORWARD
 	for p in _projectiles:
 		if not bool(p["active"]):
 			var node := p["node"] as Node3D
 			node.visible = true
 			node.global_position = origin
-			var d := dir.normalized()
-			if absf(d.y) < 0.98:
+			if absf(d.y) < 0.96:
 				node.look_at(origin + d, Vector3.UP)
 			p["active"] = true
+			_active_projectile_count += 1
 			p["vel"] = d * (20.0 if is_spell else 26.0)
 			p["life"] = 2.4
 			p["dmg"] = dmg
-			p["faction"] = shooter.faction
+			p["faction"] = shooter.faction if is_instance_valid(shooter) else LivingActor.Faction.HOSTILE
 			p["shooter"] = shooter
+			p["shooter_pack"] = shooter.pack_id if is_instance_valid(shooter) else &""
 			p["is_spell"] = is_spell
 			var arrow_n := p["arrow"] as Node3D
 			if arrow_n != null:
@@ -1019,6 +1246,7 @@ func _step_projectiles(dt: float) -> void:
 	var sl_pos := sl.global_position + Vector3(0.0, 0.65 * sl.slime_scale, 0.0) if sl_valid else Vector3.ZERO
 	var sl_rad := 1.1 * sl.slime_scale if sl_valid else 1.0
 
+	var active_left := 0
 	for p in _projectiles:
 		if not bool(p["active"]):
 			continue
@@ -1034,14 +1262,24 @@ func _step_projectiles(dt: float) -> void:
 			p["vel"] = vel
 		var next_pos := node.global_position + vel * dt
 		if vel.length_squared() > 0.01:
-			node.look_at(next_pos, Vector3.UP)
+			var vel_dir := vel.normalized()
+			if absf(vel_dir.y) < 0.96:
+				node.look_at(next_pos, Vector3.UP)
 		node.global_position = next_pos
 
-		# Check Slime hit
+		# Check Slime hit (only if that faction/group is actively provoked!)
 		var sf: int = int(p["faction"])
-		if sl_valid and (sf == LivingActor.Faction.HOSTILE or (sf == LivingActor.Faction.VILLAGE and _village_provoked_timer > 0.0)):
+		var shooter_pk: StringName = p.get("shooter_pack", &"") as StringName
+		var can_hit_slime := false
+		if sl_valid:
+			if sf == LivingActor.Faction.VILLAGE:
+				can_hit_slime = _village_provoked_timer > 0.0
+			elif sf == LivingActor.Faction.HOSTILE:
+				can_hit_slime = (not shooter_pk.is_empty()) and is_group_provoked(shooter_pk)
+		if can_hit_slime:
 			if next_pos.distance_squared_to(sl_pos) <= sl_rad * sl_rad:
-				var d_xz := Vector2(vel.x, vel.z).normalized()
+				var xz_v := Vector2(vel.x, vel.z)
+				var d_xz := xz_v.normalized() if xz_v.length_squared() > 0.0001 else Vector2.RIGHT
 				damage_player_slime(sl, Vector3(d_xz.x * 4.5, 1.8, d_xz.y * 4.5), float(p["dmg"]) * 0.038, "an enemy archer")
 				p["active"] = false
 				node.visible = false
@@ -1050,9 +1288,12 @@ func _step_projectiles(dt: float) -> void:
 		# Check Actor hit via spatial hash cell
 		var enemy_f := LivingActor.Faction.VILLAGE if sf == LivingActor.Faction.HOSTILE else LivingActor.Faction.HOSTILE
 		var hit := find_nearest_enemy_in_radius(Vector2(next_pos.x, next_pos.z), enemy_f, 1.05)
-		if hit != null and absf(next_pos.y - (hit.global_position.y + 1.0)) < 1.25:
-			var push := Vector2(vel.x, vel.z).normalized() * 3.8
-			hit.apply_damage(float(p["dmg"]), push, p["shooter"] as Node, false)
+		if hit != null and is_instance_valid(hit) and absf(next_pos.y - (hit.global_position.y + 1.0)) < 1.25:
+			var xz_v2 := Vector2(vel.x, vel.z)
+			var push := (xz_v2.normalized() if xz_v2.length_squared() > 0.0001 else Vector2.RIGHT) * 3.8
+			var raw_shooter: Variant = p["shooter"]
+			var shooter_node: Node = raw_shooter as Node if (raw_shooter != null and is_instance_valid(raw_shooter)) else null
+			hit.apply_damage(float(p["dmg"]), push, shooter_node, false)
 			p["active"] = false
 			node.visible = false
 			continue
@@ -1060,14 +1301,18 @@ func _step_projectiles(dt: float) -> void:
 		if next_pos.y <= sample_ground_y(next_pos.x, next_pos.z, false):
 			p["active"] = false
 			node.visible = false
+			continue
+		active_left += 1
+	_active_projectile_count = active_left
 
 
-func _update_hp_bars(cam_pos: Vector3, cave_hidden: bool) -> void:
+func _update_hp_bars(cam_pos: Vector3, cave_hidden: bool, any_hp_bar: bool = true) -> void:
 	if _hp_bar_mm == null or _hp_bar_mm.multimesh == null:
 		return
 	var mm := _hp_bar_mm.multimesh
-	if cave_hidden:
-		mm.visible_instance_count = 0
+	if cave_hidden or not any_hp_bar:
+		if mm.visible_instance_count != 0:
+			mm.visible_instance_count = 0
 		return
 	var count := 0
 	for act in actors:
@@ -1090,16 +1335,22 @@ func _update_hp_bars(cam_pos: Vector3, cave_hidden: bool) -> void:
 
 
 func rally_pack(caller: LivingActor, enemy_actor: LivingActor, enemy_slime: Slime) -> void:
-	if caller == null or caller.pack_id.is_empty():
+	if caller == null or not is_instance_valid(caller) or caller.pack_id.is_empty():
+		return
+	var has_slime := enemy_slime != null and is_instance_valid(enemy_slime) and not enemy_slime.is_dead
+	var has_actor := enemy_actor != null and is_instance_valid(enemy_actor) and enemy_actor.is_alive()
+	if not has_slime and not has_actor:
 		return
 	var c_pos := Vector2(caller.global_position.x, caller.global_position.z)
 	for act in _hostile_actors:
-		if act == caller or not act.is_alive() or act.pack_id != caller.pack_id:
+		if act == null or not is_instance_valid(act) or act == caller or not act.is_alive() or act.pack_id != caller.pack_id:
 			continue
-		if c_pos.distance_squared_to(Vector2(act.global_position.x, act.global_position.z)) <= 1024.0: # <= 32 m
+		if act.subterranean_kind != caller.subterranean_kind:
+			continue
+		if c_pos.distance_squared_to(Vector2(act.global_position.x, act.global_position.z)) <= 1764.0: # <= 42 m
 			if act.target_slime == null and act.target_actor == null:
-				act.target_actor = enemy_actor
-				act.target_slime = enemy_slime
+				act.target_actor = enemy_actor if has_actor else null
+				act.target_slime = enemy_slime if has_slime else null
 				act.ai_state = LivingActor.AIState.CHASE
 
 

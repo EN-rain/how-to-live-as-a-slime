@@ -44,7 +44,7 @@ static var _lod_meshes: Array[SphereMesh] = []
 ## Distance from camera beyond which the slime drops to the low-poly mesh.
 @export var lod_far_distance: float = 18.0
 ## Scale threshold below which the slime uses the low-poly mesh.
-@export var lod_small_scale: float = 0.55
+@export var lod_small_scale: float = 0.22
 
 @export_group("Mitosis & Fission Shape")
 ## Normalized split progress where the neck pinches to zero. Shared by volume curve, separation, and shader neck.
@@ -62,7 +62,7 @@ static var _lod_meshes: Array[SphereMesh] = []
 
 @export_group("Agent")
 ## Spawn scale. Clones are created with their target scale already resolved.
-@export var start_scale := 1.0
+@export var start_scale := 0.36
 @export var target_leader: Slime = null
 
 @export_group("Developer Mode")
@@ -221,6 +221,9 @@ var _ai_last_pos := Vector3.ZERO
 var _rng := RandomNumberGenerator.new()
 var _following_flatten := false
 var _follower_stuck_timer := 0.0
+var _follower_sidestep_timer := 0.0
+var _follower_sidestep_target := Vector3.ZERO
+var _roamer_wall_block_timer := 0.0
 ## Slot in the follower train for the current leader, assigned by SlimeProps.
 var follower_slot_index := 0
 ## Stationary clones skip the physics/posture pipeline until something moves.
@@ -268,6 +271,8 @@ var _last_safe_pos := Vector3.ZERO
 var _terrain_ref: Node = null
 var _sea_warned := false
 var _last_web_toast_t := -999.0
+var _combat_hit_cd := 0.0
+var _slam_bounce_cd := 0.0
 
 var time: float:
 	get:
@@ -376,6 +381,9 @@ func _activate_from_pool() -> void:
 	_ai_last_pos = global_position
 	_following_flatten = false
 	_follower_stuck_timer = 0.0
+	_follower_sidestep_timer = 0.0
+	_follower_sidestep_target = Vector3.ZERO
+	_roamer_wall_block_timer = 0.0
 	follower_slot_index = 0
 
 	_time = 0.0
@@ -516,8 +524,8 @@ func _setup_core_visual() -> void:
 		_core_sphere_mesh = SphereMesh.new()
 		_core_sphere_mesh.radius = 1.0
 		_core_sphere_mesh.height = 2.0
-		_core_sphere_mesh.radial_segments = 32
-		_core_sphere_mesh.rings = 16
+		_core_sphere_mesh.radial_segments = 24
+		_core_sphere_mesh.rings = 12
 	if _core_material == null:
 		_core_material = StandardMaterial3D.new()
 		_core_material.albedo_color = Color(0.10, 0.50, 0.90, 1.0)
@@ -591,13 +599,13 @@ static func _lod_mesh(level: int) -> SphereMesh:
 		var hi := SphereMesh.new()
 		hi.radius = 1.6
 		hi.height = 3.2
-		hi.radial_segments = 40
-		hi.rings = 28
+		hi.radial_segments = 28
+		hi.rings = 20
 		var lo := SphereMesh.new()
 		lo.radius = 1.6
 		lo.height = 3.2
-		lo.radial_segments = 20
-		lo.rings = 14
+		lo.radial_segments = 16
+		lo.rings = 12
 		_lod_meshes = [hi, lo]
 	return _lod_meshes[clampi(level, 0, _lod_meshes.size() - 1)]
 
@@ -697,8 +705,17 @@ func _reset_array_uniforms() -> void:
 # Input
 # ------------------------------------------------------------------------------------------------
 
+func _is_hud_menu_open() -> bool:
+	if not is_inside_tree():
+		return false
+	var hud := get_tree().get_first_node_in_group("hud")
+	return hud != null and hud.has_method("is_menu_open") and bool(hud.call("is_menu_open"))
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if role != Role.PLAYER or is_dead:
+		return
+	if _is_hud_menu_open():
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		var kev := event as InputEventKey
@@ -954,6 +971,8 @@ func _physics_process(delta: float) -> void:
 
 	var dt := delta
 	_time += dt
+	_combat_hit_cd = maxf(0.0, _combat_hit_cd - dt)
+	_slam_bounce_cd = maxf(0.0, _slam_bounce_cd - dt)
 	_impulse_time = minf(_impulse_time + dt, 4.0)
 	_impulse2_time = minf(_impulse2_time + dt, 4.0)
 	# Cleared once per tick so posture/growth reasons survive until presentation.
@@ -1128,22 +1147,26 @@ func _tick_ocean_boundary(dt: float) -> void:
 			_sea_warned = false
 
 
-func apply_combat_hit(volume_loss: float, impulse: Vector3, attacker_name: String) -> void:
+func apply_combat_hit(volume_loss: float, impulse: Vector3, attacker_name: String, bypass_cd: bool = false) -> void:
 	if is_dead:
 		return
 	if role == Role.PLAYER and is_dev_noclip_active():
 		return
-	var new_vol := maxf(0.05, get_volume() - maxf(0.0, volume_loss))
+	if not impulse.is_finite() or is_nan(volume_loss) or is_inf(volume_loss):
+		return
+	if not bypass_cd and _combat_hit_cd > 0.0:
+		return
+	_combat_hit_cd = 0.32
+	var clamped_loss := clampf(volume_loss, 0.0, maxf(get_volume() * 0.25, 0.5))
+	var new_vol := maxf(0.05, get_volume() - clamped_loss)
 	set_volume(new_vol)
 	if motor != null:
-		motor.velocity += Vector3(impulse.x, 0.0, impulse.z)
-		motor.vertical_vel += impulse.y
-		if impulse.y > 0.5:
-			motor.on_ground = false
+		motor.apply_knockback_impulse(impulse)
 	var local_pt := Vector3(0.0, 0.3, 0.6)
-	if impulse.length_squared() > 1e-4 and body != null:
+	if impulse.length_squared() > 1e-4 and body != null and absf(body.global_transform.basis.determinant()) > 1e-5:
 		local_pt = (body.global_transform.basis.inverse() * (-impulse.normalized() * 0.7)).limit_length(1.1)
-	trigger_poke(local_pt, impulse * 0.45)
+	var poke_vec := (impulse * 0.45).limit_length(1.2)
+	trigger_poke(local_pt, poke_vec)
 	if target_scale <= tuning.lethal_scale_threshold:
 		trigger_death("You were overwhelmed by %s" % attacker_name)
 
@@ -1165,28 +1188,82 @@ func revive_at_safe_pos() -> void:
 	var safe := _last_safe_pos if _last_safe_pos.length_squared() > 0.001 else fallback
 	target_scale = maxf(target_scale, start_scale)
 	slime_scale = maxf(slime_scale, start_scale)
+	if _terrain_ref == null or not is_instance_valid(_terrain_ref):
+		if get_parent() != null:
+			_terrain_ref = get_parent().get_node_or_null("TerrainScene")
+	var foot_y := safe.y
 	if _terrain_ref != null and _terrain_ref.has_method("sample_height"):
-		var ground_h := float(_terrain_ref.sample_height(safe.x, safe.z))
+		foot_y = float(_terrain_ref.sample_height(safe.x, safe.z))
+	else:
 		var half_h := (model.rest_half_height if model != null else 1.28) * slime_scale
-		safe.y = maxf(safe.y, ground_h + tuning.skin + half_h)
-	global_position = safe
-	_prev_global_pos = safe
+		foot_y = safe.y - half_h
 	is_dead = false
 	sea_darkness = 0.0
 	death_reason = ""
 	_sea_warned = false
+	_combat_hit_cd = 0.0
+	_slam_bounce_cd = 0.0
+	_release_passage(0.0)
 	if motor != null:
-		motor.velocity = Vector3.ZERO
-		motor.vertical_vel = 0.0
-		motor.in_water = false
-		motor.water_submersion = 0.0
-		motor.water_depth = 0.0
-		motor.water_flow_vel = Vector3.ZERO
-		motor.on_ground = true
+		motor.teleport_to(Vector3(safe.x, foot_y + tuning.skin, safe.z))
+	_prev_global_pos = global_position
 	_apply_transform()
 	_sync_proxy()
-	if is_inside_tree() and motor != null:
-		motor.update_support()
+	if is_inside_tree():
+		var eco := get_tree().get_first_node_in_group("world_ecosystem")
+		if eco != null and eco.has_method("clear_all_slime_aggro"):
+			eco.call("clear_all_slime_aggro")
+
+
+func teleport_to_world(target_xz: Vector2, force_y: float = NAN, is_underground: bool = false) -> void:
+	if not target_xz.is_finite():
+		return
+	if _terrain_ref == null or not is_instance_valid(_terrain_ref):
+		if get_parent() != null:
+			_terrain_ref = get_parent().get_node_or_null("TerrainScene")
+		if _terrain_ref == null and is_inside_tree():
+			_terrain_ref = get_tree().get_first_node_in_group("terrain")
+	var dest_foot_y := 22.0
+	if is_finite(force_y):
+		dest_foot_y = force_y
+	elif _terrain_ref != null:
+		if is_underground and _terrain_ref.has_method(&"sample_spawn_floor_y"):
+			dest_foot_y = float(_terrain_ref.sample_spawn_floor_y(target_xz.x, target_xz.y, 12.0))
+		elif _terrain_ref.has_method(&"sample_height"):
+			dest_foot_y = float(_terrain_ref.sample_height(target_xz.x, target_xz.y))
+
+	is_dead = false
+	sea_darkness = 0.0
+	death_reason = ""
+	_sea_warned = false
+	_combat_hit_cd = 0.0
+	_slam_bounce_cd = 0.0
+	_release_passage(0.0)
+	breadcrumbs.clear()
+	_breadcrumb_timer = 0.0
+	if motor != null:
+		motor.teleport_to(Vector3(target_xz.x, dest_foot_y + tuning.skin, target_xz.y))
+	_prev_global_pos = global_position
+	_apply_transform()
+	_sync_proxy()
+
+	if _terrain_ref != null and "_grass_recenter_cooldown" in _terrain_ref:
+		_terrain_ref.set("_grass_recenter_cooldown", 0.0)
+
+	if is_inside_tree():
+		var eco := get_tree().get_first_node_in_group("world_ecosystem")
+		if eco != null and eco.has_method("clear_all_slime_aggro"):
+			eco.call("clear_all_slime_aggro")
+		var cave_atm := get_tree().get_first_node_in_group("cave_atmosphere")
+		if cave_atm == null and _terrain_ref != null:
+			cave_atm = _terrain_ref.get_node_or_null("Cave/CaveAtmosphere")
+		if cave_atm != null:
+			cave_atm.set("_last_cam_pos", Vector3(1e9, 1e9, 1e9))
+			cave_atm.set("_settled", false)
+
+	var rig := get_node_or_null("../CameraRig")
+	if rig != null and rig.has_method("snap_to_follow"):
+		rig.call("snap_to_follow")
 
 
 func _is_subterranean_for_water() -> bool:
@@ -1407,6 +1484,8 @@ func _height_ratio_for(_liq: float, _sq: float) -> float:
 # ------------------------------------------------------------------------------------------------
 
 func _process_player_input() -> Vector3:
+	if _is_hud_menu_open():
+		return Vector3.ZERO
 	var in_z := Input.get_axis("move_back", "move_forward")
 	var in_x := Input.get_axis("move_left", "move_right")
 
@@ -1645,13 +1724,27 @@ func _process_follower_ai(dt: float) -> Vector3:
 	var dist := to_target.length()
 
 	_follower_stuck_timer += dt
-	if _ai_last_pos.distance_squared_to(global_position) > 0.3:
+	if _ai_last_pos.distance_squared_to(global_position) > 0.08:
 		_follower_stuck_timer = 0.0
 		_ai_last_pos = global_position
-	if _follower_stuck_timer > tuning.follower_stuck_time and dist > 1.0:
-		var perp := to_target.cross(Vector3.UP).normalized()
-		target_pt = global_position + perp * 3.0 + to_target.normalized() * 2.0
+	if _follower_sidestep_timer > 0.0:
+		_follower_sidestep_timer = maxf(0.0, _follower_sidestep_timer - dt)
+		target_pt = _follower_sidestep_target
+		to_target = target_pt - global_position
+		to_target.y = 0.0
+		dist = to_target.length()
+	elif (_follower_stuck_timer > minf(tuning.follower_stuck_time, 0.85) or motor.last_sweep_fraction < 0.15) and dist > 0.8:
+		var fwd_n := to_target.normalized() if dist > 1e-4 else Vector3.FORWARD
+		var perp := fwd_n.cross(Vector3.UP).normalized()
+		var opt_a := perp * 2.4 + fwd_n * 1.6
+		var opt_b := -perp * 2.4 + fwd_n * 1.6
+		var clear_a := motor.sweep_clear_distance(slime_scale, opt_a)
+		var clear_b := motor.sweep_clear_distance(slime_scale, opt_b)
+		var chosen := opt_a if clear_a >= clear_b else opt_b
+		_follower_sidestep_target = global_position + chosen
+		_follower_sidestep_timer = 0.75
 		_follower_stuck_timer = 0.0
+		target_pt = _follower_sidestep_target
 		to_target = target_pt - global_position
 		to_target.y = 0.0
 		dist = to_target.length()
@@ -1660,8 +1753,8 @@ func _process_follower_ai(dt: float) -> Vector3:
 	if dist > tuning.follower_catch_up_distance:
 		cur_max = tuning.run_speed * 0.9
 
-	var stop_dist := slime_scale * 0.35 + 0.2
-	var slow_dist := stop_dist + 2.0
+	var stop_dist := slime_scale * 0.35 + 0.16
+	var slow_dist := stop_dist + 1.8
 	if dist <= stop_dist:
 		return Vector3.ZERO
 
@@ -1676,37 +1769,71 @@ func _process_roamer_ai(dt: float) -> Vector3:
 	if _ai_recovery_timer > 0.0:
 		_ai_recovery_timer = maxf(0.0, _ai_recovery_timer - dt)
 
-	if _ai_last_pos.distance_squared_to(global_position) > 0.2:
+	if _ai_last_pos.distance_squared_to(global_position) > 0.08:
 		_ai_stuck_timer = 0.0
 		_ai_last_pos = global_position
 
-	if _ai_stuck_timer > tuning.roamer_stuck_time:
-		if _ai_stuck_timer > tuning.roamer_stuck_time * 1.8:
-			var ang := _rng.randf() * TAU
-			var escape_dest := global_position + Vector3(cos(ang) * 12.0, 0.0, sin(ang) * 12.0)
-			var flat := Vector2(escape_dest.x, escape_dest.z)
-			if flat.length() > tuning.arena_radius * 0.85:
-				flat = flat.normalized() * (tuning.arena_radius * 0.75)
-				escape_dest.x = flat.x
-				escape_dest.z = flat.y
-			_ai_target_pos = escape_dest
-			_ai_stuck_timer = 0.0
-			_ai_recovery_timer = tuning.roamer_recover_time
+	if motor.last_sweep_fraction < 0.18:
+		_roamer_wall_block_timer += dt
+	else:
+		_roamer_wall_block_timer = 0.0
 
-	if _ai_roam_timer > 0.0 and (global_position.distance_squared_to(_ai_target_pos) < 9.0 or _ai_target_pos == Vector3.ZERO):
-		_ai_roam_timer = 0.0
+	# 1. Actively forage nearby edible crystal fragments & props within 13 m
+	if props != null and _ai_recovery_timer <= 0.0:
+		var near_props := props.query_nearby_props(Vector2(global_position.x, global_position.z), 13.0)
+		var best_p = null
+		var best_d2 := INF
+		for p in near_props:
+			if not props.is_edible_by_push(self, p) or p.mesh == null or not is_instance_valid(p.mesh):
+				continue
+			var ppos: Vector3 = p.mesh.global_position
+			if absf(ppos.y - global_position.y) > 2.4:
+				continue
+			var d2 := global_position.distance_squared_to(ppos)
+			if d2 < best_d2:
+				var to_p := Vector3(ppos.x - global_position.x, 0.0, ppos.z - global_position.z)
+				if to_p.length() < 1.2 or motor.sweep_clear_distance(slime_scale, to_p) >= to_p.length() * 0.75:
+					best_d2 = d2
+					best_p = p
+		if best_p != null:
+			var f_dir: Vector3 = best_p.mesh.global_position - global_position
+			f_dir.y = 0.0
+			if f_dir.length_squared() > 0.001:
+				cur_max = tuning.walk_speed
+				return f_dir.normalized() * cur_max
+
+	# 2. Wall-aware wander target selection (re-picks immediately if blocked by wall/boulder)
+	var need_new_target := (_ai_target_pos == Vector3.ZERO) \
+		or (global_position.distance_squared_to(_ai_target_pos) < 2.25) \
+		or (_ai_roam_timer > 0.0) \
+		or (_roamer_wall_block_timer > 0.32) \
+		or (_ai_stuck_timer > minf(tuning.roamer_stuck_time, 1.1))
+
+	if need_new_target:
+		_ai_roam_timer = -_rng.randf_range(2.2, 4.2)
+		_roamer_wall_block_timer = 0.0
+		_ai_stuck_timer = 0.0
 		var base_ang := atan2(_crawl_dir.x, _crawl_dir.z) if _crawl_dir.length_squared() > 0.01 else _rng.randf() * TAU
-		var drift := _rng.randf_range(-PI * 0.4, PI * 0.4)
-		var new_ang := base_ang + drift
-		var wander_dist := _rng.randf_range(6.0, 14.0)
-		var wander_dest := global_position + Vector3(sin(new_ang) * wander_dist, 0.0, cos(new_ang) * wander_dist)
-		var flat := Vector2(wander_dest.x, wander_dest.z)
+		var wander_dist := _rng.randf_range(5.5, 11.5)
+		var best_dest := global_position
+		var best_clear := -1.0
+		var cand_offsets := [0.0, 0.55, -0.55, 1.15, -1.15, 1.85, -1.85, 2.65, -2.65, PI]
+		for ci in range(cand_offsets.size()):
+			var ang := base_ang + float(cand_offsets[ci]) + _rng.randf_range(-0.22, 0.22)
+			var step_v := Vector3(sin(ang) * wander_dist, 0.0, cos(ang) * wander_dist)
+			var clear_d := motor.sweep_clear_distance(slime_scale, step_v)
+			# Slight preference for forward/diagonal headings when clearance is comparable
+			var score := clear_d - float(ci) * 0.15
+			if score > best_clear:
+				best_clear = score
+				var use_d := maxf(clear_d * 0.85, 1.5)
+				best_dest = global_position + Vector3(sin(ang) * use_d, 0.0, cos(ang) * use_d)
+		var flat := Vector2(best_dest.x, best_dest.z)
 		if flat.length() > tuning.arena_radius * 0.85:
 			flat = flat.normalized() * (tuning.arena_radius * 0.75)
-			wander_dest.x = flat.x
-			wander_dest.z = flat.y
-		_ai_target_pos = wander_dest
-		_ai_roam_timer = -_rng.randf_range(2.0, 4.0)
+			best_dest.x = flat.x
+			best_dest.z = flat.y
+		_ai_target_pos = best_dest
 
 	var wander_dir := _ai_target_pos - global_position
 	wander_dir.y = 0.0
@@ -2317,7 +2444,7 @@ func merge_nearby_clones() -> void:
 	if liquid_amt > 0.1:
 		return
 
-	var merge_rad := model.rest_max_radius * slime_scale * tuning.merge_range_factor + 1.0
+	var merge_rad := maxf(model.rest_max_radius * slime_scale * tuning.merge_range_factor + 1.0, 14.0)
 	var to_merge: Array[Slime] = []
 
 	for s in props.registered_slimes:
@@ -2347,10 +2474,10 @@ func merge_nearby_clones() -> void:
 
 
 func _merge_path_clear(other: Slime) -> bool:
-	var from := other.motor.core_sweep_origin()
-	var to := Vector3(global_position.x, from.y, global_position.z)
+	var from := other.motor.core_sweep_origin() + Vector3(0.0, 0.18, 0.0)
+	var to := motor.core_sweep_origin() + Vector3(0.0, 0.18, 0.0)
 	var fr := other.motor.cast_core_sphere(from, to - from)
-	return float(fr[1]) >= 0.99
+	return float(fr[1]) >= 0.95 or from.distance_to(to) <= 5.0
 
 
 # ------------------------------------------------------------------------------------------------

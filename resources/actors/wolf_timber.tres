@@ -6,7 +6,7 @@
 script = ExtResource("1_arch")
 archetype_name = "Timber Wolf"
 glb_path = "res://assets/mobs/Wolf.glb"
-scale_factor = 0.41
+scale_factor = 0.76
 max_hp = 95.0
 attack_damage = 14.0
 walk_speed = 3.0
@@ -14,5 +14,5 @@ run_speed = 6.6
 aggro_radius = 21.0
 territory_radius = 42.0
 leash_radius = 105.0
-hp_bar_height = 1.30
-body_radius = 0.62
+hp_bar_height = 2.25
+body_radius = 0.90

@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+render_mode blend_add, depth_draw_never, cull_back, unshaded;
 
 uniform vec3 beam_color : source_color = vec3(1.0, 0.92, 0.68);
 uniform float beam_intensity : hint_range(0.01, 1.0, 0.01) = 0.22;

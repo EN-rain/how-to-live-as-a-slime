@@ -239,20 +239,42 @@ func _init_materials() -> void:
 		0.56
 	)
 
+	var bone_fnl := FastNoiseLite.new()
+	bone_fnl.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	bone_fnl.fractal_octaves = 3
+	bone_fnl.frequency = 0.085
+	var bone_img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	var coc_img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	for py in range(64):
+		for px in range(64):
+			var g_b := 0.5 + 0.5 * bone_fnl.get_noise_2d(float(px) * 0.65, float(py) * 3.8)
+			var stria := 0.80 + 0.22 * g_b + 0.08 * sin(float(px) * 0.55 + g_b * 3.0)
+			bone_img.set_pixel(px, py, Color(clampf(0.84 * stria, 0.45, 0.98), clampf(0.79 * stria, 0.42, 0.95), clampf(0.68 * stria, 0.35, 0.88), 1.0))
+			var wrap_b := absf(sin(float(py) * 0.42 + bone_fnl.get_noise_2d(float(px) * 1.4, float(py) * 1.4) * 2.5))
+			var silk_g := 0.68 + 0.28 * wrap_b
+			coc_img.set_pixel(px, py, Color(clampf(0.78 * silk_g, 0.42, 0.96), clampf(0.80 * silk_g, 0.44, 0.98), clampf(0.76 * silk_g, 0.42, 0.95), 1.0))
+	bone_img.generate_mipmaps()
+	coc_img.generate_mipmaps()
+
 	_bone_mat = StandardMaterial3D.new()
-	_bone_mat.albedo_color = Color(0.76, 0.72, 0.62)
-	_bone_mat.roughness = 0.74
+	_bone_mat.albedo_texture = ImageTexture.create_from_image(bone_img)
+	_bone_mat.albedo_color = Color(0.95, 0.92, 0.86)
+	_bone_mat.roughness = 0.66
+	_bone_mat.uv1_scale = Vector3(2.0, 2.0, 2.0)
 
 	_cocoon_mat = StandardMaterial3D.new()
-	_cocoon_mat.albedo_color = Color(0.52, 0.50, 0.44)
-	_cocoon_mat.roughness = 0.94
+	_cocoon_mat.albedo_texture = ImageTexture.create_from_image(coc_img)
+	_cocoon_mat.albedo_color = Color(0.84, 0.86, 0.85)
+	_cocoon_mat.roughness = 0.84
+	_cocoon_mat.uv1_scale = Vector3(3.0, 4.0, 3.0)
 
 	_silk_cord_mat = StandardMaterial3D.new()
-	_silk_cord_mat.albedo_color = Color(0.67, 0.72, 0.69)
-	_silk_cord_mat.roughness = 0.71
+	_silk_cord_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_silk_cord_mat.albedo_color = Color(0.88, 0.92, 0.96)
+	_silk_cord_mat.roughness = 0.46
 	_silk_cord_mat.emission_enabled = true
-	_silk_cord_mat.emission = Color(0.30, 0.39, 0.43)
-	_silk_cord_mat.emission_energy_multiplier = 0.23
+	_silk_cord_mat.emission = Color(0.54, 0.64, 0.74)
+	_silk_cord_mat.emission_energy_multiplier = 0.35
 
 	var fnl := FastNoiseLite.new()
 	fnl.noise_type = FastNoiseLite.TYPE_VALUE
@@ -268,8 +290,8 @@ func _init_materials() -> void:
 	var web_shader := load("res://shaders/spider_web.gdshader") as Shader
 	_orb_web_mat = ShaderMaterial.new()
 	_orb_web_mat.shader = web_shader
-	_orb_web_mat.set_shader_parameter(&"silk_color", Color(0.78, 0.85, 0.90, 0.82))
-	_orb_web_mat.set_shader_parameter(&"thread_width", 0.085)
+	_orb_web_mat.set_shader_parameter(&"silk_color", Color(0.90, 0.95, 0.99, 0.92))
+	_orb_web_mat.set_shader_parameter(&"thread_width", 0.075)
 	_orb_web_mat.set_shader_parameter(&"web_mode", 4.0)
 	_orb_web_mat.set_shader_parameter(&"is_funnel", 0.0)
 	if n_tex != null:
@@ -278,8 +300,8 @@ func _init_materials() -> void:
 
 	_funnel_web_mat = ShaderMaterial.new()
 	_funnel_web_mat.shader = web_shader
-	_funnel_web_mat.set_shader_parameter(&"silk_color", Color(0.76, 0.83, 0.88, 0.78))
-	_funnel_web_mat.set_shader_parameter(&"thread_width", 0.085)
+	_funnel_web_mat.set_shader_parameter(&"silk_color", Color(0.88, 0.94, 0.98, 0.88))
+	_funnel_web_mat.set_shader_parameter(&"thread_width", 0.075)
 	_funnel_web_mat.set_shader_parameter(&"sway_amp", 0.020)
 	_funnel_web_mat.set_shader_parameter(&"web_mode", 1.0)
 	_funnel_web_mat.set_shader_parameter(&"is_funnel", 1.0)
@@ -456,6 +478,8 @@ func _build_spider_webwood(spider_trees: Array[Dictionary], webwood_region: Webw
 		var rad := 5.2 + sqrt(float(k) + 0.5) * 3.6
 		var fx := center.x + cos(ang) * rad
 		var fz := center.y + sin(ang) * rad
+		if WorldLandmarks.min_dist_to_world_road(fx, fz, center) < 5.6:
+			continue
 		var fy := _sample_h(fx, fz)
 		var b := Basis.from_euler(Vector3(0.0, ang * 1.3, 0.0))
 		if (k % 3) == 0:
@@ -464,7 +488,7 @@ func _build_spider_webwood(spider_trees: Array[Dictionary], webwood_region: Webw
 			bush_xfs.append(Transform3D(b.scaled(Vector3.ONE * (1.20 + 0.30 * float(k % 2))), Vector3(fx, fy - 0.05, fz)))
 		else:
 			mush_xfs.append(Transform3D(b.scaled(Vector3.ONE * 1.45), Vector3(fx, fy - 0.02, fz)))
-		if (k % 3) == 0:
+		if (k % 3) == 0 and WorldLandmarks.min_dist_to_world_road(fx + 1.1, fz - 0.8, center) >= 5.6:
 			rock_xfs.append(Transform3D(b.scaled(Vector3(1.35, 0.72, 1.35)), Vector3(fx + 1.1, fy - 0.14, fz - 0.8)))
 
 	CavePropFX.spawn_gltf_batch(_spider_root, "WebwoodFerns", "res://assets/nature/Fern_1.gltf", fern_xfs)
@@ -763,21 +787,40 @@ func _emit_silk_curve(batch: WebwoodBatch, a: Vector3, b: Vector3, sag: Vector3,
 
 
 func _emit_webwood_orb(batches: Array, center: Vector2, a: Vector3, b: Vector3, c: Vector3, d: Vector3, belly: float, seed01: float, focal: bool) -> void:
-	# Non-radial tangled catenary silk lattice + thick mooring cables (ZERO bicycle-wheel hub/spiral rings!)
+	# Sculpted 3D radial + catenary-ring spider web lattice suspended with true out-of-plane depth
 	var mid := (a + b + c + d) * 0.25
-	var normal := (b - a).cross(d - a).normalized()
-	mid += normal * belly
+	var raw_n := (b - a).cross(d - a)
+	var normal := raw_n.normalized() if raw_n.length_squared() > 0.001 else Vector3.UP
+	var hub := mid + normal * (belly * 0.95) + Vector3.DOWN * 0.30
 	var st := _webwood_batch_at(batches, center, mid)
-	var thick := 0.048 if focal else 0.032
-	# Heavy structural frame cables around quadrilateral perimeter + X cross-ties
-	_emit_silk_curve(st, a, b, Vector3.DOWN * 0.32 + normal * belly * 0.25, thick, 6)
-	_emit_silk_curve(st, b, c, Vector3.DOWN * 0.18 + normal * belly * 0.18, thick * 0.85, 5)
-	_emit_silk_curve(st, c, d, Vector3.DOWN * 0.26 + normal * belly * 0.22, thick * 0.90, 5)
-	_emit_silk_curve(st, d, a, Vector3.DOWN * 0.18 + normal * belly * 0.18, thick * 0.85, 5)
-	_emit_silk_curve(st, a, c, Vector3.DOWN * 0.45 + normal * belly * 0.65, thick * 0.82, 6)
-	_emit_silk_curve(st, b, d, Vector3.DOWN * 0.45 + normal * belly * 0.55, thick * 0.82, 6)
+	var thick := 0.044 if focal else 0.030
+	# Perimeter anchor mooring cables
+	_emit_silk_curve(st, a, b, Vector3.DOWN * 0.30 + normal * belly * 0.24, thick, 6)
+	_emit_silk_curve(st, b, c, Vector3.DOWN * 0.20 + normal * belly * 0.18, thick * 0.85, 5)
+	_emit_silk_curve(st, c, d, Vector3.DOWN * 0.26 + normal * belly * 0.22, thick * 0.88, 5)
+	_emit_silk_curve(st, d, a, Vector3.DOWN * 0.20 + normal * belly * 0.18, thick * 0.85, 5)
 
-	var chords := 14 if focal else 8
+	# 8–10 radial spokes converging on off-center 3D hub
+	var anchors: Array[Vector3] = [
+		a, a.lerp(b, 0.45), b, b.lerp(c, 0.52), c, c.lerp(d, 0.48), d, d.lerp(a, 0.54)
+	]
+	if focal:
+		anchors.append(a.lerp(b, 0.78))
+		anchors.append(c.lerp(d, 0.22))
+	for ai in range(anchors.size()):
+		var ap: Vector3 = anchors[ai]
+		_emit_silk_curve(st, hub, ap, Vector3.DOWN * 0.18 + normal * (belly * 0.12), 0.022 if focal else 0.016, 4)
+
+	# 3 concentric catenary silk spiral rings joining the 3D spokes
+	var ring_count := 3 if focal else 2
+	for ri in range(1, ring_count + 1):
+		var frac := float(ri) / float(ring_count + 1)
+		for ai in range(anchors.size()):
+			var p0 := hub.lerp(anchors[ai], frac)
+			var p1 := hub.lerp(anchors[(ai + 1) % anchors.size()], frac + 0.04 * sin(seed01 * TAU + float(ai)))
+			_emit_silk_curve(st, p0, p1, Vector3.DOWN * 0.14 + normal * (belly * 0.08), 0.016 if focal else 0.013, 3)
+
+	var chords := 8 if focal else 4
 	var edge_pairs := [[a, b], [b, c], [c, d], [d, a]]
 	for ci in range(chords):
 		var u0 := fposmod(seed01 * 3.7 + float(ci) * 0.618034, 1.0)
@@ -786,8 +829,8 @@ func _emit_webwood_orb(batches: Array, center: Vector2, a: Vector3, b: Vector3, 
 		var e1 := (ci + 1 + (ci % 2)) % 4
 		var p0: Vector3 = (edge_pairs[e0][0] as Vector3).lerp(edge_pairs[e0][1] as Vector3, u0)
 		var p1: Vector3 = (edge_pairs[e1][0] as Vector3).lerp(edge_pairs[e1][1] as Vector3, u1)
-		var sag_v := Vector3.DOWN * (0.28 + 0.22 * u0) + normal * belly * (0.35 + 0.35 * sin(u1 * PI))
-		_emit_silk_curve(st, p0, p1, sag_v, 0.024 if focal else 0.017, 4)
+		var sag_v := Vector3.DOWN * (0.24 + 0.20 * u0) + normal * belly * (0.35 + 0.35 * sin(u1 * PI))
+		_emit_silk_curve(st, p0, p1, sag_v, 0.018 if focal else 0.014, 4)
 
 
 func _emit_trunk_shroud(batch: WebwoodBatch, base_pos: Vector3, base_r: float, top_r: float, height: float, seed01: float) -> void:
@@ -847,7 +890,7 @@ func _emit_trunk_shroud(batch: WebwoodBatch, base_pos: Vector3, base_r: float, t
 
 
 func _build_draped_ground_web(parent: Node3D, center_xz: Vector2, size_m: float, seed_f: float, boulders: Array[Vector3], snags: Array[Vector3]) -> void:
-	const SUB := 6
+	const SUB := 10
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var half := size_m * 0.5
@@ -864,39 +907,53 @@ func _build_draped_ground_web(parent: Node3D, center_xz: Vector2, size_m: float,
 			var lx := (u - 0.5) * size_m
 			var wx := center_xz.x + lx * cos_r - lz * sin_r
 			var wz := center_xz.y + lx * sin_r + lz * cos_r
-			var wy := _sample_h(wx, wz) + 0.08
+			var wy := _sample_h(wx, wz) + 0.11
 			var rad_n := clampf(Vector2(lx, lz).length() / maxf(half, 0.5), 0.0, 1.0)
-			# Mound center slightly + lift up aggressively where blanket drapes over nearby boulders or trunks
-			var lift := (1.0 - rad_n) * 0.14 + 0.07 * sin(wx * 0.8 + wz * 0.7 + seed_f)
+			var lift := (1.0 - rad_n) * 0.16 + 0.08 * sin(wx * 0.8 + wz * 0.7 + seed_f)
 			for bp in boulders:
 				var d_b := Vector2(wx - bp.x, wz - bp.z).length()
-				if d_b < 2.6:
-					lift = maxf(lift, (1.0 - d_b / 2.6) * 0.92)
+				if d_b < 2.8:
+					lift = maxf(lift, (1.0 - d_b / 2.8) * 0.98)
 			for sp in snags:
 				var d_s := Vector2(wx - sp.x, wz - sp.z).length()
-				if d_s < 2.1:
-					lift = maxf(lift, (1.0 - d_s / 2.1) * 1.10)
+				if d_s < 2.2:
+					lift = maxf(lift, (1.0 - d_s / 2.2) * 1.15)
 			row.append(Vector3(wx, wy + lift, wz))
 		grid.append(row)
+	var norms: Array = []
+	for zi in range(SUB + 1):
+		var nrow: Array[Vector3] = []
+		for xi in range(SUB + 1):
+			var pL: Vector3 = grid[zi][maxi(xi - 1, 0)]
+			var pR: Vector3 = grid[zi][mini(xi + 1, SUB)]
+			var pD: Vector3 = grid[maxi(zi - 1, 0)][xi]
+			var pU: Vector3 = grid[mini(zi + 1, SUB)][xi]
+			var vn := (pU - pD).cross(pR - pL).normalized()
+			if vn.length_squared() < 0.2:
+				vn = Vector3.UP
+			elif vn.y < 0.0:
+				vn = -vn
+			nrow.append(vn)
+		norms.append(nrow)
 	for zi in range(SUB):
 		for xi in range(SUB):
 			var u0 := float(xi) / float(SUB)
 			var u1 := float(xi + 1) / float(SUB)
 			var v0 := float(zi) / float(SUB)
 			var v1 := float(zi + 1) / float(SUB)
-			var p00: Vector3 = grid[zi][xi]
-			var p10: Vector3 = grid[zi][xi + 1]
-			var p01: Vector3 = grid[zi + 1][xi]
-			var p11: Vector3 = grid[zi + 1][xi + 1]
-			var n := (p01 - p00).cross(p10 - p00).normalized()
-			if n.y < 0.0:
-				n = -n
-			for tri: Array in [[p00, Vector2(u0, v0)], [p10, Vector2(u1, v0)], [p11, Vector2(u1, v1)],
-					[p00, Vector2(u0, v0)], [p11, Vector2(u1, v1)], [p01, Vector2(u0, v1)]]:
-				st.set_normal(n)
+			var corners: Array[Array] = [
+				[grid[zi][xi], norms[zi][xi], Vector2(u0, v0)],
+				[grid[zi][xi + 1], norms[zi][xi + 1], Vector2(u1, v0)],
+				[grid[zi + 1][xi + 1], norms[zi + 1][xi + 1], Vector2(u1, v1)],
+				[grid[zi][xi], norms[zi][xi], Vector2(u0, v0)],
+				[grid[zi + 1][xi + 1], norms[zi + 1][xi + 1], Vector2(u1, v1)],
+				[grid[zi + 1][xi], norms[zi + 1][xi], Vector2(u0, v1)],
+			]
+			for vert: Array in corners:
+				st.set_normal(vert[1] as Vector3)
 				st.set_color(col)
-				st.set_uv(tri[1] as Vector2)
-				st.add_vertex(tri[0] as Vector3)
+				st.set_uv(vert[2] as Vector2)
+				st.add_vertex(vert[0] as Vector3)
 	var mesh := st.commit()
 	if mesh != null:
 		var mi := MeshInstance3D.new()
@@ -905,27 +962,67 @@ func _build_draped_ground_web(parent: Node3D, center_xz: Vector2, size_m: float,
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		parent.add_child(mi)
 
+	# Anchor 3D tension cords from the funnel core out to perimeter terrain anchors
+	var cord_batch := WebwoodBatch.new()
+	var mid_p: Vector3 = grid[SUB / 2][SUB / 2] + Vector3.UP * 0.25
+	var corner_cells: Array[Vector2i] = [Vector2i(1, 1), Vector2i(1, SUB - 1), Vector2i(SUB - 1, SUB - 1), Vector2i(SUB - 1, 1)]
+	for ci in range(4):
+		var c_idx: Vector2i = corner_cells[ci]
+		var edge_p: Vector3 = grid[c_idx.x][c_idx.y]
+		_emit_silk_curve(cord_batch, mid_p, edge_p, Vector3.UP * 0.14, 0.024, 4)
+	if not cord_batch.verts.is_empty():
+		var c_arr := []
+		c_arr.resize(Mesh.ARRAY_MAX)
+		c_arr[Mesh.ARRAY_VERTEX] = cord_batch.verts
+		c_arr[Mesh.ARRAY_NORMAL] = cord_batch.normals
+		c_arr[Mesh.ARRAY_INDEX] = cord_batch.indices
+		var cm := ArrayMesh.new()
+		cm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arr)
+		var cmi := MeshInstance3D.new()
+		cmi.mesh = cm
+		cmi.material_override = _silk_cord_mat
+		cmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(cmi)
+
 
 func _emit_webwood_sheet(batches: Array, center: Vector2, a: Vector3, b: Vector3, c: Vector3, d: Vector3, sag: float, seed01: float) -> void:
 	var mid := (a + b + c + d) * 0.25
 	var quadrant := int(mid.x >= center.x) + 2 * int(mid.z >= center.y)
 	var batch := batches[quadrant] as WebwoodBatch
-	var normal := (b - a).cross(c - a).normalized()
-	if normal.length_squared() < 0.5:
+	var raw_n := (b - a).cross(c - a)
+	if raw_n.length_squared() < 0.05:
 		return
-	const STEPS := 5
+	var normal := raw_n.normalized()
+	const STEPS := 7
 	var tapered := c.is_equal_approx(d)
 	var col := Color(seed01, clampf(a.distance_to(b) / 11.0, 0.65, 1.6), 1.0)
 	var base := batch.verts.size()
 	var stride := STEPS + 1
+	var grid_pts: Array = []
 	for row in range(STEPS + 1):
 		var v := float(row) / float(STEPS)
+		var grow: Array[Vector3] = []
 		for col_idx in range(STEPS + 1):
 			var u := float(col_idx) / float(STEPS)
 			var p := a.lerp(b, u).lerp(c.lerp(d, u), v)
 			p.y -= sin(u * PI) * lerpf(0.55, 1.0, v) * sag
+			p += normal * (sin(u * PI) * sin(v * PI) * sag * 0.42)
+			grow.append(p)
+		grid_pts.append(grow)
+	for row in range(STEPS + 1):
+		var v := float(row) / float(STEPS)
+		for col_idx in range(STEPS + 1):
+			var u := float(col_idx) / float(STEPS)
+			var p: Vector3 = grid_pts[row][col_idx]
+			var pL: Vector3 = grid_pts[row][maxi(col_idx - 1, 0)]
+			var pR: Vector3 = grid_pts[row][mini(col_idx + 1, STEPS)]
+			var pD: Vector3 = grid_pts[maxi(row - 1, 0)][col_idx]
+			var pU: Vector3 = grid_pts[mini(row + 1, STEPS)][col_idx]
+			var vn := (pR - pL).cross(pU - pD).normalized()
+			if vn.length_squared() < 0.2:
+				vn = normal
 			batch.verts.append(p)
-			batch.normals.append(normal)
+			batch.normals.append(vn)
 			batch.colors.append(col)
 			batch.uvs.append(Vector2(u, v))
 	for row in range(STEPS):
@@ -1146,14 +1243,15 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		root, ASSET_DIR + "wolf_den", _granite_shader_mat, false, Vector3(center.x, cy, center.y)
 	)
 
-	# Warm amber bounce light inside the granite wolf-den recess so cubs & rocky ceiling arches read clearly
-	_add_flicker_light(
-		root,
-		Vector3(center.x, cy + 2.4, center.y - 6.8),
-		w_cfg.get("hearth_light_color", Color(1.0, 0.72, 0.42)),
-		float(w_cfg.get("hearth_light_energy", 2.8)),
-		float(w_cfg.get("hearth_light_range", 16.0))
-	)
+	# Cool static skylight/moonlight ambient fill inside wolf-den recess (ZERO fire/torch lights in wolf territory)
+	var den_fill := OmniLight3D.new()
+	den_fill.position = Vector3(center.x, cy + 2.4, center.y - 6.8)
+	den_fill.light_color = Color(0.60, 0.74, 0.94)
+	den_fill.light_energy = 1.35
+	den_fill.omni_range = 14.0
+	den_fill.omni_attenuation = 1.2
+	den_fill.shadow_enabled = false
+	root.add_child(den_fill)
 
 	# Scattered low mossy scree pebbles inside den mouth (cleanly grounded, zero flat grey square plates)
 	for scree_off: Array in [
@@ -1166,17 +1264,10 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		var sz := center.y + so.y
 		CavePropFX.spawn_fractured_boulder(root, Vector3(sx, _sample_h(sx, sz) + 0.04, sz), scree_off[1], _granite_shader_mat, int(scree_off[2]), false)
 
-	# Campfire pit / warm alpha hearth at clearing flank with charred firewood + 5-layer fire VFX
-	var fire_pos := Vector3(center.x + 5.2, _sample_h(center.x + 5.2, center.y - 2.6), center.y - 2.6)
-	for ri in range(7):
-		var fang := float(ri) * (TAU / 7.0)
-		var fpos := fire_pos + Vector3(cos(fang) * 0.88, 0.14, sin(fang) * 0.88)
-		CavePropFX.spawn_fractured_boulder(root, fpos, Vector3(0.32, 0.22, 0.28), _granite_shader_mat, 90 + ri, false)
-	for l_ang: float in [0.35, 1.92]:
-		CavePropFX.spawn_bark_fallen_log(root, fire_pos + Vector3(0.0, 0.12, 0.0), l_ang, 0.05, 1.25, 0.13, 88, _bark_mat, false)
-	_fire_seed_counter += 1
-	CavePropFX.attach_torch_fire(root, fire_pos + Vector3(0.0, 0.18, 0.0), _fire_seed_counter, 0.56)
-	_add_flicker_light(root, fire_pos + Vector3(0.0, 1.2, 0.0), Color(1.0, 0.60, 0.24), 3.1, 17.0)
+	# Mossy boulder cluster and fallen hollow pine trunk on clearing flank (no campfire)
+	var flank_pos := Vector3(center.x + 5.2, _sample_h(center.x + 5.2, center.y - 2.6), center.y - 2.6)
+	CavePropFX.spawn_fractured_boulder(root, flank_pos + Vector3(0.0, 0.48, 0.0), Vector3(1.15, 0.78, 0.96), _granite_shader_mat, 91, true)
+	CavePropFX.spawn_bark_fallen_log(root, flank_pos + Vector3(-1.4, 0.24, 1.1), 0.62, 0.04, 3.2, 0.28, 88, _bark_mat, true)
 
 	# Multi-tiered Alpine Granite Cliff Massif, Flanking Spires & SW Howling Promontory!
 	var crag_specs: Array[Array] = [
@@ -1225,7 +1316,7 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		if rn != null:
 			_apply_mat_recursive(rn, _granite_shader_mat)
 
-	# Howlcrest Boundary Totem Cairns & Hunter Torch Braziers flanking the SW trail threshold
+	# Natural alpine granite boundary monoliths flanking the South trail threshold (NO fire/torches or low-poly pillars)
 	for cairn_spec: Array in [
 		[Vector2(-11.2, 12.8), 0.45, 421],
 		[Vector2(11.6, 11.4), -0.55, 422],
@@ -1235,10 +1326,10 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		var cz_c := center.y + coff.y
 		var cy_c := _sample_h(cx_c, cz_c)
 		var cyaw := float(cairn_spec[1])
-		_place_ruin_wall(root, "pillar_decorated.gltf.glb", Vector3(cx_c, cy_c - 0.25, cz_c), cyaw, Vector3.ONE * 1.25, Vector2(0.06, -0.05), _granite_shader_mat, true, Vector3(1.2, 3.4, 1.2))
-		CavePropFX.spawn_bark_fallen_log(root, Vector3(cx_c, cy_c + 1.35, cz_c), cyaw + 0.4, 1.15, 2.8, 0.12, int(cairn_spec[2]), _bark_mat, false)
-		CavePropFX.spawn_bark_fallen_log(root, Vector3(cx_c, cy_c + 1.35, cz_c), cyaw - 0.4, -1.15, 2.8, 0.12, int(cairn_spec[2]) + 10, _bark_mat, false)
-		_vault_post_torch(root, Vector3(cx_c + 1.45, _sample_h(cx_c + 1.45, cz_c - 0.6), cz_c - 0.6), cyaw, int(cairn_spec[2]) + 20, 2.0, 14.5)
+		CavePropFX.spawn_fractured_boulder(root, Vector3(cx_c, cy_c + 1.05, cz_c), Vector3(1.45, 2.35, 1.35), _granite_shader_mat, int(cairn_spec[2]), true)
+		var side_b := _place_nature_scene(root, "res://assets/nature/Rock_Medium_2.gltf", Vector3(cx_c + 1.25, _sample_h(cx_c + 1.25, cz_c - 0.5) - 0.25, cz_c - 0.5), cyaw, 1.55)
+		if side_b != null:
+			_apply_mat_recursive(side_b, _granite_shader_mat)
 
 	# Alpha's Howling Overlook Ledge on WSW shoulder (center + (-13.5, y, 4.2))
 	var howl_xy := Vector2(center.x - 13.5, center.y + 4.2)
@@ -1252,17 +1343,17 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 			_apply_mat_recursive(hslab, _granite_shader_mat)
 	CavePropFX.spawn_bark_fallen_log(root, Vector3(howl_xy.x + 2.2, howl_y + 0.42, howl_xy.y + 1.8), 0.38, 0.14, 8.4, 0.42, 431, _bark_mat, true)
 
-	# Ravaged Hunter Camp & Prey Larder in East crag alcove (center + (9.5, y, -3.5))
+	# Abandoned Hunter Cache in East crag alcove (high-contrast textured timber & canvas, no mud-crushed albedo)
 	var camp_x := center.x + 9.5
 	var camp_z := center.y - 3.5
 	var camp_y := _sample_h(camp_x, camp_z)
-	var h_wag := _place_ruin_wall(root, "res://assets/village/Prop_Wagon.gltf", Vector3(camp_x + 2.8, camp_y - 0.06, camp_z - 1.6), -0.95, Vector3.ONE * 1.08, Vector2(0.16, -0.14), null, true, Vector3(2.6, 1.8, 1.9))
-	_harmonize_prop_mats(h_wag, Color(0.38, 0.34, 0.30), 0.95, 0.03)
-	var h_cr := _place_piece(root, "crates_stacked.gltf.glb", Vector3(camp_x - 0.6, camp_y - 0.04, camp_z + 1.8), 0.48, Vector3.ONE * 1.12)
-	_harmonize_prop_mats(h_cr, Color(0.40, 0.35, 0.30), 0.95, 0.03)
-	_add_box_body(root, Vector3(camp_x - 0.6, camp_y + 0.85, camp_z + 1.8), Vector3(1.8, 1.7, 1.8), LAYER_OBSTACLES)
-	var h_bar := _place_piece(root, "barrel_large_decorated.gltf.glb", Vector3(camp_x + 1.4, camp_y - 0.04, camp_z + 2.6), -0.65, Vector3.ONE * 1.12)
-	_harmonize_prop_mats(h_bar, Color(0.40, 0.35, 0.30), 0.95, 0.03)
+	var h_wag := _place_ruin_wall(root, "res://assets/village/Prop_Wagon.gltf", Vector3(camp_x + 3.4, camp_y - 0.08, camp_z - 1.8), -0.95, Vector3.ONE * 1.55, Vector2(0.16, -0.14), null, true, Vector3(3.7, 2.6, 2.7))
+	_harmonize_prop_mats(h_wag, Color(0.76, 0.72, 0.68), 0.85, 0.14)
+	var h_cr := _place_piece(root, "crates_stacked.gltf.glb", Vector3(camp_x - 0.8, camp_y - 0.04, camp_z + 2.2), 0.48, Vector3.ONE * 1.55)
+	_harmonize_prop_mats(h_cr, Color(0.78, 0.74, 0.68), 0.85, 0.14)
+	_add_box_body(root, Vector3(camp_x - 0.8, camp_y + 1.15, camp_z + 2.2), Vector3(2.4, 2.3, 2.4), LAYER_OBSTACLES)
+	var h_bar := _place_piece(root, "barrel_large_decorated.gltf.glb", Vector3(camp_x + 1.8, camp_y - 0.04, camp_z + 3.1), -0.65, Vector3.ONE * 1.55)
+	_harmonize_prop_mats(h_bar, Color(0.78, 0.74, 0.68), 0.85, 0.14)
 
 	# Sunken flat alpine slate flagstones & a pack bone-cairn breaking up clearing floor silhouettes
 	for s_spec: Array in [
@@ -1295,13 +1386,15 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		var fz := center.y + sin(ang) * rad
 		if absf(fx - center.x) < 6.5 and fz < center.y - 2.0:
 			continue
+		if WorldLandmarks.min_dist_to_world_road(fx, fz) < 6.2:
+			continue
 		var fy := _sample_h(fx, fz)
 		var b := Basis.from_euler(Vector3(0.0, ang, 0.0))
 		if (k % 2) == 0:
 			fern_xfs.append(Transform3D(b.scaled(Vector3.ONE * 1.35), Vector3(fx, fy - 0.04, fz)))
 		else:
 			bush_xfs.append(Transform3D(b.scaled(Vector3.ONE * 1.25), Vector3(fx, fy - 0.05, fz)))
-		if (k % 3) == 0:
+		if (k % 3) == 0 and WorldLandmarks.min_dist_to_world_road(fx + 0.8, fz - 0.7) >= 6.2:
 			rock_xfs.append(Transform3D(b.scaled(Vector3.ONE * 1.40), Vector3(fx + 0.8, fy - 0.06, fz - 0.7)))
 
 	CavePropFX.spawn_gltf_batch(root, "WolfFerns", "res://assets/nature/Fern_1.gltf", fern_xfs)
@@ -1325,11 +1418,11 @@ func _build_wolf_crag(wolf_region: Node = null) -> void:
 		if snag != null:
 			_add_box_body(root, Vector3(dx, dy + 2.4, dz), Vector3(1.1, 4.8, 1.1), LAYER_OBSTACLES)
 
-	# Multi-segment bark-textured fallen timber logs with branch stubs & shelf fungi (5 crag windfalls)
+	# Multi-segment bark-textured fallen timber logs with branch stubs & shelf fungi (5 crag windfalls, off South trail)
 	var log_specs: Array[Array] = [
 		[Vector2(center.x - 8.5, center.y + 4.0), 0.42, 7.6, 0.52],
 		[Vector2(center.x + 8.8, center.y + 3.5), -0.68, 6.8, 0.46],
-		[Vector2(center.x - 3.2, center.y + 10.6), 1.35, 5.8, 0.42],
+		[Vector2(center.x + 12.2, center.y + 9.2), 1.35, 5.8, 0.42],
 		[Vector2(center.x - 19.5, center.y - 1.5), 0.78, 8.2, 0.50],
 		[Vector2(center.x + 19.0, center.y + 1.0), -0.92, 7.8, 0.48],
 	]
@@ -1377,7 +1470,7 @@ func _spawn_articulated_bone(parent: Node3D, pos: Vector3, rot_y: float, length:
 	shaft.top_radius = 0.065
 	shaft.bottom_radius = 0.072
 	shaft.height = length * 0.78
-	shaft.radial_segments = 8
+	shaft.radial_segments = 12
 	var sm := MeshInstance3D.new()
 	sm.mesh = shaft
 	sm.material_override = _bone_mat
@@ -1388,8 +1481,8 @@ func _spawn_articulated_bone(parent: Node3D, pos: Vector3, rot_y: float, length:
 	var knob := SphereMesh.new()
 	knob.radius = 0.11
 	knob.height = 0.20
-	knob.radial_segments = 8
-	knob.rings = 5
+	knob.radial_segments = 12
+	knob.rings = 6
 	for end_s in [-1.0, 1.0]:
 		for k_side in [-1.0, 1.0]:
 			var km := MeshInstance3D.new()
@@ -1665,11 +1758,16 @@ func _place_ruin_wall(parent: Node3D, piece: String, pos: Vector3, yaw: float, s
 	return node
 
 
-func _build_rat_warren(_rat_region: Node = null) -> void:
+func _build_rat_warren(rat_region: Node = null) -> void:
+	if rat_region != null and rat_region.has_method("clear_editor_preview"):
+		rat_region.call("clear_editor_preview")
 	var warren_root := Node3D.new()
 	warren_root.name = "UndergroundRatWarren"
 	warren_root.position = Vector3(WorldLandmarks.RAT_WARREN_OFFSET.x, 0.0, WorldLandmarks.RAT_WARREN_OFFSET.y)
-	add_child(warren_root)
+	if rat_region != null and is_instance_valid(rat_region):
+		rat_region.add_child(warren_root)
+	else:
+		add_child(warren_root)
 
 	var mx := WorldLandmarks.RAT_WARREN_BAKED.x  # -240.0 (baked asset frame)
 	var my := WorldLandmarks.RAT_FORECOURT_Y     # 22.0
@@ -1724,7 +1822,7 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 
 	for pi in range(pave_pts.size()):
 		var pt := pave_pts[pi]
-		var py := float(sample_rw_h.call(pt.x, pt.y)) - 0.03
+		var py := float(sample_rw_h.call(pt.x, pt.y)) + 0.04 + float(pi % 7) * 0.003
 		var is_outer := absf(pt.x - mx) > 10.0 or pt.y > 325.0 or pt.y < 285.0
 		var sel := (pi * 7 + int(absf(pt.x + pt.y))) % 10
 		var tile_rel := "floor_tile_large.gltf.glb"
@@ -1733,24 +1831,24 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 		elif sel == 5 or sel == 8:
 			tile_rel = "floor_tile_large_rocks.gltf.glb"
 		var rot_y := float((pi * 3) % 4) * (PI * 0.5) + sin(float(pi) * 1.9) * 0.04
-		var scl_v := Vector3(1.06, 1.0, 1.06)
+		var scl_v := Vector3(0.94, 1.0, 0.94)
 		_place_ruin_wall(warren_root, tile_rel, Vector3(pt.x, py, pt.y), rot_y, scl_v, Vector2.ZERO, _vault_floor_mat, false)
 
 	# Zone A2: Ruined South Gatehouse & Broken Outer Curtain Walls (bz = 314..328)
 	for gp_s: float in [-1.0, 1.0]:
-		var gx_p := mx + gp_s * 5.4
+		var gx_p := mx + gp_s * 6.2
 		var gy_p := float(sample_rw_h.call(gx_p, 320.5)) - 0.12
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(gx_p, gy_p, 320.5), gp_s * 0.12, Vector3(1.35, 1.35, 1.35), Vector2(0.03 * gp_s, -0.04 * gp_s), _vault_trim_mat, true, Vector3(1.3, 4.2, 1.3))
-		_vault_torch(warren_root, Vector3(mx + gp_s * 4.65, my + 2.35, 320.5), -gp_s * PI * 0.5, 2.0, 14.5)
-	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx - 8.2, float(sample_rw_h.call(mx - 8.2, 320.5)) - 0.25, 320.5), 0.08, Vector3(1.15, 0.65, 1.15), Vector2.ZERO, _vault_trim_mat, false)
-	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + 8.4, float(sample_rw_h.call(mx + 8.4, 319.8)) - 0.25, 319.8), -0.10, Vector3(1.15, 0.65, 1.15), Vector2.ZERO, _vault_trim_mat, false)
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(gx_p, gy_p, 320.5), gp_s * 0.12, Vector3(1.75, 1.75, 1.75), Vector2(0.03 * gp_s, -0.04 * gp_s), _vault_trim_mat, true, Vector3(1.7, 5.5, 1.7))
+		_vault_torch(warren_root, Vector3(mx + gp_s * 5.2, my + 3.05, 320.5), -gp_s * PI * 0.5, 2.1, 16.0)
+	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx - 9.4, float(sample_rw_h.call(mx - 9.4, 320.5)) - 0.25, 320.5), 0.08, Vector3(1.45, 0.80, 1.45), Vector2.ZERO, _vault_trim_mat, false)
+	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + 9.6, float(sample_rw_h.call(mx + 9.6, 319.8)) - 0.25, 319.8), -0.10, Vector3(1.45, 0.80, 1.45), Vector2.ZERO, _vault_trim_mat, false)
 	for gwall: Array in [
-		["wall_archedwindow_open.gltf.glb", mx - 8.8, 320.5, 0.08, Vector3(1.05, 1.05, 1.05), Vector2(0.02, -0.04), Vector3(4.0, 3.8, 1.0)],
-		["wall_broken.gltf.glb", mx - 13.0, 318.8, 0.42, Vector3(1.0, 0.92, 1.0), Vector2(0.04, -0.06), Vector3(4.0, 3.4, 1.0)],
-		["wall_broken.gltf.glb", mx - 15.6, 324.2, PI * 0.5 + 0.14, Vector3(1.0, 0.80, 1.0), Vector2.ZERO, Vector3(4.0, 3.0, 1.0)],
-		["wall_archedwindow_open.gltf.glb", mx + 8.8, 319.8, -0.10, Vector3(1.05, 1.08, 1.05), Vector2(-0.02, 0.04), Vector3(4.0, 3.8, 1.0)],
-		["wall_cracked.gltf.glb", mx + 13.2, 317.8, -0.38, Vector3(1.0, 0.95, 1.0), Vector2(-0.04, 0.05), Vector3(4.0, 3.6, 1.0)],
-		["wall_broken.gltf.glb", mx + 15.8, 323.5, PI * 0.5 - 0.16, Vector3(1.0, 0.78, 1.0), Vector2.ZERO, Vector3(4.0, 3.0, 1.0)],
+		["wall_archedwindow_open.gltf.glb", mx - 9.8, 320.5, 0.08, Vector3(1.40, 1.42, 1.40), Vector2(0.02, -0.04), Vector3(5.4, 5.2, 1.3)],
+		["wall_broken.gltf.glb", mx - 14.6, 318.8, 0.42, Vector3(1.36, 1.25, 1.36), Vector2(0.04, -0.06), Vector3(5.4, 4.6, 1.3)],
+		["wall_broken.gltf.glb", mx - 17.2, 324.2, PI * 0.5 + 0.14, Vector3(1.35, 1.10, 1.35), Vector2.ZERO, Vector3(5.4, 4.1, 1.3)],
+		["wall_archedwindow_open.gltf.glb", mx + 9.8, 319.8, -0.10, Vector3(1.40, 1.44, 1.40), Vector2(-0.02, 0.04), Vector3(5.4, 5.2, 1.3)],
+		["wall_cracked.gltf.glb", mx + 14.8, 317.8, -0.38, Vector3(1.36, 1.28, 1.36), Vector2(-0.04, 0.05), Vector3(5.4, 4.8, 1.3)],
+		["wall_broken.gltf.glb", mx + 17.4, 323.5, PI * 0.5 - 0.16, Vector3(1.35, 1.08, 1.35), Vector2.ZERO, Vector3(5.4, 4.1, 1.3)],
 	]:
 		var gwx := float(gwall[1])
 		var gwz := float(gwall[2])
@@ -1758,35 +1856,35 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 		_place_ruin_wall(warren_root, String(gwall[0]), Vector3(gwx, gwy, gwz), float(gwall[3]), gwall[4] as Vector3, gwall[5] as Vector2, _vault_wall_mat, true, gwall[6] as Vector3)
 
 	# Toppled column drum beside the West gate pier + abandoned wagon & spilled crates on East side
-	var tc_y := float(sample_rw_h.call(mx - 5.6, 324.2)) + 0.42
-	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx - 5.6, tc_y, 324.2), 0.55, Vector3.ONE * 1.35, Vector2(0.12, 1.44), _vault_trim_mat, true, Vector3(2.4, 1.1, 1.1))
-	var wag_y := float(sample_rw_h.call(mx + 9.4, 315.2)) - 0.04
-	var wag := _place_ruin_wall(warren_root, "res://assets/village/Prop_Wagon.gltf", Vector3(mx + 9.4, wag_y, 315.2), -0.52, Vector3.ONE * 1.08, Vector2(0.05, -0.08), null, true, Vector3(2.6, 1.8, 1.9))
+	var tc_y := float(sample_rw_h.call(mx - 8.4, 324.2)) + 0.55
+	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx - 8.4, tc_y, 324.2), 0.55, Vector3.ONE * 1.75, Vector2(0.12, 1.44), _vault_trim_mat, true, Vector3(3.2, 1.4, 1.4))
+	var wag_y := float(sample_rw_h.call(mx + 10.4, 315.2)) - 0.06
+	var wag := _place_ruin_wall(warren_root, "res://assets/village/Prop_Wagon.gltf", Vector3(mx + 10.4, wag_y, 315.2), -0.52, Vector3.ONE * 1.55, Vector2(0.05, -0.08), null, true, Vector3(3.7, 2.6, 2.7))
 	_harmonize_prop_mats(wag, Color(0.44, 0.40, 0.36), 0.94, 0.04)
 
 	# Zone A3: Collapsed West Cloister & Broken Stone Aqueduct Cistern (bx = -274..-246, bz = 280..314)
 	for cw: Array in [
-		["wall_corner.gltf.glb", mx - 18.2, 312.0, 0.12, Vector3(1.0, 0.95, 1.0), Vector2.ZERO],
-		["wall_archedwindow_gated.gltf.glb", mx - 22.0, 307.2, PI * 0.5 + 0.06, Vector3(1.0, 1.0, 1.0), Vector2.ZERO],
-		["wall_broken.gltf.glb", mx - 22.4, 301.5, PI * 0.5 - 0.08, Vector3(1.0, 0.88, 1.0), Vector2(0.03, -0.04)],
-		["wall_cracked.gltf.glb", mx - 21.8, 295.5, PI * 0.5 + 0.22, Vector3(1.0, 0.94, 1.0), Vector2(0.05, 0.06)],
-		["wall_broken.gltf.glb", mx - 17.5, 291.5, -0.18, Vector3(1.0, 0.82, 1.0), Vector2(-0.04, 0.03)],
+		["wall_corner.gltf.glb", mx - 18.8, 312.0, 0.12, Vector3(1.36, 1.28, 1.36), Vector2.ZERO],
+		["wall_archedwindow_gated.gltf.glb", mx - 22.8, 307.2, PI * 0.5 + 0.06, Vector3(1.36, 1.36, 1.36), Vector2.ZERO],
+		["wall_broken.gltf.glb", mx - 23.2, 301.5, PI * 0.5 - 0.08, Vector3(1.36, 1.20, 1.36), Vector2(0.03, -0.04)],
+		["wall_cracked.gltf.glb", mx - 22.4, 295.5, PI * 0.5 + 0.22, Vector3(1.36, 1.26, 1.36), Vector2(0.05, 0.06)],
+		["wall_broken.gltf.glb", mx - 18.2, 291.5, -0.18, Vector3(1.36, 1.12, 1.36), Vector2(-0.04, 0.03)],
 	]:
 		var cwx := float(cw[1])
 		var cwz := float(cw[2])
 		var cwy := float(sample_rw_h.call(cwx, cwz)) - 0.22
-		_place_ruin_wall(warren_root, String(cw[0]), Vector3(cwx, cwy, cwz), float(cw[3]), cw[4] as Vector3, cw[5] as Vector2, _vault_wall_mat, true, Vector3(4.0, 3.6, 1.0))
+		_place_ruin_wall(warren_root, String(cw[0]), Vector3(cwx, cwy, cwz), float(cw[3]), cw[4] as Vector3, cw[5] as Vector2, _vault_wall_mat, true, Vector3(5.4, 4.9, 1.3))
 
 	for cp: Array in [
-		["pillar.gltf.glb", mx - 14.5, 308.5, 0.2, 1.35],
-		["column.gltf.glb", mx - 14.8, 302.0, 0.8, 0.85],
-		["pillar_decorated.gltf.glb", mx - 14.2, 295.8, -0.35, 1.45],
+		["pillar.gltf.glb", mx - 14.8, 308.5, 0.2, 1.75],
+		["column.gltf.glb", mx - 15.2, 302.0, 0.8, 1.15],
+		["pillar_decorated.gltf.glb", mx - 14.6, 295.8, -0.35, 1.90],
 	]:
 		var cpx := float(cp[1])
 		var cpz := float(cp[2])
 		var cpy := float(sample_rw_h.call(cpx, cpz)) - 0.10
-		_place_ruin_wall(warren_root, String(cp[0]), Vector3(cpx, cpy, cpz), float(cp[3]), Vector3.ONE * float(cp[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.1, 3.2, 1.1))
-	_vault_torch(warren_root, Vector3(mx - 13.7, my + 2.25, 295.8), PI * 0.5, 1.9, 13.5)
+		_place_ruin_wall(warren_root, String(cp[0]), Vector3(cpx, cpy, cpz), float(cp[3]), Vector3.ONE * float(cp[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.5, 4.4, 1.5))
+	_vault_torch(warren_root, Vector3(mx - 13.9, my + 2.95, 295.8), PI * 0.5, 2.0, 15.0)
 
 	# Ruined Stone Aqueduct Arch & Sunken Cistern Curb framing Western spring runoff waterfall
 	_place_ruin_wall(warren_root, "wall_arched.gltf.glb", Vector3(mx - 7.9, my - 0.15, 281.6), 0.20, Vector3(1.08, 1.08, 1.08), Vector2.ZERO, _vault_wall_mat, true, Vector3(4.2, 3.8, 1.0))
@@ -1827,77 +1925,77 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + 15.5, float(sample_rw_h.call(mx + 15.5, 301.0)) - 0.35, 301.0), 0.18, Vector3(1.3, 0.65, 1.3), Vector2.ZERO, _vault_trim_mat, false)
 	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + 20.5, float(sample_rw_h.call(mx + 20.5, 296.0)) - 0.35, 296.0), -0.25, Vector3(1.3, 0.65, 1.3), Vector2.ZERO, _vault_trim_mat, false)
 	for ew: Array in [
-		["wall_archedwindow_open.gltf.glb", mx + 16.5, 311.5, -0.15, Vector3(1.05, 1.12, 1.05), Vector2.ZERO],
-		["wall_corner.gltf.glb", mx + 21.5, 308.0, -0.65, Vector3(1.05, 1.10, 1.05), Vector2.ZERO],
-		["wall_archedwindow_gated.gltf.glb", mx + 23.2, 302.5, -PI * 0.5 + 0.12, Vector3(1.05, 1.15, 1.05), Vector2(-0.03, 0.04)],
-		["wall_broken.gltf.glb", mx + 22.8, 296.5, -PI * 0.5 - 0.14, Vector3(1.0, 0.90, 1.0), Vector2(-0.06, -0.05)],
-		["wall_cracked.gltf.glb", mx + 18.8, 291.2, -2.45, Vector3(1.0, 1.0, 1.0), Vector2.ZERO],
-		["wall_broken.gltf.glb", mx + 13.8, 289.0, 0.22, Vector3(1.0, 0.82, 1.0), Vector2(0.04, -0.05)],
+		["wall_archedwindow_open.gltf.glb", mx + 17.0, 311.5, -0.15, Vector3(1.40, 1.48, 1.40), Vector2.ZERO],
+		["wall_corner.gltf.glb", mx + 22.0, 308.0, -0.65, Vector3(1.40, 1.45, 1.40), Vector2.ZERO],
+		["wall_archedwindow_gated.gltf.glb", mx + 23.8, 302.5, -PI * 0.5 + 0.12, Vector3(1.40, 1.50, 1.40), Vector2(-0.03, 0.04)],
+		["wall_broken.gltf.glb", mx + 23.4, 296.5, -PI * 0.5 - 0.14, Vector3(1.36, 1.24, 1.36), Vector2(-0.06, -0.05)],
+		["wall_cracked.gltf.glb", mx + 19.2, 291.2, -2.45, Vector3(1.36, 1.36, 1.36), Vector2.ZERO],
+		["wall_broken.gltf.glb", mx + 14.2, 289.0, 0.22, Vector3(1.36, 1.12, 1.36), Vector2(0.04, -0.05)],
 	]:
 		var ewx := float(ew[1])
 		var ewz := float(ew[2])
 		var ewy := float(sample_rw_h.call(ewx, ewz)) - 0.22
-		_place_ruin_wall(warren_root, String(ew[0]), Vector3(ewx, ewy, ewz), float(ew[3]), ew[4] as Vector3, ew[5] as Vector2, _vault_wall_mat, true, Vector3(4.0, 3.8, 1.0))
+		_place_ruin_wall(warren_root, String(ew[0]), Vector3(ewx, ewy, ewz), float(ew[3]), ew[4] as Vector3, ew[5] as Vector2, _vault_wall_mat, true, Vector3(5.4, 5.1, 1.3))
 
 	for ep_p: Array in [
-		["pillar_decorated.gltf.glb", mx + 13.5, 305.5, -0.25, 1.45],
-		["column.gltf.glb", mx + 19.2, 303.2, 0.45, 1.65],
-		["column.gltf.glb", mx + 14.2, 295.0, 1.10, 0.78],
-		["pillar.gltf.glb", mx + 19.6, 294.5, -0.60, 1.25],
+		["pillar_decorated.gltf.glb", mx + 13.8, 305.5, -0.25, 1.90],
+		["column.gltf.glb", mx + 19.6, 303.2, 0.45, 2.15],
+		["column.gltf.glb", mx + 14.5, 295.0, 1.10, 1.05],
+		["pillar.gltf.glb", mx + 20.0, 294.5, -0.60, 1.65],
 	]:
 		var epx := float(ep_p[1])
 		var epz := float(ep_p[2])
 		var epy := float(sample_rw_h.call(epx, epz)) - 0.10
-		_place_ruin_wall(warren_root, String(ep_p[0]), Vector3(epx, epy, epz), float(ep_p[3]), Vector3.ONE * float(ep_p[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.1, 3.4, 1.1))
-	_vault_torch(warren_root, Vector3(mx + 12.9, my + 2.30, 305.5), -PI * 0.5, 2.0, 15.0)
+		_place_ruin_wall(warren_root, String(ep_p[0]), Vector3(epx, epy, epz), float(ep_p[3]), Vector3.ONE * float(ep_p[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.5, 4.6, 1.5))
+	_vault_torch(warren_root, Vector3(mx + 13.0, my + 3.00, 305.5), -PI * 0.5, 2.1, 16.5)
 	CavePropFX.spawn_bark_fallen_log(warren_root, Vector3(mx + 16.5, my + 1.55, 304.2), 0.35, 0.58, 5.8, 0.26, 211, _warren_bark_mat, true)
 	CavePropFX.spawn_bark_fallen_log(warren_root, Vector3(mx + 17.8, my + 1.65, 297.2), -0.42, 0.65, 6.2, 0.24, 212, _warren_bark_mat, true)
 
-	var wt_banner := _place_piece(warren_root, "banner_patternA_red.gltf.glb", Vector3(mx + 16.0, my + 1.15, 310.7), PI - 0.15, Vector3.ONE * 1.25)
+	var wt_banner := _place_piece(warren_root, "banner_patternA_red.gltf.glb", Vector3(mx + 16.5, my + 1.65, 310.7), PI - 0.15, Vector3.ONE * 1.65)
 	_harmonize_prop_mats(wt_banner, Color(0.45, 0.40, 0.36), 0.94, 0.04)
 
 	# Zone A5: Collapsed Stone Vault Breach Mouth (bx = -248..-232, bz = 278.5 — NO STAIRCASE!) & Upper Hillside Ruined Citadel Crest
 	for bp_s: float in [-1.0, 1.0]:
-		_vault_box_solid(warren_root, Vector3(mx + bp_s * 5.05, my + 1.75, 279.6), Vector3(1.85, 4.1, 2.5), _vault_wall_mat, LAYER_OBSTACLES, Vector3(0.0, bp_s * 6.0, 0.0))
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(mx + bp_s * 4.75, my - 0.10, 280.4), bp_s * 0.18, Vector3.ONE * 1.50, Vector2(0.07, bp_s * 0.14), _vault_trim_mat, true, Vector3(1.3, 4.2, 1.3))
-		_place_ruin_wall(warren_root, "wall_broken.gltf.glb", Vector3(mx + bp_s * 8.1, my - 0.15, 280.5), bp_s * -0.26, Vector3(1.05, 1.0, 1.05), Vector2(0.03, bp_s * -0.05), _vault_wall_mat, true, Vector3(4.0, 3.6, 1.0))
-		_vault_torch(warren_root, Vector3(mx + bp_s * 3.90, my + 2.35, 280.6), -bp_s * PI * 0.5, 2.2, 15.5)
-	_vault_box_mesh(warren_root, Vector3(mx, my + 4.75, 278.2), Vector3(10.6, 1.35, 2.4), _vault_trim_mat, Vector3(4.0, 2.0, -3.5))
-	CavePropFX.spawn_bark_fallen_log(warren_root, Vector3(mx, my + 4.25, 279.2), 0.04, 0.0, 9.2, 0.34, 181, _warren_bark_mat, false)
+		_vault_box_solid(warren_root, Vector3(mx + bp_s * 6.05, my + 2.35, 279.6), Vector3(2.2, 5.4, 2.8), _vault_wall_mat, LAYER_OBSTACLES, Vector3(0.0, bp_s * 6.0, 0.0))
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(mx + bp_s * 5.70, my - 0.10, 280.4), bp_s * 0.18, Vector3.ONE * 1.95, Vector2(0.07, bp_s * 0.14), _vault_trim_mat, true, Vector3(1.7, 5.5, 1.7))
+		_place_ruin_wall(warren_root, "wall_broken.gltf.glb", Vector3(mx + bp_s * 9.4, my - 0.15, 280.5), bp_s * -0.26, Vector3(1.40, 1.32, 1.40), Vector2(0.03, bp_s * -0.05), _vault_wall_mat, true, Vector3(5.4, 4.9, 1.3))
+		_vault_torch(warren_root, Vector3(mx + bp_s * 4.65, my + 3.10, 280.6), -bp_s * PI * 0.5, 2.3, 17.5)
+	_vault_box_mesh(warren_root, Vector3(mx, my + 6.05, 278.2), Vector3(12.6, 1.65, 2.8), _vault_trim_mat, Vector3(4.0, 2.0, -3.5))
+	CavePropFX.spawn_bark_fallen_log(warren_root, Vector3(mx, my + 5.45, 279.2), 0.04, 0.0, 11.2, 0.40, 181, _warren_bark_mat, false)
 
 	# Upper Hillside Ruined Citadel Crest overlooking the Courtyard (bz = 264..272)
 	for crest_w: Array in [
-		["wall_broken.gltf.glb", mx - 12.0, 271.5, 0.15, Vector3(1.05, 1.05, 1.05)],
-		["wall_archedwindow_open.gltf.glb", mx - 5.5, 267.5, 0.08, Vector3(1.08, 1.12, 1.08)],
-		["wall_cracked.gltf.glb", mx + 4.5, 267.0, -0.12, Vector3(1.08, 1.08, 1.08)],
-		["wall_broken.gltf.glb", mx + 12.5, 270.8, -0.22, Vector3(1.05, 1.05, 1.05)],
-		["wall_corner.gltf.glb", mx - 17.5, 265.0, 0.55, Vector3(1.05, 1.0, 1.05)],
-		["wall_corner.gltf.glb", mx + 18.0, 264.5, -0.60, Vector3(1.05, 1.0, 1.05)],
+		["wall_broken.gltf.glb", mx - 12.6, 271.5, 0.15, Vector3(1.40, 1.38, 1.40)],
+		["wall_archedwindow_open.gltf.glb", mx - 5.8, 267.5, 0.08, Vector3(1.42, 1.46, 1.42)],
+		["wall_cracked.gltf.glb", mx + 4.8, 267.0, -0.12, Vector3(1.42, 1.42, 1.42)],
+		["wall_broken.gltf.glb", mx + 13.0, 270.8, -0.22, Vector3(1.40, 1.38, 1.40)],
+		["wall_corner.gltf.glb", mx - 18.2, 265.0, 0.55, Vector3(1.40, 1.34, 1.40)],
+		["wall_corner.gltf.glb", mx + 18.8, 264.5, -0.60, Vector3(1.40, 1.34, 1.40)],
 	]:
 		var crx := float(crest_w[1])
 		var crz := float(crest_w[2])
 		var cry := float(sample_rw_h.call(crx, crz)) - 0.45
-		_place_ruin_wall(warren_root, String(crest_w[0]), Vector3(crx, cry, crz), float(crest_w[3]), crest_w[4] as Vector3, Vector2(0.04, 0.03), _vault_wall_mat, true, Vector3(4.0, 3.8, 1.0))
+		_place_ruin_wall(warren_root, String(crest_w[0]), Vector3(crx, cry, crz), float(crest_w[3]), crest_w[4] as Vector3, Vector2(0.04, 0.03), _vault_wall_mat, true, Vector3(5.4, 5.1, 1.3))
 	for crest_p: Array in [
-		[mx - 8.5, 265.0, 1.65, Vector2(0.05, -0.07)],
-		[mx + 9.0, 264.5, 1.75, Vector2(-0.04, 0.08)],
+		[mx - 8.8, 265.0, 2.15, Vector2(0.05, -0.07)],
+		[mx + 9.4, 264.5, 2.25, Vector2(-0.04, 0.08)],
 	]:
 		var cpx := float(crest_p[0])
 		var cpz := float(crest_p[1])
 		var cpy := float(sample_rw_h.call(cpx, cpz)) - 0.45
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(cpx, cpy, cpz), cpx * 0.2, Vector3.ONE * float(crest_p[2]), crest_p[3] as Vector2, _vault_trim_mat, true, Vector3(1.4, 4.5, 1.4))
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(cpx, cpy, cpz), cpx * 0.2, Vector3.ONE * float(crest_p[2]), crest_p[3] as Vector2, _vault_trim_mat, true, Vector3(1.8, 5.8, 1.8))
 
 	# Asymmetrical Karst Cliff Buttress welding the Collapsed Breach Mouth & Citadel Crest into the hillside
 	var ext_cliffs: Array[Array] = [
-		[Vector3(mx - 9.4, my + 2.8, 278.4), Vector3(3.4, 3.3, 3.2), 102],
-		[Vector3(mx - 14.0, my + 2.2, 279.8), Vector3(3.8, 2.8, 3.4), 103],
-		[Vector3(mx + 9.8, my + 3.2, 278.2), Vector3(3.6, 3.8, 3.3), 105],
-		[Vector3(mx + 14.2, my + 2.4, 281.0), Vector3(3.6, 3.0, 3.2), 106],
-		[Vector3(mx, my + 5.7, 276.6), Vector3(4.0, 2.3, 3.2), 107],
-		[Vector3(mx - 4.2, my + 5.1, 276.8), Vector3(3.4, 2.4, 3.0), 108],
-		[Vector3(mx + 4.4, my + 5.3, 276.8), Vector3(3.5, 2.5, 3.0), 109],
-		[Vector3(mx - 22.0, my + 1.8, 284.0), Vector3(3.2, 2.4, 3.0), 110],
-		[Vector3(mx + 22.4, my + 1.8, 285.5), Vector3(3.4, 2.4, 3.2), 111],
+		[Vector3(mx - 10.6, my + 3.4, 278.4), Vector3(4.2, 4.1, 3.8), 102],
+		[Vector3(mx - 15.6, my + 2.6, 279.8), Vector3(4.5, 3.4, 3.8), 103],
+		[Vector3(mx + 11.0, my + 3.8, 278.2), Vector3(4.3, 4.6, 3.8), 105],
+		[Vector3(mx + 15.8, my + 2.8, 281.0), Vector3(4.2, 3.6, 3.8), 106],
+		[Vector3(mx, my + 7.2, 276.4), Vector3(5.2, 2.8, 3.8), 107],
+		[Vector3(mx - 5.2, my + 6.4, 276.6), Vector3(4.2, 3.0, 3.6), 108],
+		[Vector3(mx + 5.4, my + 6.6, 276.6), Vector3(4.3, 3.1, 3.6), 109],
+		[Vector3(mx - 23.0, my + 2.2, 284.0), Vector3(3.8, 2.8, 3.6), 110],
+		[Vector3(mx + 23.4, my + 2.2, 285.5), Vector3(4.0, 2.8, 3.8), 111],
 	]
 	for cl in ext_cliffs:
 		CavePropFX.spawn_fractured_boulder(warren_root, cl[0] as Vector3, cl[1] as Vector3, _vault_rock_mat, int(cl[2]), true)
@@ -1920,15 +2018,15 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 
 	# Smuggler & Cloister Rat Hoards, Brick Debris, Gnawed Bones, Ivy Vines & DeadTree Snags
 	for eb_spec: Array in [
-		[Vector3(mx + 6.8, float(sample_rw_h.call(mx + 6.8, 314.6)), 314.6), "barrel_small_stack.gltf.glb", -0.45, 1.12],
-		[Vector3(mx - 18.8, float(sample_rw_h.call(mx - 18.8, 303.8)), 303.8), "crates_stacked.gltf.glb", 0.35, 1.15],
-		[Vector3(mx - 17.4, float(sample_rw_h.call(mx - 17.4, 306.0)), 306.0), "keg_decorated.gltf.glb", -0.65, 1.15],
-		[Vector3(mx + 15.8, float(sample_rw_h.call(mx + 15.8, 307.2)), 307.2), "barrel_large_decorated.gltf.glb", -0.75, 1.18],
+		[Vector3(mx + 7.2, float(sample_rw_h.call(mx + 7.2, 314.6)), 314.6), "barrel_small_stack.gltf.glb", -0.45, 1.58],
+		[Vector3(mx - 19.2, float(sample_rw_h.call(mx - 19.2, 303.8)), 303.8), "crates_stacked.gltf.glb", 0.35, 1.60],
+		[Vector3(mx - 17.6, float(sample_rw_h.call(mx - 17.6, 306.4)), 306.4), "keg_decorated.gltf.glb", -0.65, 1.60],
+		[Vector3(mx + 16.2, float(sample_rw_h.call(mx + 16.2, 307.2)), 307.2), "barrel_large_decorated.gltf.glb", -0.75, 1.62],
 	]:
 		var ep := eb_spec[0] as Vector3
 		var en := _place_piece(warren_root, String(eb_spec[1]), ep, float(eb_spec[2]), Vector3.ONE * float(eb_spec[3]))
 		_harmonize_prop_mats(en, Color(0.45, 0.40, 0.35), 0.94, 0.04)
-		_add_box_body(warren_root, ep + Vector3(0.0, 0.9, 0.0), Vector3(1.8, 1.8, 1.8), LAYER_OBSTACLES)
+		_add_box_body(warren_root, ep + Vector3(0.0, 1.25, 0.0), Vector3(2.4, 2.5, 2.4), LAYER_OBSTACLES)
 
 	for brk: Array in [
 		["Prop_Brick1.gltf", mx - 6.8, 317.8, 0.4],
@@ -2021,66 +2119,66 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 	# Zone A6: Outer Southern Barbican Gatehouse, Processional Avenue & Sweep Walls (bz = 334..364)
 	# --------------------------------------------------------------------------
 	for bg_s: float in [-1.0, 1.0]:
-		var bgx := mx + bg_s * 5.8
+		var bgx := mx + bg_s * 6.4
 		var bgy := float(sample_rw_h.call(bgx, 354.5)) - 0.15
-		_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + bg_s * 7.8, bgy - 0.15, 354.5), bg_s * 0.12, Vector3(1.25, 0.70, 1.25), Vector2.ZERO, _vault_trim_mat, false)
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(bgx, bgy, 354.5), bg_s * 0.18, Vector3.ONE * 1.50, Vector2(0.03 * bg_s, -0.05 * bg_s), _vault_trim_mat, true, Vector3(1.4, 4.5, 1.4))
-		_vault_torch(warren_root, Vector3(mx + bg_s * 5.05, bgy + 2.55, 354.5), -bg_s * PI * 0.5, 2.0, 14.5)
+		_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(mx + bg_s * 8.6, bgy - 0.15, 354.5), bg_s * 0.12, Vector3(1.50, 0.85, 1.50), Vector2.ZERO, _vault_trim_mat, false)
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(bgx, bgy, 354.5), bg_s * 0.18, Vector3.ONE * 1.95, Vector2(0.03 * bg_s, -0.05 * bg_s), _vault_trim_mat, true, Vector3(1.8, 5.8, 1.8))
+		_vault_torch(warren_root, Vector3(mx + bg_s * 5.4, bgy + 3.25, 354.5), -bg_s * PI * 0.5, 2.2, 16.5)
 	for barb_w: Array in [
-		["wall_archedwindow_open.gltf.glb", mx - 9.4, 354.0, 0.08, Vector3(1.08, 1.12, 1.08), Vector2(0.02, -0.04)],
-		["wall_broken.gltf.glb", mx - 14.2, 351.2, 0.38, Vector3(1.05, 0.96, 1.05), Vector2(0.04, -0.06)],
-		["wall_corner.gltf.glb", mx - 19.2, 347.8, 0.65, Vector3(1.05, 0.92, 1.05), Vector2.ZERO],
-		["wall_broken.gltf.glb", mx - 24.8, 342.0, PI * 0.42, Vector3(1.0, 0.85, 1.0), Vector2(0.03, 0.04)],
-		["wall_archedwindow_open.gltf.glb", mx + 9.4, 353.6, -0.10, Vector3(1.08, 1.12, 1.08), Vector2(-0.02, 0.04)],
-		["wall_cracked.gltf.glb", mx + 14.4, 350.6, -0.36, Vector3(1.05, 1.0, 1.05), Vector2(-0.03, 0.05)],
-		["wall_corner.gltf.glb", mx + 19.6, 346.8, -0.72, Vector3(1.05, 0.94, 1.05), Vector2.ZERO],
-		["wall_archedwindow_gated.gltf.glb", mx + 24.6, 340.5, -PI * 0.38, Vector3(1.0, 0.90, 1.0), Vector2(-0.04, -0.03)],
+		["wall_archedwindow_open.gltf.glb", mx - 10.2, 354.0, 0.08, Vector3(1.42, 1.46, 1.42), Vector2(0.02, -0.04)],
+		["wall_broken.gltf.glb", mx - 15.2, 351.2, 0.38, Vector3(1.38, 1.28, 1.38), Vector2(0.04, -0.06)],
+		["wall_corner.gltf.glb", mx - 20.4, 347.8, 0.65, Vector3(1.38, 1.24, 1.38), Vector2.ZERO],
+		["wall_broken.gltf.glb", mx - 26.0, 342.0, PI * 0.42, Vector3(1.35, 1.15, 1.35), Vector2(0.03, 0.04)],
+		["wall_archedwindow_open.gltf.glb", mx + 10.2, 353.6, -0.10, Vector3(1.42, 1.46, 1.42), Vector2(-0.02, 0.04)],
+		["wall_cracked.gltf.glb", mx + 15.4, 350.6, -0.36, Vector3(1.38, 1.32, 1.38), Vector2(-0.03, 0.05)],
+		["wall_corner.gltf.glb", mx + 20.8, 346.8, -0.72, Vector3(1.38, 1.26, 1.38), Vector2.ZERO],
+		["wall_archedwindow_gated.gltf.glb", mx + 25.8, 340.5, -PI * 0.38, Vector3(1.35, 1.22, 1.35), Vector2(-0.04, -0.03)],
 	]:
 		var bwx := float(barb_w[1])
 		var bwz := float(barb_w[2])
 		var bwy := float(sample_rw_h.call(bwx, bwz)) - 0.28
-		_place_ruin_wall(warren_root, String(barb_w[0]), Vector3(bwx, bwy, bwz), float(barb_w[3]), barb_w[4] as Vector3, barb_w[5] as Vector2, _vault_wall_mat, true, Vector3(4.0, 3.8, 1.0))
+		_place_ruin_wall(warren_root, String(barb_w[0]), Vector3(bwx, bwy, bwz), float(barb_w[3]), barb_w[4] as Vector3, barb_w[5] as Vector2, _vault_wall_mat, true, Vector3(5.4, 5.0, 1.3))
 
 	# Toppled column & abandoned smuggler wagon wreck between Barbican & Inner Gate
-	var bcol_y := float(sample_rw_h.call(mx + 6.4, 358.2)) + 0.42
-	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx + 6.4, bcol_y, 358.2), -0.62, Vector3.ONE * 1.40, Vector2(-0.10, 1.44), _vault_trim_mat, true, Vector3(2.4, 1.1, 1.1))
-	var bwag_y := float(sample_rw_h.call(mx - 8.6, 341.0)) - 0.04
-	var bwag := _place_ruin_wall(warren_root, "res://assets/village/Prop_Wagon.gltf", Vector3(mx - 8.6, bwag_y, 341.0), 0.72, Vector3.ONE * 1.12, Vector2(-0.06, 0.08), null, true, Vector3(2.6, 1.8, 1.9))
+	var bcol_y := float(sample_rw_h.call(mx + 8.6, 358.2)) + 0.52
+	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx + 8.6, bcol_y, 358.2), -0.62, Vector3.ONE * 1.75, Vector2(-0.10, 1.44), _vault_trim_mat, true, Vector3(3.2, 1.4, 1.4))
+	var bwag_y := float(sample_rw_h.call(mx - 9.4, 341.0)) - 0.06
+	var bwag := _place_ruin_wall(warren_root, "res://assets/village/Prop_Wagon.gltf", Vector3(mx - 9.4, bwag_y, 341.0), 0.72, Vector3.ONE * 1.55, Vector2(-0.06, 0.08), null, true, Vector3(3.7, 2.6, 2.7))
 	_harmonize_prop_mats(bwag, Color(0.44, 0.40, 0.36), 0.94, 0.04)
-	var bcr := _place_piece(warren_root, "crates_stacked.gltf.glb", Vector3(mx - 11.4, bwag_y, 338.8), 0.40, Vector3.ONE * 1.15)
+	var bcr := _place_piece(warren_root, "crates_stacked.gltf.glb", Vector3(mx - 12.6, bwag_y, 338.8), 0.40, Vector3.ONE * 1.60)
 	_harmonize_prop_mats(bcr, Color(0.44, 0.40, 0.35), 0.94, 0.04)
-	_add_box_body(warren_root, Vector3(mx - 11.4, bwag_y + 0.9, 338.8), Vector3(1.8, 1.8, 1.8), LAYER_OBSTACLES)
+	_add_box_body(warren_root, Vector3(mx - 12.6, bwag_y + 1.25, 338.8), Vector3(2.4, 2.5, 2.4), LAYER_OBSTACLES)
 
 	# --------------------------------------------------------------------------
 	# Zone A3b: Far West Ruined Granary Hall & Extended Aqueduct Arcade (bx = mx - 44..-24)
 	# --------------------------------------------------------------------------
 	for aq_x: float in [mx - 12.2, mx - 16.6, mx - 21.0, mx - 25.4]:
 		var aqy := float(sample_rw_h.call(aq_x, 281.6)) - 0.20
-		_place_ruin_wall(warren_root, "wall_arched.gltf.glb", Vector3(aq_x, aqy, 281.6), 0.06, Vector3(1.06, 1.08, 1.06), Vector2.ZERO, _vault_wall_mat, true, Vector3(4.2, 3.8, 1.0))
+		_place_ruin_wall(warren_root, "wall_arched.gltf.glb", Vector3(aq_x, aqy, 281.6), 0.06, Vector3(1.38, 1.42, 1.38), Vector2.ZERO, _vault_wall_mat, true, Vector3(5.6, 5.1, 1.3))
 	for gran_w: Array in [
-		["wall_corner.gltf.glb", mx - 37.5, 320.5, 0.14, Vector3(1.05, 0.95, 1.05), Vector2.ZERO],
-		["wall_archedwindow_open.gltf.glb", mx - 38.8, 314.5, PI * 0.5 - 0.06, Vector3(1.05, 1.02, 1.05), Vector2(0.03, -0.04)],
-		["wall_broken.gltf.glb", mx - 39.2, 308.0, PI * 0.5 + 0.12, Vector3(1.05, 0.90, 1.05), Vector2(0.04, 0.05)],
-		["wall_cracked.gltf.glb", mx - 38.4, 301.0, PI * 0.5 - 0.15, Vector3(1.05, 0.95, 1.05), Vector2(-0.04, 0.04)],
-		["wall_broken.gltf.glb", mx - 33.5, 294.5, -0.18, Vector3(1.05, 0.85, 1.05), Vector2(0.03, -0.05)],
-		["wall_broken.gltf.glb", mx - 28.0, 323.0, 0.24, Vector3(1.02, 0.82, 1.02), Vector2.ZERO],
+		["wall_corner.gltf.glb", mx - 37.5, 320.5, 0.14, Vector3(1.38, 1.28, 1.38), Vector2.ZERO],
+		["wall_archedwindow_open.gltf.glb", mx - 38.8, 314.5, PI * 0.5 - 0.06, Vector3(1.38, 1.36, 1.38), Vector2(0.03, -0.04)],
+		["wall_broken.gltf.glb", mx - 39.2, 308.0, PI * 0.5 + 0.12, Vector3(1.38, 1.22, 1.38), Vector2(0.04, 0.05)],
+		["wall_cracked.gltf.glb", mx - 38.4, 301.0, PI * 0.5 - 0.15, Vector3(1.38, 1.28, 1.38), Vector2(-0.04, 0.04)],
+		["wall_broken.gltf.glb", mx - 33.5, 294.5, -0.18, Vector3(1.38, 1.15, 1.38), Vector2(0.03, -0.05)],
+		["wall_broken.gltf.glb", mx - 28.0, 323.0, 0.24, Vector3(1.35, 1.12, 1.35), Vector2.ZERO],
 	]:
 		var grx := float(gran_w[1])
 		var grz := float(gran_w[2])
 		var gry := float(sample_rw_h.call(grx, grz)) - 0.28
-		_place_ruin_wall(warren_root, String(gran_w[0]), Vector3(grx, gry, grz), float(gran_w[3]), gran_w[4] as Vector3, gran_w[5] as Vector2, _vault_wall_mat, true, Vector3(4.0, 3.6, 1.0))
+		_place_ruin_wall(warren_root, String(gran_w[0]), Vector3(grx, gry, grz), float(gran_w[3]), gran_w[4] as Vector3, gran_w[5] as Vector2, _vault_wall_mat, true, Vector3(5.4, 4.9, 1.3))
 	for gp_w: Array in [
-		["pillar.gltf.glb", mx - 32.5, 314.0, 0.3, 1.40],
-		["column.gltf.glb", mx - 32.8, 306.5, -0.4, 0.88],
-		["pillar_decorated.gltf.glb", mx - 32.2, 299.5, 0.6, 1.50],
-		["column.gltf.glb", mx - 27.2, 310.0, 1.2, 1.25],
+		["pillar.gltf.glb", mx - 32.5, 314.0, 0.3, 1.85],
+		["column.gltf.glb", mx - 32.8, 306.5, -0.4, 1.18],
+		["pillar_decorated.gltf.glb", mx - 32.2, 299.5, 0.6, 1.95],
+		["column.gltf.glb", mx - 27.2, 310.0, 1.2, 1.65],
 	]:
 		var pxw := float(gp_w[1])
 		var pzw := float(gp_w[2])
 		var pyw := float(sample_rw_h.call(pxw, pzw)) - 0.15
-		_place_ruin_wall(warren_root, String(gp_w[0]), Vector3(pxw, pyw, pzw), float(gp_w[3]), Vector3.ONE * float(gp_w[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.2, 3.5, 1.2))
-	_vault_torch(warren_root, Vector3(mx - 31.6, float(sample_rw_h.call(mx - 32.2, 299.5)) + 2.35, 299.5), PI * 0.5, 1.9, 13.5)
-	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx - 29.5, float(sample_rw_h.call(mx - 29.5, 303.5)) + 0.42, 303.5), 0.85, Vector3.ONE * 1.35, Vector2(0.08, 1.45), _vault_trim_mat, true, Vector3(2.4, 1.1, 1.1))
+		_place_ruin_wall(warren_root, String(gp_w[0]), Vector3(pxw, pyw, pzw), float(gp_w[3]), Vector3.ONE * float(gp_w[4]), Vector2.ZERO, _vault_trim_mat, true, Vector3(1.6, 4.6, 1.6))
+	_vault_torch(warren_root, Vector3(mx - 31.6, float(sample_rw_h.call(mx - 32.2, 299.5)) + 3.05, 299.5), PI * 0.5, 2.0, 15.0)
+	_place_ruin_wall(warren_root, "column.gltf.glb", Vector3(mx - 29.5, float(sample_rw_h.call(mx - 29.5, 303.5)) + 0.54, 303.5), 0.85, Vector3.ONE * 1.75, Vector2(0.08, 1.45), _vault_trim_mat, true, Vector3(3.2, 1.4, 1.4))
 	_place_nature_scene(warren_root, "res://assets/nature_extra/DeadTree_1.gltf", Vector3(mx - 35.8, float(sample_rw_h.call(mx - 35.8, 310.5)) - 0.16, 310.5), 0.75, 2.15)
 
 	# --------------------------------------------------------------------------
@@ -2089,50 +2187,50 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 	var btx := mx + 30.5
 	var btz := 304.0
 	var bty := float(sample_rw_h.call(btx, btz)) - 0.25
-	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(btx, bty - 0.10, btz), 0.12, Vector3(1.85, 0.85, 1.85), Vector2.ZERO, _vault_trim_mat, false)
+	_place_ruin_wall(warren_root, "floor_foundation_allsides.gltf.glb", Vector3(btx, bty - 0.10, btz), 0.12, Vector3(2.40, 1.10, 2.40), Vector2.ZERO, _vault_trim_mat, false)
 	for bt_l: Array in [
-		["wall_corner.gltf.glb", btx + 2.4, btz + 2.4, -0.55, Vector3(1.08, 1.15, 1.08)],
-		["wall_archedwindow_gated.gltf.glb", btx + 3.2, btz - 1.8, -PI * 0.5 + 0.10, Vector3(1.08, 1.15, 1.08)],
-		["wall_broken.gltf.glb", btx - 1.8, btz - 3.2, -2.90, Vector3(1.05, 1.10, 1.05)],
+		["wall_corner.gltf.glb", btx + 3.1, btz + 3.1, -0.55, Vector3(1.42, 1.50, 1.42)],
+		["wall_archedwindow_gated.gltf.glb", btx + 4.1, btz - 2.2, -PI * 0.5 + 0.10, Vector3(1.42, 1.50, 1.42)],
+		["wall_broken.gltf.glb", btx - 2.2, btz - 4.1, -2.90, Vector3(1.38, 1.44, 1.38)],
 	]:
-		_place_ruin_wall(warren_root, String(bt_l[0]), Vector3(float(bt_l[1]), bty, float(bt_l[2])), float(bt_l[3]), bt_l[4] as Vector3, Vector2.ZERO, _vault_wall_mat, true, Vector3(4.0, 4.0, 1.0))
-	# Upper Bell-Tower Second-Story Remnant rising ~6.5m above courtyard
-	_place_ruin_wall(warren_root, "wall_archedwindow_open.gltf.glb", Vector3(btx + 3.0, bty + 3.55, btz - 1.6), -PI * 0.5 + 0.10, Vector3(1.05, 0.92, 1.05), Vector2(-0.04, 0.03), _vault_wall_mat, false)
-	_place_ruin_wall(warren_root, "wall_broken.gltf.glb", Vector3(btx + 2.2, bty + 3.55, btz + 2.2), -0.55, Vector3(1.02, 0.80, 1.02), Vector2.ZERO, _vault_wall_mat, false)
-	_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(btx - 2.2, bty, btz + 2.2), -0.45, Vector3.ONE * 1.65, Vector2.ZERO, _vault_trim_mat, true, Vector3(1.4, 4.8, 1.4))
-	_vault_torch(warren_root, Vector3(btx - 2.6, bty + 2.55, btz + 2.2), -PI * 0.5, 2.1, 15.0)
-	var bt_ban := _place_piece(warren_root, "banner_shield_blue.gltf.glb", Vector3(btx + 2.4, bty + 3.2, btz - 1.6), -PI * 0.5 + 0.10, Vector3.ONE * 1.35)
+		_place_ruin_wall(warren_root, String(bt_l[0]), Vector3(float(bt_l[1]), bty, float(bt_l[2])), float(bt_l[3]), bt_l[4] as Vector3, Vector2.ZERO, _vault_wall_mat, true, Vector3(5.4, 5.2, 1.3))
+	# Upper Bell-Tower Second-Story Remnant rising ~8.8m above courtyard
+	_place_ruin_wall(warren_root, "wall_archedwindow_open.gltf.glb", Vector3(btx + 3.9, bty + 4.65, btz - 2.0), -PI * 0.5 + 0.10, Vector3(1.38, 1.22, 1.38), Vector2(-0.04, 0.03), _vault_wall_mat, false)
+	_place_ruin_wall(warren_root, "wall_broken.gltf.glb", Vector3(btx + 2.9, bty + 4.65, btz + 2.9), -0.55, Vector3(1.35, 1.08, 1.35), Vector2.ZERO, _vault_wall_mat, false)
+	_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(btx - 2.8, bty, btz + 2.8), -0.45, Vector3.ONE * 2.15, Vector2.ZERO, _vault_trim_mat, true, Vector3(1.8, 6.2, 1.8))
+	_vault_torch(warren_root, Vector3(btx - 3.3, bty + 3.35, btz + 2.8), -PI * 0.5, 2.2, 16.5)
+	var bt_ban := _place_piece(warren_root, "banner_shield_blue.gltf.glb", Vector3(btx + 3.1, bty + 4.2, btz - 2.0), -PI * 0.5 + 0.10, Vector3.ONE * 1.75)
 	_harmonize_prop_mats(bt_ban, Color(0.45, 0.42, 0.38), 0.94, 0.04)
-	_place_nature_scene(warren_root, "res://assets/village/Prop_Vine2.gltf", Vector3(btx + 2.5, bty + 5.6, btz - 1.6), -PI * 0.5, 1.35)
+	_place_nature_scene(warren_root, "res://assets/village/Prop_Vine2.gltf", Vector3(btx + 3.2, bty + 7.2, btz - 2.0), -PI * 0.5, 1.70)
 	for ab_w: Array in [
-		["wall_arched.gltf.glb", mx + 36.2, 314.0, -0.35, Vector3(1.05, 1.05, 1.05)],
-		["wall_broken.gltf.glb", mx + 37.8, 294.0, -PI * 0.5 - 0.18, Vector3(1.05, 0.92, 1.05)],
-		["wall_cracked.gltf.glb", mx + 31.8, 287.5, 0.25, Vector3(1.05, 0.95, 1.05)],
-		["wall_broken.gltf.glb", mx + 29.0, 321.5, -0.28, Vector3(1.02, 0.85, 1.02)],
+		["wall_arched.gltf.glb", mx + 36.2, 314.0, -0.35, Vector3(1.38, 1.38, 1.38)],
+		["wall_broken.gltf.glb", mx + 37.8, 294.0, -PI * 0.5 - 0.18, Vector3(1.38, 1.24, 1.38)],
+		["wall_cracked.gltf.glb", mx + 31.8, 287.5, 0.25, Vector3(1.38, 1.28, 1.38)],
+		["wall_broken.gltf.glb", mx + 29.0, 321.5, -0.28, Vector3(1.35, 1.15, 1.35)],
 	]:
 		var awx := float(ab_w[1])
 		var awz := float(ab_w[2])
 		var awy := float(sample_rw_h.call(awx, awz)) - 0.28
-		_place_ruin_wall(warren_root, String(ab_w[0]), Vector3(awx, awy, awz), float(ab_w[3]), ab_w[4] as Vector3, Vector2(0.03, -0.04), _vault_wall_mat, true, Vector3(4.0, 3.6, 1.0))
+		_place_ruin_wall(warren_root, String(ab_w[0]), Vector3(awx, awy, awz), float(ab_w[3]), ab_w[4] as Vector3, Vector2(0.03, -0.04), _vault_wall_mat, true, Vector3(5.4, 4.9, 1.3))
 	_place_nature_scene(warren_root, "res://assets/nature_extra/DeadTree_1.gltf", Vector3(mx + 35.5, float(sample_rw_h.call(mx + 35.5, 309.0)) - 0.16, 309.0), -0.95, 2.20)
 
 	# --------------------------------------------------------------------------
 	# Zone A5b: Broadened Upper Hillside Ruined Citadel Ramparts (bx = mx - 40..mx + 40, bz = 256..272)
 	# --------------------------------------------------------------------------
 	for hill_r: Array in [
-		["wall_corner.gltf.glb", mx - 26.0, 266.0, 0.35, Vector3(1.10, 1.15, 1.10)],
-		["wall_broken.gltf.glb", mx - 33.5, 270.0, 0.18, Vector3(1.05, 0.95, 1.05)],
-		["wall_archedwindow_open.gltf.glb", mx + 27.0, 265.0, -0.32, Vector3(1.10, 1.15, 1.10)],
-		["wall_broken.gltf.glb", mx + 34.5, 269.0, -0.15, Vector3(1.05, 0.95, 1.05)],
+		["wall_corner.gltf.glb", mx - 26.0, 266.0, 0.35, Vector3(1.42, 1.48, 1.42)],
+		["wall_broken.gltf.glb", mx - 33.5, 270.0, 0.18, Vector3(1.38, 1.26, 1.38)],
+		["wall_archedwindow_open.gltf.glb", mx + 27.0, 265.0, -0.32, Vector3(1.42, 1.48, 1.42)],
+		["wall_broken.gltf.glb", mx + 34.5, 269.0, -0.15, Vector3(1.38, 1.26, 1.38)],
 	]:
 		var hrx := float(hill_r[1])
 		var hrz := float(hill_r[2])
 		var hry := float(sample_rw_h.call(hrx, hrz)) - 0.50
-		_place_ruin_wall(warren_root, String(hill_r[0]), Vector3(hrx, hry, hrz), float(hill_r[3]), hill_r[4] as Vector3, Vector2(0.04, 0.03), _vault_wall_mat, true, Vector3(4.0, 3.8, 1.0))
-	for hill_p: Array in [[mx - 24.5, 264.5, 1.70], [mx + 25.5, 263.5, 1.75]]:
+		_place_ruin_wall(warren_root, String(hill_r[0]), Vector3(hrx, hry, hrz), float(hill_r[3]), hill_r[4] as Vector3, Vector2(0.04, 0.03), _vault_wall_mat, true, Vector3(5.4, 5.1, 1.3))
+	for hill_p: Array in [[mx - 24.5, 264.5, 2.20], [mx + 25.5, 263.5, 2.25]]:
 		var hpx := float(hill_p[0])
 		var hpz := float(hill_p[1])
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(hpx, float(sample_rw_h.call(hpx, hpz)) - 0.50, hpz), hpx * 0.15, Vector3.ONE * float(hill_p[2]), Vector2(0.04, -0.05), _vault_trim_mat, true, Vector3(1.4, 4.6, 1.4))
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(hpx, float(sample_rw_h.call(hpx, hpz)) - 0.50, hpz), hpx * 0.15, Vector3.ONE * float(hill_p[2]), Vector2(0.04, -0.05), _vault_trim_mat, true, Vector3(1.8, 6.0, 1.8))
 
 	# --------------------------------------------------------------------------
 	# Zone A7: Sunken Swamp Environment, Flooded Lagoon, Docks, Rowboats & Bog Flora
@@ -2372,9 +2470,9 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 		{"pos": Vector3(-275.0, 21.8, 240.0), "len": 2.9, "rad": 0.42, "ceiling": true},
 		{"pos": Vector3(-276.0, 21.8, 247.0), "len": 3.1, "rad": 0.44, "ceiling": true},
 	], _warren_spel_mat)
-	var w_bars := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(-270.4, vy - 0.02, 240.4), 0.4, Vector3.ONE * 1.2)
+	var w_bars := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(-270.4, vy - 0.02, 240.4), 0.4, Vector3.ONE * 1.58)
 	_harmonize_prop_mats(w_bars, Color(0.42, 0.38, 0.34), 0.95, 0.03)
-	var w_crates := _place_piece(_warren_interior, "crates_stacked.gltf.glb", Vector3(-278.8, vy - 0.02, 244.5), -0.65, Vector3.ONE * 1.15)
+	var w_crates := _place_piece(_warren_interior, "crates_stacked.gltf.glb", Vector3(-278.8, vy - 0.02, 244.5), -0.65, Vector3.ONE * 1.58)
 	_harmonize_prop_mats(w_crates, Color(0.40, 0.36, 0.32), 0.95, 0.03)
 	_spawn_vault_crystal_cluster(_warren_interior, Vector3(-283.5, 13.35, 240.5), 6, 401)
 	_spawn_vault_crystal_cluster(_warren_interior, Vector3(-282.5, 13.35, 247.0), 5, 402)
@@ -2400,18 +2498,18 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 		[Vector3(-204.5, vy + 1.4, 249.8), Vector3(3.2, 2.4, 2.8), 604],
 	]:
 		CavePropFX.spawn_fractured_boulder(_warren_interior, eb_boulder[0] as Vector3, eb_boulder[1] as Vector3, _vault_rock_mat, int(eb_boulder[2]), true)
-	_place_ruin_wall(_warren_interior, "wall_cracked.gltf.glb", Vector3(-194.2, vy + 1.45, 242.0), -PI * 0.5, Vector3(1.0, 0.90, 1.0), Vector2(-0.04, 0.05), _vault_wall_mat, false)
-	var e_shelf := _place_ruin_wall(_warren_interior, "wall_shelves.gltf.glb", Vector3(-194.6, vy + 1.45, 242.0), -PI * 0.5, Vector3.ONE * 0.95, Vector2.ZERO, null, false)
+	_place_ruin_wall(_warren_interior, "wall_cracked.gltf.glb", Vector3(-194.2, vy + 1.45, 242.0), -PI * 0.5, Vector3(1.36, 1.26, 1.36), Vector2(-0.04, 0.05), _vault_wall_mat, false)
+	var e_shelf := _place_ruin_wall(_warren_interior, "wall_shelves.gltf.glb", Vector3(-194.6, vy + 1.45, 242.0), -PI * 0.5, Vector3.ONE * 1.50, Vector2.ZERO, null, false)
 	_harmonize_prop_mats(e_shelf, Color(0.42, 0.38, 0.34), 0.95, 0.03)
 	CavePropFX.spawn_speleothem_cluster(_warren_interior, [
 		{"pos": Vector3(-196.5, vy + 1.45, 236.5), "len": 3.4, "rad": 0.45, "ceiling": false},
 		{"pos": Vector3(-196.5, vy + 1.45, 247.0), "len": 3.6, "rad": 0.46, "ceiling": false},
-		{"pos": Vector3(-205.5, 23.6, 238.5), "len": 3.2, "rad": 0.42, "ceiling": true},
-		{"pos": Vector3(-205.5, 23.6, 246.0), "len": 3.1, "rad": 0.42, "ceiling": true},
+		{"pos": Vector3(-205.5, 25.8, 238.5), "len": 3.2, "rad": 0.42, "ceiling": true},
+		{"pos": Vector3(-205.5, 25.8, 246.0), "len": 3.1, "rad": 0.42, "ceiling": true},
 	], _warren_spel_mat)
-	var e_crates := _place_piece(_warren_interior, "crates_stacked.gltf.glb", Vector3(-195.8, vy + 1.48, 243.4), -0.4, Vector3.ONE * 1.25)
+	var e_crates := _place_piece(_warren_interior, "crates_stacked.gltf.glb", Vector3(-195.8, vy + 1.48, 243.4), -0.4, Vector3.ONE * 1.60)
 	_harmonize_prop_mats(e_crates, Color(0.42, 0.38, 0.34), 0.95, 0.03)
-	var e_bar := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(-202.2, vy - 0.02, 237.2), 0.7, Vector3.ONE * 1.20)
+	var e_bar := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(-202.2, vy - 0.02, 237.2), 0.7, Vector3.ONE * 1.58)
 	_harmonize_prop_mats(e_bar, Color(0.42, 0.38, 0.34), 0.95, 0.03)
 	for eb_spot: Vector3 in [Vector3(-205.5, vy + 0.08, 242.5), Vector3(-201.5, vy + 0.08, 236.8), Vector3(-199.5, vy + 0.08, 240.0)]:
 		_spawn_articulated_bone(_warren_interior, eb_spot, eb_spot.z * 0.4, 0.95)
@@ -2501,22 +2599,22 @@ func _build_rat_warren(_rat_region: Node = null) -> void:
 		[Vector3(mx + 0.6, altar_y + 0.45, 181.2), 2.15, 0.95],
 	]:
 		_spawn_articulated_bone(_warren_interior, nb[0] as Vector3, float(nb[1]), float(nb[2]))
-	var nest_keg := _place_piece(_warren_interior, "keg_decorated.gltf.glb", Vector3(mx - 2.4, altar_y, 181.0), 0.55, Vector3.ONE * 1.18)
+	var nest_keg := _place_piece(_warren_interior, "keg_decorated.gltf.glb", Vector3(mx - 2.4, altar_y, 181.0), 0.55, Vector3.ONE * 1.55)
 	_harmonize_prop_mats(nest_keg, Color(0.40, 0.36, 0.32), 0.95, 0.03)
-	var nest_bar := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(mx + 2.5, altar_y, 181.1), -0.70, Vector3.ONE * 1.15)
+	var nest_bar := _place_piece(_warren_interior, "barrel_small_stack.gltf.glb", Vector3(mx + 2.5, altar_y, 181.1), -0.70, Vector3.ONE * 1.55)
 	_harmonize_prop_mats(nest_bar, Color(0.39, 0.36, 0.33), 0.95, 0.03)
-	_place_ruin_wall(_warren_interior, "wall_broken.gltf.glb", Vector3(mx - 11.5, sy - 0.30, 189.0), PI * 0.5 + 0.12, Vector3(1.05, 0.95, 1.05), Vector2(0.05, -0.06), _vault_wall_mat, false)
-	_place_ruin_wall(_warren_interior, "wall_broken.gltf.glb", Vector3(mx + 11.8, sy - 0.30, 187.5), -PI * 0.5 - 0.14, Vector3(1.05, 0.95, 1.05), Vector2(-0.04, 0.07), _vault_wall_mat, false)
-	_place_ruin_wall(_warren_interior, "pillar_decorated.gltf.glb", Vector3(mx - 3.8, dais_y + 0.30, 182.2), 0.60, Vector3.ONE * 1.25, Vector2(0.25, 1.32), _vault_trim_mat, false)
+	_place_ruin_wall(_warren_interior, "wall_broken.gltf.glb", Vector3(mx - 11.5, sy - 0.30, 189.0), PI * 0.5 + 0.12, Vector3(1.38, 1.28, 1.38), Vector2(0.05, -0.06), _vault_wall_mat, false)
+	_place_ruin_wall(_warren_interior, "wall_broken.gltf.glb", Vector3(mx + 11.8, sy - 0.30, 187.5), -PI * 0.5 - 0.14, Vector3(1.38, 1.28, 1.38), Vector2(-0.04, 0.07), _vault_wall_mat, false)
+	_place_ruin_wall(_warren_interior, "pillar_decorated.gltf.glb", Vector3(mx - 3.8, dais_y + 0.30, 182.2), 0.60, Vector3.ONE * 1.65, Vector2(0.25, 1.32), _vault_trim_mat, false)
 	_add_flicker_light(_warren_interior, Vector3(mx + 0.8, altar_y + 2.6, 181.6), Color(0.95, 0.58, 0.24), 2.8, 20.0)
 	_add_flicker_light(_warren_interior, Vector3(mx - 2.8, altar_y + 1.8, 181.2), Color(0.20, 0.68, 0.62), 2.1, 18.0)
 
 	# Scavenged Barrels/Crates, Articulated Bones, Speleothems, Vines, Mushroom Groves & Pebbles across all Burrows
 	for prop_spec: Array in [
-		["barrel_small_stack.gltf.glb", Vector3(mx - 6.8, sy - 0.02, 182.8), 0.4, 1.22, Vector3(1.8, 2.0, 1.8)],
-		["keg_decorated.gltf.glb", Vector3(mx + 6.6, sy - 0.02, 183.0), -0.6, 1.20, Vector3(1.8, 2.0, 1.8)],
-		["barrel_large_decorated.gltf.glb", Vector3(mx - 8.2, vy - 0.02, 252.6), -0.45, 1.18, Vector3(1.8, 2.0, 1.8)],
-		["crates_stacked.gltf.glb", Vector3(mx - 8.5, sy - 0.02, 201.0), 0.35, 1.15, Vector3(1.9, 2.1, 1.9)],
+		["barrel_small_stack.gltf.glb", Vector3(mx - 6.8, sy - 0.02, 182.8), 0.4, 1.58, Vector3(2.4, 2.6, 2.4)],
+		["keg_decorated.gltf.glb", Vector3(mx + 6.6, sy - 0.02, 183.0), -0.6, 1.58, Vector3(2.4, 2.6, 2.4)],
+		["barrel_large_decorated.gltf.glb", Vector3(mx - 8.2, vy - 0.02, 252.6), -0.45, 1.55, Vector3(2.4, 2.6, 2.4)],
+		["crates_stacked.gltf.glb", Vector3(mx - 8.5, sy - 0.02, 201.0), 0.35, 1.55, Vector3(2.5, 2.7, 2.5)],
 	]:
 		var pnode := _place_piece(_warren_interior, String(prop_spec[0]), prop_spec[1], float(prop_spec[2]), Vector3.ONE * float(prop_spec[3]))
 		_harmonize_prop_mats(pnode, Color(0.40, 0.37, 0.34), 0.95, 0.03)
@@ -2648,37 +2746,37 @@ func _build_rat_swamp_surroundings(warren_root: Node3D, mx: float, my: float, sw
 	# 4. Outer Half-Submerged Swamp Ruins Outposts (SW Watch-Gate, Far West Reservoir, SE Shrine Cloister, Far East Precinct)
 	for sw_r: Array in [
 		# SW Flooded Gatehouse & Submerged Wall Wing (mx - 42..55, bz = 344..364)
-		["wall_archedwindow_open.gltf.glb", mx - 44.5, 353.0, 0.35, Vector3(1.06, 1.08, 1.06), Vector2(0.05, -0.06)],
-		["wall_broken.gltf.glb", mx - 49.5, 348.0, 0.92, Vector3(1.04, 0.94, 1.04), Vector2(-0.04, 0.05)],
-		["wall_cracked.gltf.glb", mx - 41.0, 358.5, -0.25, Vector3(1.04, 0.92, 1.04), Vector2.ZERO],
+		["wall_archedwindow_open.gltf.glb", mx - 44.5, 353.0, 0.35, Vector3(1.38, 1.42, 1.38), Vector2(0.05, -0.06)],
+		["wall_broken.gltf.glb", mx - 49.5, 348.0, 0.92, Vector3(1.36, 1.26, 1.36), Vector2(-0.04, 0.05)],
+		["wall_cracked.gltf.glb", mx - 41.0, 358.5, -0.25, Vector3(1.36, 1.24, 1.36), Vector2.ZERO],
 		# Far West Submerged Reservoir Colonnade (mx - 50..58, bz = 294..324)
-		["wall_arched.gltf.glb", mx - 51.0, 304.0, PI * 0.5 + 0.14, Vector3(1.06, 1.05, 1.06), Vector2(0.04, 0.04)],
-		["wall_broken.gltf.glb", mx - 52.5, 314.0, PI * 0.5 - 0.18, Vector3(1.04, 0.90, 1.04), Vector2(-0.05, 0.03)],
-		["wall_corner.gltf.glb", mx - 48.0, 294.5, 0.32, Vector3(1.05, 0.96, 1.05), Vector2.ZERO],
+		["wall_arched.gltf.glb", mx - 51.0, 304.0, PI * 0.5 + 0.14, Vector3(1.38, 1.38, 1.38), Vector2(0.04, 0.04)],
+		["wall_broken.gltf.glb", mx - 52.5, 314.0, PI * 0.5 - 0.18, Vector3(1.36, 1.22, 1.36), Vector2(-0.05, 0.03)],
+		["wall_corner.gltf.glb", mx - 48.0, 294.5, 0.32, Vector3(1.36, 1.28, 1.36), Vector2.ZERO],
 		# SE Flooded Shrine Cloister (mx + 42..56, bz = 344..364)
-		["wall_archedwindow_gated.gltf.glb", mx + 44.5, 351.0, -0.42, Vector3(1.06, 1.08, 1.06), Vector2(-0.05, 0.06)],
-		["wall_broken.gltf.glb", mx + 49.5, 345.5, -1.05, Vector3(1.04, 0.92, 1.04), Vector2(0.04, -0.04)],
-		["wall_cracked.gltf.glb", mx + 40.5, 357.5, 0.28, Vector3(1.04, 0.95, 1.04), Vector2.ZERO],
+		["wall_archedwindow_gated.gltf.glb", mx + 44.5, 351.0, -0.42, Vector3(1.38, 1.42, 1.38), Vector2(-0.05, 0.06)],
+		["wall_broken.gltf.glb", mx + 49.5, 345.5, -1.05, Vector3(1.36, 1.24, 1.36), Vector2(0.04, -0.04)],
+		["wall_cracked.gltf.glb", mx + 40.5, 357.5, 0.28, Vector3(1.36, 1.28, 1.36), Vector2.ZERO],
 		# Far East Flooded Abbey Outer Wall (mx + 48..58, bz = 294..326)
-		["wall_arched.gltf.glb", mx + 50.5, 305.0, -PI * 0.5 - 0.12, Vector3(1.06, 1.05, 1.06), Vector2(-0.04, -0.04)],
-		["wall_broken.gltf.glb", mx + 51.5, 315.5, -PI * 0.5 + 0.22, Vector3(1.04, 0.88, 1.04), Vector2(0.05, -0.03)],
-		["wall_corner.gltf.glb", mx + 47.5, 294.0, -0.38, Vector3(1.05, 0.98, 1.05), Vector2.ZERO],
+		["wall_arched.gltf.glb", mx + 50.5, 305.0, -PI * 0.5 - 0.12, Vector3(1.38, 1.38, 1.38), Vector2(-0.04, -0.04)],
+		["wall_broken.gltf.glb", mx + 51.5, 315.5, -PI * 0.5 + 0.22, Vector3(1.36, 1.20, 1.36), Vector2(0.05, -0.03)],
+		["wall_corner.gltf.glb", mx + 47.5, 294.0, -0.38, Vector3(1.38, 1.30, 1.38), Vector2.ZERO],
 	]:
 		var srx := float(sw_r[1])
 		var srz := float(sw_r[2])
 		var sry := minf(float(sample_rw_h.call(srx, srz)), sw_y - 0.15) - 0.25
-		_place_ruin_wall(warren_root, String(sw_r[0]), Vector3(srx, sry, srz), float(sw_r[3]), sw_r[4] as Vector3, sw_r[5] as Vector2, _vault_wall_mat, true, Vector3(4.0, 3.6, 1.0))
+		_place_ruin_wall(warren_root, String(sw_r[0]), Vector3(srx, sry, srz), float(sw_r[3]), sw_r[4] as Vector3, sw_r[5] as Vector2, _vault_wall_mat, true, Vector3(5.4, 4.9, 1.3))
 
 	for sw_p: Array in [
-		[mx - 42.5, 349.5, 1.50, Vector2(0.06, -0.09)],
-		[mx - 47.0, 309.0, 1.45, Vector2(-0.05, 0.08)],
-		[mx + 43.0, 347.5, 1.50, Vector2(-0.07, 0.10)],
-		[mx + 46.5, 310.0, 1.40, Vector2(0.04, -0.07)],
+		[mx - 42.5, 349.5, 1.95, Vector2(0.06, -0.09)],
+		[mx - 47.0, 309.0, 1.90, Vector2(-0.05, 0.08)],
+		[mx + 43.0, 347.5, 1.95, Vector2(-0.07, 0.10)],
+		[mx + 46.5, 310.0, 1.85, Vector2(0.04, -0.07)],
 	]:
 		var spx := float(sw_p[0])
 		var spz := float(sw_p[1])
 		var spy := minf(float(sample_rw_h.call(spx, spz)), sw_y - 0.10) - 0.20
-		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(spx, spy, spz), spx * 0.3, Vector3.ONE * float(sw_p[2]), sw_p[3] as Vector2, _vault_trim_mat, true, Vector3(1.3, 4.2, 1.3))
+		_place_ruin_wall(warren_root, "pillar_decorated.gltf.glb", Vector3(spx, spy, spz), spx * 0.3, Vector3.ONE * float(sw_p[2]), sw_p[3] as Vector2, _vault_trim_mat, true, Vector3(1.7, 5.5, 1.7))
 
 	# Draped vines across sunken outer masonry
 	for sv_w: Array in [
@@ -2733,7 +2831,7 @@ func _build_rat_swamp_surroundings(warren_root: Node3D, mx: float, my: float, sw
 	for li in range(380):
 		var lx := mx + sw_rng.randf_range(-68.0, 68.0)
 		var lz := sw_rng.randf_range(287.0, 396.0)
-		if absf(lx - mx) < 7.5:
+		if absf(lx - mx) < 9.5:
 			continue
 		var lh := float(sample_rw_h.call(lx, lz))
 		# Open swamp water surface -> floating lily pad clusters & pale blossoms
@@ -2888,45 +2986,48 @@ func _build_world_waystones(waystones_region: Node = null) -> void:
 			waystones.append([m["xz"], float(m["yaw"]), "Waystone"])
 	if waystones.is_empty():
 		waystones = [
-			[Vector2(-75.0, 108.0), 0.72, "BasinSouthFork"],
-			[Vector2(-112.0, 144.0), 0.65, "CentralTrailShrine"],
-			[Vector2(-182.0, 295.0), 0.58, "RatTrailApproaching"],
-			[Vector2(-226.0, 514.0), -0.35, "RatWarrenFork"],
-			[Vector2(-335.0, 392.0), 0.68, "WebwoodEdgeCairn"],
-			[Vector2(-525.0, 310.0), -0.15, "WesternMoorShrine"],
-			[Vector2(-752.0, 336.0), 0.20, "CryptRoadLantern"],
-			[Vector2(142.0, -118.0), -0.82, "WolfTrailFord"],
-			[Vector2(252.0, -214.0), -0.65, "WolfCragThreshold"],
+			[Vector2(-84.0, 99.0), 0.72, "BasinSouthFork"],
+			[Vector2(-108.0, 154.0), 0.65, "CentralTrailShrine"],
+			[Vector2(209.0, 193.0), 0.58, "RatTrailApproaching"],
+			[Vector2(468.0, 442.0), -0.35, "RatWarrenFork"],
+			[Vector2(-326.0, 398.0), 0.68, "WebwoodEdgeCairn"],
+			[Vector2(-528.0, 306.0), -0.15, "WesternMoorShrine"],
+			[Vector2(-751.0, 346.0), 0.20, "CryptRoadLantern"],
+			[Vector2(147.0, -112.0), -0.82, "WolfTrailFord"],
+			[Vector2(163.0, -146.0), -0.65, "WolfCragThreshold"],
 		]
 	var fern_xfs: Array[Transform3D] = []
 	for wi in range(waystones.size()):
-		var wz: Vector2 = waystones[wi][0]
+		var wz: Vector2 = WorldLandmarks.project_off_world_road(waystones[wi][0] as Vector2, 7.6)
 		var wy := _sample_h(wz.x, wz.y)
 		if wy < 7.0 or wy > 110.0:
 			continue
 		var yaw := float(waystones[wi][1])
-		# Weathered stone pillar + mossy side boulder + flickering iron flame lantern
+		# Weathered stone pillar + mossy side boulder + flickering iron flame lantern (strictly on roadside shoulder)
 		var p_pos := Vector3(wz.x, wy - 0.12, wz.y)
-		var wp := _place_piece(road_root, "pillar_decorated.gltf.glb", p_pos, yaw, Vector3(0.85, 0.95, 0.85))
+		var wp := _place_piece(road_root, "pillar_decorated.gltf.glb", p_pos, yaw, Vector3(1.25, 1.35, 1.25))
 		if wp != null:
 			_apply_mat_recursive(wp, _speleothem_mat)
-		_add_box_body(road_root, Vector3(wz.x, wy + 1.1, wz.y), Vector3(1.1, 2.4, 1.1), LAYER_OBSTACLES)
-		_place_piece(road_root, "torch_mounted.gltf.glb", Vector3(wz.x, wy + 1.95, wz.y) + Vector3(0.0, 0.0, 0.42).rotated(Vector3.UP, yaw), yaw, Vector3.ONE * 1.15)
+		_add_box_body(road_root, Vector3(wz.x, wy + 1.55, wz.y), Vector3(1.5, 3.3, 1.5), LAYER_OBSTACLES)
+		_place_piece(road_root, "torch_mounted.gltf.glb", Vector3(wz.x, wy + 2.75, wz.y) + Vector3(0.0, 0.0, 0.56).rotated(Vector3.UP, yaw), yaw, Vector3.ONE * 1.55)
 		_fire_seed_counter += 1
-		var flame_p := Vector3(wz.x, wy + 2.38, wz.y) + Vector3(0.0, 0.0, 0.68).rotated(Vector3.UP, yaw)
-		CavePropFX.attach_torch_fire(road_root, flame_p, _fire_seed_counter, 0.44)
+		var flame_p := Vector3(wz.x, wy + 3.32, wz.y) + Vector3(0.0, 0.0, 0.92).rotated(Vector3.UP, yaw)
+		CavePropFX.attach_torch_fire(road_root, flame_p, _fire_seed_counter, 0.56)
 		_add_flicker_light(road_root, flame_p + Vector3(0.0, 0.35, 0.0), Color(1.0, 0.68, 0.28), 1.9, 13.5)
 
-		var rock_off := Vector2(cos(yaw + 1.4), sin(yaw + 1.4)) * 1.45
-		var rx := wz.x + rock_off.x
-		var rz := wz.y + rock_off.y
+		var rock_cand_a := wz + Vector2(cos(yaw + 1.4), sin(yaw + 1.4)) * 1.45
+		var rock_cand_b := wz - Vector2(cos(yaw + 1.4), sin(yaw + 1.4)) * 1.45
+		var rock_xz := rock_cand_a if WorldLandmarks.min_dist_to_world_road(rock_cand_a.x, rock_cand_a.y) >= WorldLandmarks.min_dist_to_world_road(rock_cand_b.x, rock_cand_b.y) else rock_cand_b
+		var rx := rock_xz.x
+		var rz := rock_xz.y
 		CavePropFX.spawn_fractured_boulder(road_root, Vector3(rx, _sample_h(rx, rz) + 0.18, rz), Vector3(0.75, 0.55, 0.68), _granite_shader_mat, 500 + wi, false)
 
 		for fi in range(2):
 			var fang := yaw + float(fi) * 2.2 - 0.8
 			var fx := wz.x + cos(fang) * 1.55
 			var fz := wz.y + sin(fang) * 1.55
-			fern_xfs.append(Transform3D(Basis.from_euler(Vector3(0.0, fang, 0.0)).scaled(Vector3.ONE * 1.15), Vector3(fx, _sample_h(fx, fz) - 0.04, fz)))
+			if WorldLandmarks.min_dist_to_world_road(fx, fz) >= 5.6:
+				fern_xfs.append(Transform3D(Basis.from_euler(Vector3(0.0, fang, 0.0)).scaled(Vector3.ONE * 1.15), Vector3(fx, _sample_h(fx, fz) - 0.04, fz)))
 
 	if not fern_xfs.is_empty():
 		CavePropFX.spawn_gltf_batch(road_root, "WaystoneFerns", "res://assets/nature/Fern_1.gltf", fern_xfs)

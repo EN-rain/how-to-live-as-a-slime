@@ -6,7 +6,7 @@
 script = ExtResource("1_arch")
 archetype_name = "Woodland Wildlife"
 glb_path = "res://assets/animals/Deer.glb"
-scale_factor = 0.62
+scale_factor = 0.68
 max_hp = 65.0
 attack_damage = 6.0
 walk_speed = 2.4
@@ -14,5 +14,5 @@ run_speed = 6.2
 aggro_radius = 14.0
 territory_radius = 36.0
 leash_radius = 72.0
-hp_bar_height = 1.40
-body_radius = 0.60
+hp_bar_height = 2.40
+body_radius = 0.80

@@ -14,6 +14,9 @@ var _settings: Node = null
 var _cave_atm: Node = null
 var _time_weather: Node = null
 var _accum_t: float = 0.0
+var _synth_task_id: int = -1
+var _synth_ready: bool = false
+var _synth_fade_in: float = 0.0
 
 
 func _ready() -> void:
@@ -24,24 +27,51 @@ func _ready() -> void:
 
 	_cozy_player = AudioStreamPlayer.new()
 	_cozy_player.name = "CozyBgmPlayer"
-	_cozy_player.stream = _synth_cozy_loop()
 	_cozy_player.volume_db = -80.0
 	add_child(_cozy_player)
 
 	_dark_player = AudioStreamPlayer.new()
 	_dark_player.name = "DarkBgmPlayer"
-	_dark_player.stream = _synth_dark_loop()
 	_dark_player.volume_db = -80.0
 	add_child(_dark_player)
 
+	# Synthesize both looping PCM WAV streams on a background worker thread so
+	# startup never stalls the main thread (~860ms saved during debug boot).
+	_synth_task_id = WorkerThreadPool.add_task(_synth_worker_task)
+
+
+func _synth_worker_task() -> void:
+	var cozy_wav := _synth_cozy_loop()
+	var dark_wav := _synth_dark_loop()
+	call_deferred("_on_bgm_synthesized", cozy_wav, dark_wav)
+
+
+func _on_bgm_synthesized(cozy_wav: AudioStreamWAV, dark_wav: AudioStreamWAV) -> void:
+	if _synth_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_synth_task_id)
+		_synth_task_id = -1
+	if not is_inside_tree() or _cozy_player == null or _dark_player == null:
+		return
+	_cozy_player.stream = cozy_wav
+	_dark_player.stream = dark_wav
 	_cozy_player.play()
 	_dark_player.play()
-	_update_volumes(1.0)
+	_synth_ready = true
+	_synth_fade_in = 0.0
+	_update_volumes(0.05)
+
+
+func _exit_tree() -> void:
+	if _synth_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_synth_task_id)
+		_synth_task_id = -1
 
 
 func _process(delta: float) -> void:
-	if _cozy_player == null or _dark_player == null:
+	if _cozy_player == null or _dark_player == null or not _synth_ready:
 		return
+	if _synth_fade_in < 1.0:
+		_synth_fade_in = minf(1.0, _synth_fade_in + delta * 1.8)
 	_accum_t += delta
 	if _accum_t < 0.15:
 		return
@@ -82,7 +112,7 @@ func _update_volumes(step: float) -> void:
 
 	_dark_mix = lerpf(_dark_mix, target_dark, clampf(step * 1.4, 0.0, 1.0))
 
-	var base_gain := 0.0 if muted else (master_v * music_v * 0.24)
+	var base_gain := 0.0 if muted else (master_v * music_v * 0.24 * _synth_fade_in)
 	var cozy_gain := base_gain * (1.0 - _dark_mix * 0.72)
 	var dark_gain := base_gain * (0.18 + _dark_mix * 0.82)
 	_cozy_player.volume_db = linear_to_db(maxf(cozy_gain, 0.0001))

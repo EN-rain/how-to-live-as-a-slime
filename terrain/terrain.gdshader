@@ -26,7 +26,7 @@ uniform vec3 snow_color : source_color = vec3(0.78, 0.84, 0.92);
 
 group_uniforms VillageGround;
 uniform vec2 village_center_xz = vec2(590.0, 2200.0);
-uniform vec2 village_radii_xz = vec2(76.0, 66.0);
+uniform vec2 village_radii_xz = vec2(106.4, 92.4);
 uniform vec2 u_webwood_center = vec2(-410.0, 480.0);
 uniform vec2 u_webwood_trail_start = vec2(-335.0, 390.0);
 uniform vec2 u_webwood_trail_bend = vec2(-396.0, 468.0);
@@ -40,6 +40,7 @@ uniform float macro_scale : hint_range(0.0001, 0.1, 0.0001) = 0.025;
 uniform float slope_threshold : hint_range(0.3, 0.98, 0.01) = 0.46;
 uniform float slope_softness : hint_range(0.01, 0.2, 0.01) = 0.04;
 uniform float surface_roughness : hint_range(0.0, 1.0, 0.01) = 0.92;
+uniform sampler2D detail_rock_tex : source_color, filter_linear_mipmap, repeat_enable;
 
 varying vec2 v_xz;
 varying float v_world_y;
@@ -98,12 +99,16 @@ float seg_dist2d(vec2 p, vec2 a, vec2 b) {
 
 void fragment() {
 	// 1. Rich Natural Meadow with organic loam & moss mottling (zero procedural noise in fragment!)
+	vec3 det_tex_flat = texture(detail_rock_tex, v_xz * 0.14).rgb;
+	float det_luma_flat = dot(det_tex_flat, vec3(0.3333));
+
 	float canopy_blend = v_macro_pat * 0.68 + v_med_pat * 0.32;
 	vec3 g_col = mix(grass_deep_color, grass_mid_color, smoothstep(0.25, 0.56, canopy_blend));
 	g_col = mix(g_col, grass_sun_color, smoothstep(0.50, 0.82, canopy_blend));
 	// Subtle dry clover & warm soil pockets breaking up uniform grass expanses (linear RGB!)
 	float loam_pocket = smoothstep(0.68, 0.90, v_med_pat) * (1.0 - smoothstep(0.45, 0.75, v_macro_pat));
 	g_col = mix(g_col, vec3(0.068, 0.085, 0.018), loam_pocket * 0.36);
+	g_col *= mix(0.88, 1.12, det_luma_flat);
 
 	// 1b. Regional World Biome Ground Palettes (all literals in LINEAR RGB space!)
 	float w_noise = (v_macro_pat - 0.5) * 14.0 + (v_med_pat - 0.5) * 7.5;
@@ -138,21 +143,21 @@ void fragment() {
 		g_col = mix(g_col, scree_col, den_scree * 0.76);
 	}
 
-	// Sunken Swamp Ruins & Undercroft Rat Warren (-235, 395..545): Expanded bog moss, peaty marsh soil & wet shoreline mud (zero fragment noise!)
-	float d_rat = length(v_xz - vec2(-235.0, 460.0));
+	// Sunken Swamp Ruins & Undercroft Rat Warren (460, 340..470): Expanded bog moss, peaty marsh soil & wet shoreline mud (zero fragment noise!)
+	float d_rat = length(v_xz - vec2(460.0, 385.0));
 	float swamp_wet_gloss = 0.0;
 	if (d_rat < 178.0) {
 		float w_rat = 1.0 - smoothstep(58.0, 164.0, d_rat + w_noise * 1.35);
 		vec3 bog_moss = mix(vec3(0.013, 0.036, 0.015), vec3(0.038, 0.048, 0.017), smoothstep(0.24, 0.78, v_med_pat));
 		g_col = mix(g_col, bog_moss, w_rat * 0.80);
-		float court_earth = 1.0 - smoothstep(26.0, 62.0, length((v_xz - vec2(-235.0, 454.0)) * vec2(0.76, 0.70)) + w_noise * 0.65);
+		float court_earth = 1.0 - smoothstep(26.0, 62.0, length((v_xz - vec2(460.0, 379.0)) * vec2(0.76, 0.70)) + w_noise * 0.65);
 		vec3 court_loam = mix(mud_dark_color * 0.56, vec3(0.042, 0.046, 0.028), smoothstep(0.25, 0.75, v_med_pat));
 		g_col = mix(g_col, court_loam, court_earth * 0.60);
 		float bog_bank = (1.0 - smoothstep(21.22, 21.92, v_world_y + (v_med_pat - 0.5) * 0.24)) * (1.0 - smoothstep(82.0, 136.0, d_rat));
 		vec3 peat_mud = mix(vec3(0.018, 0.019, 0.013), mud_dark_color * 0.58, smoothstep(0.25, 0.75, v_med_pat));
 		g_col = mix(g_col, peat_mud, bog_bank * 0.84);
 		swamp_wet_gloss = bog_bank * smoothstep(0.75, 0.94, v_upness) * 0.68;
-		float rat_mud = 1.0 - smoothstep(4.2, 9.8, length(v_xz - vec2(-235.0, 418.0)) + w_noise * 0.35);
+		float rat_mud = 1.0 - smoothstep(4.2, 9.8, length(v_xz - vec2(460.0, 343.0)) + w_noise * 0.35);
 		g_col = mix(g_col, mix(mud_dark_color * 0.74, mud_light_color * 0.68, v_med_pat), rat_mud * 0.64);
 	}
 
@@ -171,24 +176,32 @@ void fragment() {
 	if (v_world_y > beach_height + 0.8 && v_world_y < 105.0) {
 		float road_wobble = (v_macro_pat - 0.5) * 8.0 + (v_med_pat - 0.5) * 3.2;
 		float d_path = 1e6;
-		// Central Basin -> Crystal Cave trail
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(0.0, 12.0), vec2(-16.0, -28.0)));
-		// Central Basin -> Webwood Spider Forest -> Gnawed Ruins South Approach (clean valley routing, zero hillside gashes!)
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(0.0, 12.0), vec2(-105.0, 140.0)));
+		// Central Basin South Edge -> Crystal Cave trail (cleanly outside central sandbox test structures)
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, -17.0), vec2(-16.0, -28.0)));
+		// Central Basin NW Edge -> Webwood Spider Forest (clean valley routing, zero hillside gashes!)
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, 15.0), vec2(-105.0, 140.0)));
 		d_path = min(d_path, seg_dist2d(v_xz, vec2(-105.0, 140.0), vec2(-220.0, 260.0)));
 		d_path = min(d_path, seg_dist2d(v_xz, vec2(-220.0, 260.0), u_webwood_trail_start));
 		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, u_webwood_trail_bend));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-235.0, 512.0), vec2(-235.0, 565.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_bend, u_webwood_center));
+		// Central Basin NE Edge -> SE Gnawed Ruins & Rat Warren Eastward Swamp Road (routes around SW lagoon to South Causeway)
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(12.0, 15.0), vec2(215.0, 185.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(215.0, 185.0), vec2(375.0, 442.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(375.0, 442.0), vec2(460.0, 442.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 490.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 434.0)));
 		// Webwood Junction -> Skeleton Crypt Western Road
 		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, vec2(-530.0, 316.0)));
 		d_path = min(d_path, seg_dist2d(v_xz, vec2(-530.0, 316.0), vec2(-820.0, 344.0)));
-		// Central Basin -> Wolf Pack Crag NE Foothill Trail
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(10.0, 0.0), vec2(150.0, -125.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(150.0, -125.0), vec2(284.0, -234.0)));
-		if (d_path < 11.0) {
-			float p_dist = d_path + road_wobble * 0.42;
-			float trail_mask = (1.0 - smoothstep(2.2, 5.2, p_dist)) * smoothstep(0.55, 0.82, v_upness);
-			float rut_core = 1.0 - smoothstep(0.6, 2.3, p_dist);
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(-820.0, 344.0), vec2(-820.0, 326.0)));
+		// Central Basin East Edge -> Wolf Pack Crag NE Foothill Trail (enters through wide South amphitheater throat)
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(18.0, -14.0), vec2(150.0, -125.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(150.0, -125.0), vec2(286.0, -218.0)));
+		d_path = min(d_path, seg_dist2d(v_xz, vec2(286.0, -218.0), vec2(290.0, -240.0)));
+		if (d_path < 8.5) {
+			float p_dist = d_path + road_wobble * 0.14;
+			float trail_mask = (1.0 - smoothstep(2.2, 4.4, p_dist)) * smoothstep(0.55, 0.82, v_upness);
+			float rut_core = 1.0 - smoothstep(0.6, 2.2, p_dist);
 			vec3 trail_col = mix(mud_verge_color * 0.72, mix(mud_dark_color, mud_light_color, v_med_pat * 0.65), smoothstep(0.15, 0.70, trail_mask));
 			trail_col = mix(trail_col, mud_dark_color * 0.76, rut_core * 0.45);
 			g_col = mix(g_col, trail_col, trail_mask * 0.88);
@@ -201,31 +214,32 @@ void fragment() {
 
 	// Packed medieval town mud/earth strictly hugging the plaza, ring road, cardinal avenues & house frontages
 	vec2 v_rel = v_xz - village_center_xz;
-	if (abs(v_rel.x) < village_radii_xz.x + 8.0 && abs(v_rel.y) < village_radii_xz.y + 8.0) {
-		float noise_m = (v_med_pat - 0.5) * 3.0 + (v_macro_pat - 0.5) * 2.0;
+	if (abs(v_rel.x) < village_radii_xz.x + 11.2 && abs(v_rel.y) < village_radii_xz.y + 11.2) {
+		vec2 vr = v_rel / 1.40;
+		float noise_m = (v_med_pat - 0.5) * 2.2 + (v_macro_pat - 0.5) * 1.5;
 		// Grand Central Market Square & Civic Ring (rounded square covering diagonal corner plots)
-		vec2 p_dist = abs(v_rel) - vec2(17.0, 17.0);
+		vec2 p_dist = abs(vr) - vec2(17.0, 17.0);
 		float d_plaza = length(max(p_dist, vec2(0.0))) + min(max(p_dist.x, p_dist.y), 0.0) - 2.5 + noise_m * 0.70;
 		float plaza_mud = 1.0 - smoothstep(0.0, 4.5, d_plaza);
 		// East-West Cardinal Avenue mud shoulder (stops cleanly at West & East Gates)
-		float ew_mud = (1.0 - smoothstep(4.2, 10.5, abs(v_rel.y) + noise_m * 0.65)) * (1.0 - smoothstep(54.0, 59.5, abs(v_rel.x) + noise_m * 0.5));
+		float ew_mud = (1.0 - smoothstep(4.2, 10.5, abs(vr.y) + noise_m * 0.65)) * (1.0 - smoothstep(54.0, 59.5, abs(vr.x) + noise_m * 0.5));
 		// North-South Cardinal Avenue mud shoulder (stops cleanly at North & South Gates)
-		float ns_mud = (1.0 - smoothstep(4.5, 11.5, abs(v_rel.x) + noise_m * 0.65)) * (1.0 - smoothstep(48.0, 53.5, abs(v_rel.y) + noise_m * 0.5));
+		float ns_mud = (1.0 - smoothstep(4.5, 11.5, abs(vr.x) + noise_m * 0.65)) * (1.0 - smoothstep(48.0, 53.5, abs(vr.y) + noise_m * 0.5));
 		// Cobblestone Ring Road & Ward Lanes (loops around the Market Quarter while leaving gardens & backyards green)
-		float ring_ew_lanes = (1.0 - smoothstep(2.6, 7.5, abs(abs(v_rel.x) - 36.0) + noise_m * 0.6)) * (1.0 - smoothstep(32.5, 38.0, abs(v_rel.y) + noise_m * 0.5));
-		float ring_ns_lanes = (1.0 - smoothstep(2.6, 7.5, abs(abs(v_rel.y) - 32.0) + noise_m * 0.6)) * (1.0 - smoothstep(34.5, 40.5, abs(v_rel.x) + noise_m * 0.5));
+		float ring_ew_lanes = (1.0 - smoothstep(2.6, 7.5, abs(abs(vr.x) - 36.0) + noise_m * 0.6)) * (1.0 - smoothstep(32.5, 38.0, abs(vr.y) + noise_m * 0.5));
+		float ring_ns_lanes = (1.0 - smoothstep(2.6, 7.5, abs(abs(vr.y) - 32.0) + noise_m * 0.6)) * (1.0 - smoothstep(34.5, 40.5, abs(vr.x) + noise_m * 0.5));
 		float ring_mud = max(ring_ew_lanes, ring_ns_lanes);
 		float mud_mask = clamp(max(max(plaza_mud, ring_mud), max(ew_mud, ns_mud)), 0.0, 1.0);
 		float mud_var = smoothstep(0.22, 0.78, v_med_pat * 0.65 + v_macro_pat * 0.35);
 		vec3 mud_col = mix(mud_dark_color, mud_light_color, mud_var);
 		// Darker wet cart-rut tracks right alongside the stone road edges & ring loop
 		float rut_avenues = max(
-			(1.0 - smoothstep(1.8, 5.2, abs(v_rel.y))) * step(abs(v_rel.x), 58.5),
-			(1.0 - smoothstep(1.8, 5.5, abs(v_rel.x))) * step(abs(v_rel.y), 52.5)
+			(1.0 - smoothstep(1.8, 5.2, abs(vr.y))) * step(abs(vr.x), 58.5),
+			(1.0 - smoothstep(1.8, 5.5, abs(vr.x))) * step(abs(vr.y), 52.5)
 		);
 		float rut_ring = max(
-			(1.0 - smoothstep(1.8, 4.0, abs(abs(v_rel.x) - 36.0))) * step(abs(v_rel.y), 34.5),
-			(1.0 - smoothstep(1.8, 4.0, abs(abs(v_rel.y) - 32.0))) * step(abs(v_rel.x), 38.0)
+			(1.0 - smoothstep(1.8, 4.0, abs(abs(vr.x) - 36.0))) * step(abs(vr.y), 34.5),
+			(1.0 - smoothstep(1.8, 4.0, abs(abs(vr.y) - 32.0))) * step(abs(vr.x), 38.0)
 		);
 		float rut_zone = max(rut_avenues, rut_ring);
 		mud_col = mix(mud_col, mud_dark_color * 0.85, rut_zone * 0.58);
@@ -243,6 +257,9 @@ void fragment() {
 		vec3 cool_granite = mix(alpine_rock_color * 0.85, alpine_rock_color * 1.15, rock_t);
 		float alpine_mask = smoothstep(alpine_height - alpine_blend, alpine_height + alpine_blend, v_world_y);
 		vec3 cliff_col = mix(slate_rock, cool_granite, alpine_mask);
+		vec3 det_cliff = texture(detail_rock_tex, vec2(v_xz.x + v_xz.y, v_world_y) * 0.16).rgb;
+		float det_cliff_luma = dot(det_cliff, vec3(0.3333));
+		cliff_col *= mix(0.64, 1.44, det_cliff_luma) * mix(vec3(0.92, 0.94, 0.98), vec3(1.08, 1.04, 0.98), det_cliff.r);
 		ground_col = mix(g_col, cliff_col, total_rock);
 	}
 

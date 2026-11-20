@@ -140,8 +140,8 @@ func build(village_root: Node) -> void:
 	_shelter_spots.append_array([_off(-14.0, -21.0), _off(16.0, -22.0), _off(25.0, 12.0), _off(-25.0, 12.0)])
 
 	# Pier Pathway + Boardwalk + Wharf + T-Head Pier Route (from South Gate out to sea)
-	var shore_xy: Vector2 = _off(240.0, 210.0)
-	var cottage_xy: Vector2 = _off(200.0, 180.0)
+	var shore_xy: Vector2 = _center_xz + Vector2(240.0, 210.0)
+	var cottage_xy: Vector2 = _center_xz + Vector2(200.0, 180.0)
 	var dock_yaw: float = 0.72
 	if village_root != null and village_root.has_meta("dock_shore_xy"):
 		shore_xy = village_root.get_meta("dock_shore_xy") as Vector2
@@ -176,11 +176,11 @@ func build(village_root: Node) -> void:
 
 
 func _off(dx: float, dz: float) -> Vector2:
-	return _center_xz + Vector2(dx, dz)
+	return _center_xz + Vector2(dx, dz) * VillageBuilder.V_SCALE
 
 
 func _off_v(v: Vector2) -> Vector2:
-	return _center_xz + v
+	return _center_xz + v * VillageBuilder.V_SCALE
 
 
 func _add_pt(pos: Vector2) -> int:
@@ -204,7 +204,7 @@ func _connect_chain(ids: Array[int], closed: bool) -> void:
 
 func is_inside_village(pos_xz: Vector2) -> bool:
 	var rel := pos_xz - _center_xz
-	return absf(rel.x) < 62.0 and absf(rel.y) < 56.0
+	return absf(rel.x) < 88.0 and absf(rel.y) < 79.0
 
 
 func compute_path_2d(from_xz: Vector2, to_xz: Vector2) -> PackedVector2Array:

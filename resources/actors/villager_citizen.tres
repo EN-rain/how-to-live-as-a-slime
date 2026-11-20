@@ -6,7 +6,7 @@
 script = ExtResource("1_arch")
 archetype_name = "Villager Citizen"
 glb_path = "res://assets/npcs/Citizen.glb"
-scale_factor = 0.85
+scale_factor = 1.30
 max_hp = 120.0
 attack_damage = 8.0
 walk_speed = 2.2
@@ -14,5 +14,5 @@ run_speed = 4.2
 aggro_radius = 12.0
 territory_radius = 24.0
 leash_radius = 48.0
-hp_bar_height = 2.35
-body_radius = 0.60
+hp_bar_height = 3.25
+body_radius = 0.85

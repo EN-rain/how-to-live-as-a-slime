@@ -64,6 +64,8 @@ var _frame_drag_phi := 0.0
 var _last_written_theta := 0.45
 var _last_written_phi := 1.18
 var _last_written_radius := 5.4
+var _faded_occluders: Dictionary = {}
+var _occluder_group_cache: Dictionary = {}
 
 
 func _ready() -> void:
@@ -90,8 +92,32 @@ func _notification(what: int) -> void:
 		_frame_drag_phi = 0.0
 
 
+func _is_hud_menu_open() -> bool:
+	if not is_inside_tree():
+		return false
+	var hud := get_tree().get_first_node_in_group("hud")
+	return hud != null and is_instance_valid(hud) and hud.has_method("is_menu_open") and bool(hud.call("is_menu_open"))
+
+
+func snap_to_follow() -> void:
+	if follow == null or not is_instance_valid(follow):
+		return
+	var s := follow.slime_scale
+	var follow_pos := follow.get_visual_position() if follow.has_method("get_visual_position") else follow.global_position
+	target = Vector3(follow_pos.x, follow_pos.y + target_height_per_scale * s - (liquid_height_drop * s * follow.liquid_amt), follow_pos.z)
+	_smoothed_vel = Vector3.ZERO
+	_ang_vel_theta = 0.0
+	_ang_vel_phi = 0.0
+	_frame_drag_theta = 0.0
+	_frame_drag_phi = 0.0
+	_dragging = false
+	_engaged = true
+	_current_occlusion_dist = radius
+	_update_camera(1.0 / 60.0)
+
+
 func _unhandled_input(event: InputEvent) -> void:
-	if follow == null or follow.is_dead:
+	if follow == null or follow.is_dead or _is_hud_menu_open():
 		_dragging = false
 		return
 	if event.is_action_pressed("orbit_drag") or (event is InputEventMouseButton and (event.button_index == MOUSE_BUTTON_RIGHT or event.button_index == MOUSE_BUTTON_MIDDLE) and event.pressed):
@@ -285,7 +311,8 @@ func _update_camera(dt: float = 0.016) -> void:
 				]
 				var min_hit_dist := INF
 				var occluded := false
-				# Query obstacle geometry along view corridor (Layer 1 terrain, Layer 4 cave walls)
+				var blocking_meshes: Dictionary = {}
+				# Query obstacle geometry along view corridor (Layer 1 terrain, Layer 4 props/buildings/cave walls)
 				var ray := PhysicsRayQueryParameters3D.new()
 				ray.collision_mask = 1 | 4
 				ray.collide_with_areas = false
@@ -294,11 +321,15 @@ func _update_camera(dt: float = 0.016) -> void:
 					ray.to = cam_pos + dir * 0.35 + w_off
 					var hit := space.intersect_ray(ray)
 					if not hit.is_empty():
+						if _collect_fade_occluders(hit.collider, int(hit.shape), blocking_meshes):
+							continue
 						var hit_pos: Vector3 = hit.position
 						var hit_dist := maxf(target.distance_to(hit_pos) - 0.34, 1.15)
 						if hit_dist < min_hit_dist:
 							min_hit_dist = hit_dist
 						occluded = true
+
+				_update_occluder_fades(blocking_meshes, dt)
 
 				if occluded:
 					# Occluded: snap/clamp inward immediately so walls never clip the near plane
@@ -314,6 +345,7 @@ func _update_camera(dt: float = 0.016) -> void:
 				cam_pos = target + dir * safe_r
 	else:
 		_current_occlusion_dist = eff_radius
+		_update_occluder_fades({}, dt)
 
 	camera.global_position = cam_pos
 	var view_vec := look_target - cam_pos
@@ -323,3 +355,76 @@ func _update_camera(dt: float = 0.016) -> void:
 		if absf(v_norm.dot(up_vec)) > 0.99:
 			up_vec = Vector3(sin(theta), 0.0, cos(theta)).normalized()
 		camera.look_at(look_target, up_vec)
+
+
+func _collect_fade_occluders(collider: Object, shape_idx: int, out: Dictionary) -> bool:
+	if collider == null or not is_instance_valid(collider):
+		return false
+	if collider.has_meta(&"occluder_visual"):
+		var vis: Variant = collider.get_meta(&"occluder_visual")
+		if vis is GeometryInstance3D and is_instance_valid(vis):
+			out[vis] = true
+			return true
+	if collider is CollisionObject3D:
+		var co := collider as CollisionObject3D
+		var total_owner_shapes := 0
+		for oid in co.get_shape_owners():
+			total_owner_shapes += co.shape_owner_get_shape_count(oid)
+		if shape_idx < 0 or shape_idx >= total_owner_shapes:
+			return false
+		var owner_id := co.shape_find_owner(shape_idx)
+		var cs := co.shape_owner_get_owner(owner_id) as Node
+		if cs != null and cs.has_meta(&"occluder_node"):
+			var node_name := String(cs.get_meta(&"occluder_node", ""))
+			var parent := co.get_parent()
+			if not node_name.is_empty() and parent != null:
+				var cache_key := "%d:%s" % [parent.get_instance_id(), node_name]
+				var meshes: Array = _occluder_group_cache.get(cache_key, [])
+				if meshes.is_empty():
+					var target_root := parent.get_node_or_null(node_name)
+					if target_root != null:
+						_gather_meshes_recursive(target_root, meshes)
+						_occluder_group_cache[cache_key] = meshes
+				if not meshes.is_empty():
+					for m in meshes:
+						if is_instance_valid(m):
+							out[m] = true
+					return true
+	return false
+
+
+static func _gather_meshes_recursive(node: Node, out: Array) -> void:
+	if node is GeometryInstance3D and not (node is MultiMeshInstance3D):
+		out.append(node)
+	for ch in node.get_children():
+		_gather_meshes_recursive(ch, out)
+
+
+func _update_occluder_fades(blocking_meshes: Dictionary, dt: float) -> void:
+	const TARGET_TRANSPARENCY := 0.74 # 0.26 opacity (~26% visible)
+	var fade_in_t := clampf(1.0 - exp(-14.0 * dt), 0.0, 1.0)
+	var fade_out_t := clampf(1.0 - exp(-10.0 * dt), 0.0, 1.0)
+
+	for m in blocking_meshes.keys():
+		if not is_instance_valid(m):
+			continue
+		var gi := m as GeometryInstance3D
+		gi.transparency = lerpf(gi.transparency, TARGET_TRANSPARENCY, fade_in_t)
+		_faded_occluders[gi] = true
+
+	if _faded_occluders.is_empty():
+		return
+	var to_remove: Array = []
+	for m in _faded_occluders.keys():
+		if not is_instance_valid(m):
+			to_remove.append(m)
+			continue
+		if blocking_meshes.has(m):
+			continue
+		var gi := m as GeometryInstance3D
+		gi.transparency = lerpf(gi.transparency, 0.0, fade_out_t)
+		if gi.transparency <= 0.01:
+			gi.transparency = 0.0
+			to_remove.append(m)
+	for m in to_remove:
+		_faded_occluders.erase(m)

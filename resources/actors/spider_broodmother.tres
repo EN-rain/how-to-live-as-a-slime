@@ -6,7 +6,7 @@
 script = ExtResource("1_arch")
 archetype_name = "Broodmother Spider"
 glb_path = "res://assets/mobs/Spider.glb"
-scale_factor = 0.58
+scale_factor = 1.18
 max_hp = 240.0
 attack_damage = 22.0
 walk_speed = 3.0
@@ -14,5 +14,5 @@ run_speed = 7.0
 aggro_radius = 26.0
 territory_radius = 42.0
 leash_radius = 152.0
-hp_bar_height = 1.85
-body_radius = 0.88
+hp_bar_height = 3.00
+body_radius = 1.30

@@ -36,7 +36,7 @@ extends Resource
 @export_range(1, 16, 1) var max_move_substeps: int = 6
 
 @export_group("Size")
-@export var start_scale := 1.0
+@export var start_scale := 0.36
 @export var scale_response := 3.5
 ## Radius of the reference sphere mesh the shader deforms (mesh-local units).
 @export var reference_radius := 1.6
@@ -111,7 +111,7 @@ extends Resource
 @export var fission_duration := 0.58
 @export var bud_duration := 0.58
 @export var merge_duration := 0.42
-@export var min_split_scale := 0.45
+@export var min_split_scale := 0.20
 ## Bilateral coupled split: the bud spawns inside the parent's silhouette, both
 ## halves separate from their shared centre, and the facing surfaces are sculpted
 ## into a world-space hourglass that pinches to zero at the snap point.
@@ -148,7 +148,7 @@ extends Resource
 @export_range(0.1, 1.0, 0.02) var sticky_web_speed_mult := 0.56
 @export_range(10.0, 300.0, 5.0) var ocean_warning_distance := 80.0
 @export_range(20.0, 400.0, 5.0) var ocean_lethal_distance := 130.0
-@export_range(0.15, 0.60, 0.01) var lethal_scale_threshold := 0.36
+@export_range(0.12, 0.60, 0.01) var lethal_scale_threshold := 0.15
 
 
 func get_validated_ocean_lethal_distance() -> float:

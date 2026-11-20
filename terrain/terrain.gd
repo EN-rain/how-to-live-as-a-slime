@@ -430,18 +430,33 @@ var _webwood_layout: Dictionary = {}
 
 var _noise: FastNoiseLite
 var _cached_grid_coords := PackedFloat32Array()
+var _cached_grid_heights := PackedFloat32Array()
+var _cached_grid_heights_n: int = -1
 var _built_once := false
 var _rebuild_pending := false
 
 
 func _ready() -> void:
 	set_process(not Engine.is_editor_hint())
+	if not Engine.is_editor_hint():
+		var authored_base := grass_count
+		if not has_meta("authored_grass_count"):
+			set_meta("authored_grass_count", authored_base)
+		var settings := SlimeSettings.get_or_create()
+		if settings != null:
+			var q_idx := clampi(int(settings.get_value("graphics", "quality_preset", 0)), 0, SlimeSettings.QUALITY_PRESETS.size() - 1)
+			var g_mult := float(settings.get_value("graphics", "grass_density", SlimeSettings.QUALITY_PRESETS[q_idx]["grass_mult"]))
+			grass_count = clampi(int(roundf(float(authored_base) * g_mult)), 0, 250000)
+		if get_parent() != null:
+			var slime_node := get_parent().get_node_or_null("Slime") as Node3D
+			if slime_node != null:
+				_grass_center = Vector2(slime_node.position.x, slime_node.position.z)
 	_built_once = true
 	rebuild()
 
 
 func _rebuild_if_ready() -> void:
-	if not is_inside_tree() or not is_node_ready():
+	if not is_inside_tree() or not is_node_ready() or not _built_once:
 		return
 	if not _rebuild_pending:
 		_rebuild_pending = true
@@ -501,7 +516,11 @@ func rebuild() -> void:
 	if terrain_node != null:
 		_apply_webwood_shader_uniforms(terrain_node.material_override as ShaderMaterial, _webwood_layout)
 		if terrain_node.material_override is ShaderMaterial:
-			(terrain_node.material_override as ShaderMaterial).set_shader_parameter("sea_level", sea_level)
+			var tmat := terrain_node.material_override as ShaderMaterial
+			tmat.set_shader_parameter("sea_level", sea_level)
+			var rtex := load("res://assets/nature/Rocks_Diffuse.png") as Texture2D
+			if rtex != null:
+				tmat.set_shader_parameter("detail_rock_tex", rtex)
 	if grass_node != null:
 		_apply_webwood_shader_uniforms(grass_node.material_override as ShaderMaterial, _webwood_layout)
 	if wispy_node != null:
@@ -516,6 +535,8 @@ func rebuild() -> void:
 	if terrain_node != null:
 		terrain_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_build_terrain_mesh(terrain_node)
+
+	VillageBuilder.ensure_dock_layout(self)
 
 	if water_node != null:
 		_build_water_mesh(water_node)
@@ -567,10 +588,17 @@ func _build_landmarks() -> void:
 		return
 	var crypt_reg := _ensure_region_node("SkeletonCryptRegion", skeleton_crypt_scene)
 	var skel_cave := get_node_or_null("SkeletonDungeonCave") as DungeonCaveBuilder
+	if skel_cave == null and crypt_reg != null:
+		skel_cave = crypt_reg.get_node_or_null("SkeletonDungeonCave") as DungeonCaveBuilder
 	if skel_cave == null:
 		skel_cave = DungeonCaveBuilder.new()
 		skel_cave.set("crypt_region", crypt_reg)
-		add_child(skel_cave)
+		if crypt_reg != null:
+			crypt_reg.add_child(skel_cave)
+		else:
+			add_child(skel_cave)
+	else:
+		skel_cave.set("crypt_region", crypt_reg)
 	var wolf_reg := _ensure_region_node("WolfCragRegion", wolf_crag_scene)
 	var waystones_reg := _ensure_region_node("WaystonesRegion", waystones_scene)
 	var rat_reg := _ensure_region_node("RatWarrenRegion", rat_warren_scene)
@@ -600,6 +628,8 @@ func _build_cave() -> void:
 
 
 func _setup_noise() -> void:
+	_cached_grid_heights.clear()
+	_cached_grid_heights_n = -1
 	_noise = FastNoiseLite.new()
 	_noise.seed = terrain_seed
 	_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -747,8 +777,8 @@ func sample_height(x: float, z: float) -> float:
 	# 5. Seaside Village Terrace Grading (Slimebrook at (590, 2200), walking distance to southern coast)
 	var vdx := x - 590.0
 	var vdz := z - 2200.0
-	if absf(vdx) < 96.0 and absf(vdz) < 88.0:
-		var vn := sqrt((vdx * vdx) / (78.0 * 78.0) + (vdz * vdz) / (70.0 * 70.0))
+	if absf(vdx) < 136.0 and absf(vdz) < 124.0:
+		var vn := sqrt((vdx * vdx) / (110.0 * 110.0) + (vdz * vdz) / (98.0 * 98.0))
 		if vn < 1.25:
 			var v_flat := 1.0 - smoothstep(0.75, 1.25, vn)
 			var terrace_h := 20.0 + (1.0 - clampf(vn, 0.0, 1.0)) * 0.45
@@ -837,7 +867,7 @@ func _is_cave_subdiv_cell(ix: int, iz: int, n: int) -> bool:
 	var z0 := _cached_grid_coords[iz]
 	var z1 := _cached_grid_coords[iz + 1]
 	var in_cave_box := enable_cave and x1 > CAVE_SUBDIV_X_MIN and x0 < CAVE_SUBDIV_X_MAX and z1 > CAVE_SUBDIV_Z_MIN and z0 < CAVE_SUBDIV_Z_MAX
-	var in_village_box := x1 > 470.0 and x0 < 730.0 and z1 > 2090.0 and z0 < 2520.0
+	var in_village_box := x1 > 455.0 and x0 < 735.0 and z1 > 2075.0 and z0 < 2520.0
 	var in_landmark_box := WorldLandmarks.is_in_extra_subdiv_box(x0, x1, z0, z1)
 	return in_cave_box or in_village_box or in_landmark_box
 
@@ -939,10 +969,19 @@ func sample_surface_exact(x: float, z: float) -> Vector4:
 		dz = z1 - z0
 		u = clampf((x - x0) / maxf(dx, 1e-6), 0.0, 1.0)
 		v = clampf((z - z0) / maxf(dz, 1e-6), 0.0, 1.0)
-		y00 = sample_height(x0, z0)
-		y10 = sample_height(x1, z0)
-		y01 = sample_height(x0, z1)
-		y11 = sample_height(x1, z1)
+		var row_c := n + 1
+		if _cached_grid_heights_n == n and _cached_grid_heights.size() == row_c * row_c:
+			var r0 := iz * row_c
+			var r1 := r0 + row_c
+			y00 = _cached_grid_heights[r0 + ix]
+			y10 = _cached_grid_heights[r0 + ix + 1]
+			y01 = _cached_grid_heights[r1 + ix]
+			y11 = _cached_grid_heights[r1 + ix + 1]
+		else:
+			y00 = sample_height(x0, z0)
+			y10 = sample_height(x1, z0)
+			y01 = sample_height(x0, z1)
+			y11 = sample_height(x1, z1)
 
 	var h := 0.0
 	var norm := Vector3.UP
@@ -1000,9 +1039,90 @@ func sample_spawn_floor_y(x: float, z: float, est_foot_y: float) -> float:
 	return over_h
 
 
+func _build_terrain_mesh_cache_sig(n: int) -> String:
+	return "tm_v8|%d|%.1f|%d|%.1f|%.1f|%.1f|%.1f|%.2f|%.2f|%.2f|%d|%s|%s|%s|%s" % [
+		terrain_seed, terrain_size, n, continent_radius, flat_center_radius,
+		valley_floor_height, seabed_depth, mountain_height_multiplier,
+		hills_height_multiplier, mesa_height_multiplier, collision_stride,
+		str(enable_cave), str(_webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)),
+		str(WorldLandmarks.RAT_WARREN_MOUTH), str(WorldLandmarks.SKEL_CAVE_MOUTH),
+	]
+
+
+func _sample_cutout_tuck(vx: float, vz: float, vy: float) -> float:
+	if enable_cave and vx >= CAVE_SUBDIV_X_MIN and vx <= CAVE_SUBDIV_X_MAX and vz >= CAVE_SUBDIV_Z_MIN and vz <= CAVE_SUBDIV_Z_MAX:
+		var cl_v := CaveLayout.to_local(Vector3(vx, 0.0, vz))
+		var patch_t := minf(CaveSDF.eval_sky_patch_t(cl_v.x, cl_v.z), CaveSDF.eval_mouth_patch_t(cl_v.x, cl_v.z))
+		if patch_t < 0.70:
+			var tuck_w := clampf((0.70 - patch_t) / 0.06, 0.0, 1.0)
+			tuck_w = tuck_w * tuck_w * (3.0 - 2.0 * tuck_w)
+			return vy - tuck_w * 0.65
+	return vy
+
+
 func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 	var n := _get_active_subdivisions()
 	var half := terrain_size * 0.5
+	_ensure_grid_coords()
+
+	var tcache_path := ""
+	if not Engine.is_editor_hint():
+		tcache_path = "user://cache/terrain_mesh_%s.res" % _build_terrain_mesh_cache_sig(n).md5_text()
+		if ResourceLoader.exists(tcache_path):
+			var cached_pack := load(tcache_path) as ArrayMesh
+			if cached_pack != null and int(cached_pack.get_meta("grid_n", -1)) == n:
+				var c_heights: PackedFloat32Array = cached_pack.get_meta("heights", PackedFloat32Array())
+				var c_coords: Array = cached_pack.get_meta("chunk_coords", [])
+				var c_aabbs: Array = cached_pack.get_meta("chunk_aabbs", [])
+				var c_col: ConcavePolygonShape3D = cached_pack.get_meta("col_shape", null) as ConcavePolygonShape3D
+				if c_heights.size() == (n + 1) * (n + 1) and c_coords.size() == cached_pack.get_surface_count() and c_aabbs.size() == cached_pack.get_surface_count():
+					_cached_grid_heights = c_heights
+					_cached_grid_heights_n = n
+					var old_c := terrain_node.get_node_or_null("TerrainChunks")
+					if old_c != null:
+						terrain_node.remove_child(old_c)
+						old_c.free()
+					var cr := Node3D.new()
+					cr.name = "TerrainChunks"
+					terrain_node.add_child(cr)
+					var m_ov := terrain_node.material_override
+					var sh_m := terrain_node.cast_shadow
+					var gi_m := terrain_node.gi_mode
+					for si in cached_pack.get_surface_count():
+						var cm := ArrayMesh.new()
+						cm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cached_pack.surface_get_arrays(si))
+						var coord := c_coords[si] as Vector2i
+						var cmi := MeshInstance3D.new()
+						cmi.name = "TerrainChunk_%d_%d" % [coord.x, coord.y]
+						cmi.mesh = cm
+						cmi.material_override = m_ov
+						cmi.cast_shadow = sh_m
+						cmi.gi_mode = gi_m
+						cmi.custom_aabb = c_aabbs[si] as AABB
+						cr.add_child(cmi)
+					terrain_node.mesh = null
+					terrain_node.custom_aabb = AABB()
+					var csn := terrain_node.get_node_or_null("StaticBody3D/CollisionShape3D") as CollisionShape3D
+					var sb := terrain_node.get_node_or_null("StaticBody3D") as StaticBody3D
+					if sb != null:
+						sb.collision_layer = 1
+						sb.collision_mask = 0
+						var old_sc := sb.get_node_or_null("CutoutSkirtCollider")
+						if old_sc != null:
+							old_sc.queue_free()
+					if csn != null:
+						if c_col != null:
+							csn.disabled = false
+							csn.shape = c_col
+						elif Engine.is_editor_hint():
+							if csn.shape == null or csn.shape is ConcavePolygonShape3D:
+								var ph := BoxShape3D.new()
+								ph.size = Vector3(terrain_size, 1.0, terrain_size)
+								csn.shape = ph
+							csn.disabled = true
+						else:
+							csn.shape = null
+					return
 
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -1019,6 +1139,8 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 	var grid_coords := _cached_grid_coords
 
 	var inv_n := 1.0 / float(n)
+	var heights := PackedFloat32Array()
+	heights.resize(row_count * row_count)
 	var idx := 0
 	for iz in row_count:
 		var v_coord := float(iz) * inv_n
@@ -1026,9 +1148,13 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 		for ix in row_count:
 			var u_coord := float(ix) * inv_n
 			var x := grid_coords[ix]
-			verts[idx] = Vector3(x, sample_height(x, z), z)
+			var h_val := sample_height(x, z)
+			heights[idx] = h_val
+			verts[idx] = Vector3(x, h_val, z)
 			uvs[idx] = Vector2(u_coord, v_coord)
 			idx += 1
+	_cached_grid_heights = heights
+	_cached_grid_heights_n = n
 
 	# Compute smooth vertex normals directly from mesh grid neighbors
 	for iz in row_count:
@@ -1064,6 +1190,9 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 	var mat_ov := terrain_node.material_override
 	var shadow_mode := terrain_node.cast_shadow
 	var gi := terrain_node.gi_mode
+	var cache_pack := ArrayMesh.new() if not Engine.is_editor_hint() else null
+	var cache_coords: Array[Vector2i] = []
+	var cache_aabbs: Array[AABB] = []
 
 	for cz in grid_chunks:
 		var iz0 := cz * cell_step
@@ -1084,24 +1213,6 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 			var min_pt := Vector3(INF, INF, INF)
 			var max_pt := Vector3(-INF, -INF, -INF)
 
-			var add_base_vert := func(g_idx: int) -> int:
-				if vmap_stamp[g_idx] == cur_stamp:
-					return vmap_local[g_idx]
-				var li := c_verts.size()
-				var vp := verts[g_idx]
-				c_verts.append(vp)
-				c_normals.append(normals[g_idx])
-				c_uvs.append(uvs[g_idx])
-				vmap_stamp[g_idx] = cur_stamp
-				vmap_local[g_idx] = li
-				min_pt.x = minf(min_pt.x, vp.x)
-				min_pt.y = minf(min_pt.y, vp.y)
-				min_pt.z = minf(min_pt.z, vp.z)
-				max_pt.x = maxf(max_pt.x, vp.x)
-				max_pt.y = maxf(max_pt.y, vp.y)
-				max_pt.z = maxf(max_pt.z, vp.z)
-				return li
-
 			for iz in range(iz0, iz1):
 				var r0 := iz * row_count
 				var r1 := (iz + 1) * row_count
@@ -1121,20 +1232,36 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 						var n10 := normals[r0 + ix + 1]
 						var n01 := normals[r1 + ix]
 						var n11 := normals[r1 + ix + 1]
+						var step_x := (x1 - x0) / float(sub)
+						var step_z := (z1 - z0) / float(sub)
+						var edge_l := _is_cave_subdiv_cell(ix - 1, iz, n)
+						var edge_r := _is_cave_subdiv_cell(ix + 1, iz, n)
+						var edge_u := _is_cave_subdiv_cell(ix, iz - 1, n)
+						var edge_d := _is_cave_subdiv_cell(ix, iz + 1, n)
 						for sz in s_row:
 							var tz := float(sz) / float(sub)
 							var vz := lerpf(z0, z1, tz)
 							var v_uv := lerpf(v0_uv, v1_uv, tz)
 							var n_left := n00.lerp(n01, tz)
 							var n_right := n10.lerp(n11, tz)
+							var on_z_seam := (sz == 0 and not edge_u) or (sz == sub and not edge_d)
 							for sx in s_row:
 								var tx := float(sx) / float(sub)
 								var vx := lerpf(x0, x1, tx)
 								var u_uv := lerpf(u0_uv, u1_uv, tx)
 								var vy := _sample_cave_subdiv_vertex_y(ix, iz, sx, sz, sub, n, x0, x1, z0, z1)
+								var on_x_seam := (sx == 0 and not edge_l) or (sx == sub and not edge_r)
+								var nrm := n_left.lerp(n_right, tx).normalized()
+								if not on_x_seam and not on_z_seam:
+									vy = _sample_cutout_tuck(vx, vz, vy)
+									var hL := _sample_cutout_tuck(vx - step_x, vz, sample_height(vx - step_x, vz))
+									var hR := _sample_cutout_tuck(vx + step_x, vz, sample_height(vx + step_x, vz))
+									var hD := _sample_cutout_tuck(vx, vz - step_z, sample_height(vx, vz - step_z))
+									var hU := _sample_cutout_tuck(vx, vz + step_z, sample_height(vx, vz + step_z))
+									nrm = Vector3((hL - hR) * (2.0 * step_z), 4.0 * step_x * step_z, (hD - hU) * (2.0 * step_x)).normalized()
 								var vp := Vector3(vx, vy, vz)
 								c_verts.append(vp)
-								c_normals.append(n_left.lerp(n_right, tx).normalized())
+								c_normals.append(nrm)
 								c_uvs.append(Vector2(u_uv, v_uv))
 								min_pt.x = minf(min_pt.x, vp.x)
 								min_pt.y = minf(min_pt.y, vp.y)
@@ -1142,16 +1269,29 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 								max_pt.x = maxf(max_pt.x, vp.x)
 								max_pt.y = maxf(max_pt.y, vp.y)
 								max_pt.z = maxf(max_pt.z, vp.z)
+						var cut_flags := PackedByteArray()
+						cut_flags.resize(sub * sub)
+						if cut_cave_portal:
+							for sz in sub:
+								var sr0 := base_v + sz * s_row
+								var sr1 := base_v + (sz + 1) * s_row
+								for sx in sub:
+									var si00 := sr0 + sx
+									var si10 := si00 + 1
+									var si01 := sr1 + sx
+									var si11 := si01 + 1
+									if _is_quad_in_any_cutout(c_verts[si00], c_verts[si10], c_verts[si01], c_verts[si11]):
+										cut_flags[sz * sub + sx] = 1
 						for sz in sub:
 							var sr0 := base_v + sz * s_row
 							var sr1 := base_v + (sz + 1) * s_row
 							for sx in sub:
+								if cut_flags[sz * sub + sx] != 0:
+									continue
 								var si00 := sr0 + sx
 								var si10 := si00 + 1
 								var si01 := sr1 + sx
 								var si11 := si01 + 1
-								if cut_cave_portal and _is_quad_in_any_cutout(c_verts[si00], c_verts[si10], c_verts[si01], c_verts[si11]):
-									continue
 								c_indices.append(si00)
 								c_indices.append(si10)
 								c_indices.append(si01)
@@ -1167,10 +1307,46 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 					if cut_cave_portal and _is_quad_in_any_cutout(verts[g00], verts[g10], verts[g01], verts[g11]):
 						continue
 
-					var l00: int = add_base_vert.call(g00)
-					var l10: int = add_base_vert.call(g10)
-					var l01: int = add_base_vert.call(g01)
-					var l11: int = add_base_vert.call(g11)
+					var l00: int
+					if vmap_stamp[g00] == cur_stamp:
+						l00 = vmap_local[g00]
+					else:
+						l00 = c_verts.size()
+						var vp00 := verts[g00]
+						c_verts.append(vp00); c_normals.append(normals[g00]); c_uvs.append(uvs[g00])
+						vmap_stamp[g00] = cur_stamp; vmap_local[g00] = l00
+						min_pt.x = minf(min_pt.x, vp00.x); min_pt.y = minf(min_pt.y, vp00.y); min_pt.z = minf(min_pt.z, vp00.z)
+						max_pt.x = maxf(max_pt.x, vp00.x); max_pt.y = maxf(max_pt.y, vp00.y); max_pt.z = maxf(max_pt.z, vp00.z)
+					var l10: int
+					if vmap_stamp[g10] == cur_stamp:
+						l10 = vmap_local[g10]
+					else:
+						l10 = c_verts.size()
+						var vp10 := verts[g10]
+						c_verts.append(vp10); c_normals.append(normals[g10]); c_uvs.append(uvs[g10])
+						vmap_stamp[g10] = cur_stamp; vmap_local[g10] = l10
+						min_pt.x = minf(min_pt.x, vp10.x); min_pt.y = minf(min_pt.y, vp10.y); min_pt.z = minf(min_pt.z, vp10.z)
+						max_pt.x = maxf(max_pt.x, vp10.x); max_pt.y = maxf(max_pt.y, vp10.y); max_pt.z = maxf(max_pt.z, vp10.z)
+					var l01: int
+					if vmap_stamp[g01] == cur_stamp:
+						l01 = vmap_local[g01]
+					else:
+						l01 = c_verts.size()
+						var vp01 := verts[g01]
+						c_verts.append(vp01); c_normals.append(normals[g01]); c_uvs.append(uvs[g01])
+						vmap_stamp[g01] = cur_stamp; vmap_local[g01] = l01
+						min_pt.x = minf(min_pt.x, vp01.x); min_pt.y = minf(min_pt.y, vp01.y); min_pt.z = minf(min_pt.z, vp01.z)
+						max_pt.x = maxf(max_pt.x, vp01.x); max_pt.y = maxf(max_pt.y, vp01.y); max_pt.z = maxf(max_pt.z, vp01.z)
+					var l11: int
+					if vmap_stamp[g11] == cur_stamp:
+						l11 = vmap_local[g11]
+					else:
+						l11 = c_verts.size()
+						var vp11 := verts[g11]
+						c_verts.append(vp11); c_normals.append(normals[g11]); c_uvs.append(uvs[g11])
+						vmap_stamp[g11] = cur_stamp; vmap_local[g11] = l11
+						min_pt.x = minf(min_pt.x, vp11.x); min_pt.y = minf(min_pt.y, vp11.y); min_pt.z = minf(min_pt.z, vp11.z)
+						max_pt.x = maxf(max_pt.x, vp11.x); max_pt.y = maxf(max_pt.y, vp11.y); max_pt.z = maxf(max_pt.z, vp11.z)
 					c_indices.append(l00)
 					c_indices.append(l10)
 					c_indices.append(l01)
@@ -1190,14 +1366,19 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 
 			var c_mesh := ArrayMesh.new()
 			c_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrays)
+			var chunk_aabb := c_mesh.get_aabb().grow(0.5)
 			var chunk_mi := MeshInstance3D.new()
 			chunk_mi.name = "TerrainChunk_%d_%d" % [cx, cz]
 			chunk_mi.mesh = c_mesh
 			chunk_mi.material_override = mat_ov
 			chunk_mi.cast_shadow = shadow_mode
 			chunk_mi.gi_mode = gi
-			chunk_mi.custom_aabb = c_mesh.get_aabb().grow(0.5)
+			chunk_mi.custom_aabb = chunk_aabb
 			chunks_root.add_child(chunk_mi)
+			if cache_pack != null:
+				cache_pack.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrays)
+				cache_coords.append(Vector2i(cx, cz))
+				cache_aabbs.append(chunk_aabb)
 
 	terrain_node.mesh = null
 	terrain_node.custom_aabb = AABB()
@@ -1207,13 +1388,37 @@ func _build_terrain_mesh(terrain_node: MeshInstance3D) -> void:
 	if static_body != null:
 		static_body.collision_layer = 1
 		static_body.collision_mask = 0
+	if static_body != null:
+		static_body.collision_layer = 1
+		static_body.collision_mask = 0
+		var old_skirt_col := static_body.get_node_or_null("CutoutSkirtCollider")
+		if old_skirt_col != null:
+			old_skirt_col.queue_free()
+	var built_col: ConcavePolygonShape3D = null
+	if not Engine.is_editor_hint() and (col_shape_node != null or cache_pack != null):
+		built_col = _build_low_mem_collision_shape(verts, row_count, n)
 	if col_shape_node != null:
 		# In editor preview, skip building the 73,728-triangle concave collision mesh
 		# to prevent Godot Editor physics server wireframe and BVH generation lag.
 		if Engine.is_editor_hint():
-			col_shape_node.shape = null
+			if col_shape_node.shape == null or col_shape_node.shape is ConcavePolygonShape3D:
+				var ph := BoxShape3D.new()
+				ph.size = Vector3(terrain_size, 1.0, terrain_size)
+				col_shape_node.shape = ph
+			col_shape_node.disabled = true
 		else:
-			col_shape_node.shape = _build_low_mem_collision_shape(verts, row_count, n)
+			col_shape_node.disabled = false
+			col_shape_node.shape = built_col
+	if cache_pack != null and not tcache_path.is_empty() and cache_pack.get_surface_count() > 0:
+		var dir_abs := ProjectSettings.globalize_path(tcache_path.get_base_dir())
+		DirAccess.make_dir_recursive_absolute(dir_abs)
+		if DirAccess.dir_exists_absolute(dir_abs):
+			cache_pack.set_meta("grid_n", n)
+			cache_pack.set_meta("heights", heights)
+			cache_pack.set_meta("chunk_coords", cache_coords)
+			cache_pack.set_meta("chunk_aabbs", cache_aabbs)
+			cache_pack.set_meta("col_shape", built_col)
+			ResourceSaver.save(cache_pack, tcache_path, ResourceSaver.FLAG_COMPRESS)
 
 
 func _build_low_mem_collision_shape(verts: PackedVector3Array, row_count: int, n: int) -> ConcavePolygonShape3D:
@@ -1693,12 +1898,54 @@ func _get_wispy_grass_mesh() -> Mesh:
 	return _get_grass_mesh()
 
 
+const GRASS_CACHE_PREFIX := "user://cache/grass_"
+
+func _grass_cache_path(target_total: int, cache_sig: String) -> String:
+	return "%s%d_%s.dat" % [GRASS_CACHE_PREFIX, target_total, cache_sig.md5_text().left(12)]
+
+func _build_grass_cache_sig(center: Vector2, target_total: int) -> String:
+	var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
+	var lm_md5 := FileAccess.get_md5("res://scripts/world_landmarks.gd").left(8)
+	var vb_md5 := FileAccess.get_md5("res://terrain/village_builder.gd").left(8)
+	return "v3_road_clear|%s|%s|%d|%.1f|%d|%.1f|%s|%.1f,%.1f|%d|%.1f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%s|%.1f,%d,%.1f,%d,%.1f,%d,%.1f,%d" % [
+		lm_md5, vb_md5,
+		terrain_seed, terrain_size, terrain_subdivisions, continent_radius, str(enable_cave),
+		center.x, center.y, target_total, grass_spawn_radius, grass_spacing, grass_clearing_threshold,
+		min_grass_normal_y, grass_slope_gravity_blend, grass_height_map_min, grass_height_map_max,
+		str(_webwood_layout),
+		rs.wolf_grass_radius, rs.wolf_grass_count, rs.rat_grass_radius, rs.rat_grass_count,
+		rs.skel_grass_radius, rs.skel_grass_count, rs.village_grass_radius, rs.village_grass_count,
+	]
+
+
 ## Industry-Standard Hexagonal Blue-Noise Stratified Placement with Continuous Polar Perturbation.
 ## Completely eliminates Cartesian grid lines and agricultural rows, guaranteeing a lush, gapless carpet.
-func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
-	var target_total := editor_grass_count if Engine.is_editor_hint() else grass_count
-	if not Engine.is_editor_hint() and not _cached_grass_data.is_empty() and _cached_grass_count == target_total and _cached_grass_center == center:
+func build_grass_data(center: Vector2 = Vector2.ZERO, store_in_cache: bool = true) -> Dictionary:
+	var is_ed := Engine.is_editor_hint()
+	var target_total := editor_grass_count if is_ed else grass_count
+	if store_in_cache and not is_ed and not _cached_grass_data.is_empty() and _cached_grass_count == target_total and _cached_grass_center == center:
 		return _cached_grass_data
+
+	var cache_sig := ""
+	var gcache_path := ""
+	if store_in_cache and not is_ed and target_total > 0:
+		cache_sig = _build_grass_cache_sig(center, target_total)
+		gcache_path = _grass_cache_path(target_total, cache_sig)
+		if FileAccess.file_exists(gcache_path):
+			var f_in := FileAccess.open(gcache_path, FileAccess.READ)
+			if f_in != null:
+				var d = f_in.get_var(false)
+				f_in.close()
+				if d is Dictionary and String(d.get("sig", "")) == cache_sig:
+					var c_typed: Array[Transform3D] = []
+					var w_typed: Array[Transform3D] = []
+					c_typed.assign(d.get("common", []))
+					w_typed.assign(d.get("wispy", []))
+					var loaded_res := { "common": c_typed, "wispy": w_typed }
+					_cached_grass_data = loaded_res
+					_cached_grass_count = target_total
+					_cached_grass_center = center
+					return loaded_res
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = terrain_seed + 77
@@ -1733,7 +1980,7 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 		pass_defs.append([WorldLandmarks.WOLF_CRAG_CENTER, rs.wolf_grass_radius, rs.wolf_grass_count, -1.0])
 		pass_defs.append([Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0), rs.rat_grass_radius, rs.rat_grass_count, -1.0])
 		pass_defs.append([WorldLandmarks.SKEL_CAVE_MOUTH, rs.skel_grass_radius, rs.skel_grass_count, -1.0])
-		pass_defs.append([Vector2(590.0, 2200.0), rs.village_grass_radius, rs.village_grass_count, -1.0])
+		pass_defs.append([Vector2(590.0, 2200.0), rs.village_grass_radius * 1.35, rs.village_grass_count, -1.0])
 	var main_reach := 0.0
 	for pass_i in pass_defs.size():
 		var pc: Vector2 = pass_defs[pass_i][0]
@@ -1798,7 +2045,7 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 				# and skip submerged grass blades beneath the Sunken Rat Swamp Lagoon
 				if y < 5.8 or y > 95.0:
 					continue
-				if z > 415.0 and z < 556.0 and x > -330.0 and x < -140.0 and y < WorldLandmarks.RAT_SWAMP_WATER_Y - 0.04:
+				if z > WorldLandmarks.RAT_WARREN_MOUTH.y and z < WorldLandmarks.RAT_WARREN_MOUTH.y + 141.0 and absf(x - WorldLandmarks.RAT_WARREN_MOUTH.x) < 95.0 and y < WorldLandmarks.RAT_SWAMP_WATER_Y - 0.04:
 					continue
 
 				# 5. Species allocation driven by Grass Map B channel (short lawns=Common, wild swells=Wispy plumes)
@@ -1829,10 +2076,18 @@ func build_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
 
 
 	var res := { "common": common_xforms, "wispy": wispy_xforms }
-	if not Engine.is_editor_hint():
+	if store_in_cache and not Engine.is_editor_hint():
 		_cached_grass_data = res
 		_cached_grass_count = target_total
 		_cached_grass_center = center
+		if not cache_sig.is_empty() and not gcache_path.is_empty():
+			var dir_abs := ProjectSettings.globalize_path(gcache_path.get_base_dir())
+			DirAccess.make_dir_recursive_absolute(dir_abs)
+			if DirAccess.dir_exists_absolute(dir_abs):
+				var f_out := FileAccess.open(gcache_path, FileAccess.WRITE)
+				if f_out != null:
+					f_out.store_var({"sig": cache_sig, "common": common_xforms, "wispy": wispy_xforms}, false)
+					f_out.close()
 	return res
 
 
@@ -2042,10 +2297,54 @@ var _grass_wispy_mat: ShaderMaterial = null
 var _grass_far_mat: ShaderMaterial = null
 var _grass_wispy_far_mat: ShaderMaterial = null
 var _grass_far_shader: Shader = null
-var _last_shader_slime_pos := Vector3(1e9, 1e9, 1e9)
 var _last_grass_lod_cam_pos := Vector3(1e9, 1e9, 1e9)
 var _grass_holder_ref: Node3D = null
 var _grass_wispy_holder_ref: Node3D = null
+var _tree_chunks_arr: Array[MultiMeshInstance3D] = []
+var _last_tree_shadow_cam := Vector3(1e9, 1e9, 1e9)
+var _grass_worker_task_id: int = -1
+var _grass_worker_center: Vector2 = Vector2.ZERO
+var _grass_worker_res: Dictionary = {}
+
+
+func _exit_tree() -> void:
+	if _grass_worker_task_id >= 0:
+		WorkerThreadPool.wait_for_task_completion(_grass_worker_task_id)
+		_grass_worker_task_id = -1
+
+
+func _collect_tree_chunks(trees_node: Node3D) -> void:
+	_tree_chunks_arr.clear()
+	_last_tree_shadow_cam = Vector3(1e9, 1e9, 1e9)
+	if trees_node == null:
+		return
+	for ch in trees_node.get_children():
+		for sub in ch.get_children():
+			if sub is MultiMeshInstance3D and sub.name.begins_with("Chunk_"):
+				_tree_chunks_arr.append(sub as MultiMeshInstance3D)
+
+
+func _update_tree_shadow_cull(cam_pos: Vector3) -> void:
+	if _tree_chunks_arr.is_empty():
+		return
+	if cam_pos.distance_squared_to(_last_tree_shadow_cam) < 64.0:
+		return
+	_last_tree_shadow_cam = cam_pos
+	const TREE_SHADOW_DIST := 54.0
+	for tmi in _tree_chunks_arr:
+		if tmi == null or not is_instance_valid(tmi):
+			continue
+		var hd := float(tmi.get_meta("half_diag", 20.0))
+		var r_max := TREE_SHADOW_DIST + hd
+		var want_sh := tmi.position.distance_squared_to(cam_pos) <= r_max * r_max
+		var target_sh := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if want_sh else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if tmi.cast_shadow != target_sh:
+			tmi.cast_shadow = target_sh
+
+
+func _grass_recenter_worker(target_c: Vector2) -> void:
+	# Compute grass distribution off-thread; returns via _grass_worker_res before task completes.
+	_grass_worker_res = build_grass_data(target_c, false)
 var _grass_recenter_cooldown: float = 0.0
 
 func _ensure_grass_far_materials() -> void:
@@ -2110,37 +2409,6 @@ func _process(delta: float) -> void:
 				_grass_wispy_mat = wn_ref.material_override as ShaderMaterial
 		_ensure_grass_far_materials()
 
-		# Publish outer jelly body dome radius & belly position (not tiny 0.36m inner core!)
-		var s_scale := float(_player_ref.get("slime_scale")) if "slime_scale" in _player_ref else 1.0
-		var body_radius := maxf(2.15, s_scale * 2.25)
-		var body_height := maxf(2.4, s_scale * 2.65)
-		var belly_pos := p_pos
-		if "model" in _player_ref and _player_ref.model != null:
-			var m_obj: Variant = _player_ref.model
-			var spread_extra := 1.0
-			if "spread_x" in _player_ref:
-				spread_extra += maxf(0.0, float(_player_ref.get("spread_x"))) * 0.55
-			body_radius = maxf(2.15, maxf(float(m_obj.semi_a), float(m_obj.semi_b)) * spread_extra * 1.10)
-			body_height = maxf(2.0, float(m_obj.full_height))
-			belly_pos = p_pos - Vector3(0.0, float(m_obj.rest_half_height) * s_scale * 0.45, 0.0)
-		var body_vel := Vector3.ZERO
-		if "motor" in _player_ref and _player_ref.motor != null and "velocity" in _player_ref.motor:
-			body_vel = _player_ref.motor.velocity
-
-		_last_shader_slime_pos = belly_pos
-		for gmat: ShaderMaterial in [_grass_mat, _grass_far_mat]:
-			if gmat != null:
-				gmat.set_shader_parameter(&"slime_pos", belly_pos)
-				gmat.set_shader_parameter(&"slime_radius", body_radius)
-				gmat.set_shader_parameter(&"slime_height", body_height)
-				gmat.set_shader_parameter(&"slime_vel", body_vel)
-		for wmat: ShaderMaterial in [_grass_wispy_mat, _grass_wispy_far_mat]:
-			if wmat != null and wmat != _grass_mat and wmat != _grass_far_mat:
-				wmat.set_shader_parameter(&"slime_pos", belly_pos)
-				wmat.set_shader_parameter(&"slime_radius", body_radius)
-				wmat.set_shader_parameter(&"slime_height", body_height)
-				wmat.set_shader_parameter(&"slime_vel", body_vel)
-
 		var vp := get_viewport()
 		var cam := vp.get_camera_3d() if vp != null else null
 		var lod_pos := cam.global_position if cam != null else p_pos
@@ -2148,21 +2416,34 @@ func _process(delta: float) -> void:
 			_last_grass_lod_cam_pos = lod_pos
 			_update_grass_chunk_lod(_grass_holder_ref, _grass_mat, _grass_far_mat, _get_grass_mesh(), _get_grass_lod_mesh(), lod_pos)
 			_update_grass_chunk_lod(_grass_wispy_holder_ref, _grass_wispy_mat if _grass_wispy_mat != null else _grass_mat, _grass_wispy_far_mat if _grass_wispy_far_mat != null else _grass_far_mat, _get_wispy_grass_mesh(), _get_wispy_grass_lod_mesh(), lod_pos)
+			_update_tree_shadow_cull(lod_pos)
+
+		# Apply finished async grass recentering without stalling a frame
+		if _grass_worker_task_id >= 0 and WorkerThreadPool.is_task_completed(_grass_worker_task_id):
+			WorkerThreadPool.wait_for_task_completion(_grass_worker_task_id)
+			_grass_worker_task_id = -1
+			if not _grass_worker_res.is_empty():
+				_cached_grass_data = _grass_worker_res
+				_cached_grass_count = grass_count
+				_cached_grass_center = _grass_worker_center
+				_grass_worker_res = {}
+				var gn_a := _grass_holder_ref as MultiMeshInstance3D
+				var wn_a := _grass_wispy_holder_ref as MultiMeshInstance3D
+				if gn_a != null:
+					_build_grass_multimesh(gn_a)
+				if wn_a != null:
+					_build_grass_wispy_multimesh(wn_a)
+				_last_grass_lod_cam_pos = Vector3(1e9, 1e9, 1e9)
 
 		_grass_recenter_cooldown = maxf(0.0, _grass_recenter_cooldown - delta)
 		var p_xz := Vector2(p_pos.x, p_pos.z)
 		var jump_dist := p_xz.distance_to(_grass_center)
-		if ((jump_dist > 95.0) or (_grass_recenter_cooldown <= 0.0 and jump_dist > 60.0)) and p_pos.y > 7.5:
+		if _grass_worker_task_id < 0 and ((jump_dist > 95.0) or (_grass_recenter_cooldown <= 0.0 and jump_dist > 60.0)) and p_pos.y > 7.5:
 			_grass_recenter_cooldown = 1.5
 			_grass_center = p_xz
-			_cached_grass_data.clear()
-			var gn := _grass_holder_ref as MultiMeshInstance3D
-			var wn := _grass_wispy_holder_ref as MultiMeshInstance3D
-			if gn != null:
-				_build_grass_multimesh(gn)
-			if wn != null:
-				_build_grass_wispy_multimesh(wn)
-			_last_grass_lod_cam_pos = Vector3(1e9, 1e9, 1e9)
+			_grass_worker_center = p_xz
+			_grass_worker_res = {}
+			_grass_worker_task_id = WorkerThreadPool.add_task(_grass_recenter_worker.bind(p_xz), false, "GrassRecenter")
 
 
 # =============================================================================
@@ -2194,6 +2475,9 @@ const TREE_NODE_NAMES := [
 ]
 
 var _cached_tree_meshes: Array[Mesh] = []
+var _tree_eat_grid: Dictionary = {}
+var _tree_eat_grid_built: bool = false
+var _tree_trunk_body_rid: RID = RID()
 
 
 func _make_tree_bark_mat(albedo_path: String, normal_path: String = "") -> StandardMaterial3D:
@@ -2458,7 +2742,7 @@ func build_tree_data() -> Array[Dictionary]:
 		for gz in range(-coast_grid, coast_grid + 1):
 			var off := Vector2(float(gx) * coast_cell, float(gz) * coast_cell)
 			var d := off.length()
-			if d < 84.0 or d > coast_r:
+			if d < 110.0 or d > coast_r:
 				continue
 			coast_candidates.append(vc + off)
 	for i in range(coast_candidates.size() - 1, 0, -1):
@@ -2639,20 +2923,29 @@ func _build_trees(trees_node: Node3D) -> void:
 			trees_node.add_child(mm_node)
 		mm_nodes.append(mm_node)
 
+	if Engine.is_editor_hint() and not preview_trees_in_editor:
+		for n in mm_nodes:
+			n.multimesh = null
+		var existing_tc := trees_node.get_node_or_null("TrunkColliders")
+		if existing_tc != null:
+			existing_tc.queue_free()
+		return
+
 	var colliders_node := trees_node.get_node_or_null("TrunkColliders") as StaticBody3D
 	if colliders_node == null:
 		colliders_node = StaticBody3D.new()
 		colliders_node.name = "TrunkColliders"
 		colliders_node.collision_layer = 4
 		colliders_node.collision_mask = 0
+		var ph_cs := CollisionShape3D.new()
+		var ph_box := BoxShape3D.new()
+		ph_box.size = Vector3(0.01, 0.01, 0.01)
+		ph_cs.shape = ph_box
+		ph_cs.disabled = true
+		colliders_node.add_child(ph_cs)
 		trees_node.add_child(colliders_node)
 	else:
 		colliders_node.collision_layer = 4
-
-	if Engine.is_editor_hint() and not preview_trees_in_editor:
-		for n in mm_nodes:
-			n.multimesh = null
-		return
 
 	var tree_data := build_tree_data()
 	var grouped_xforms: Array[Array] = []
@@ -2669,19 +2962,29 @@ func _build_trees(trees_node: Node3D) -> void:
 		var mesh := _get_tree_mesh(a)
 		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 290.0, 25.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 72.0, 12.0)
 
+	_collect_tree_chunks(trees_node)
+	_update_tree_shadow_cull(Vector3(_grass_center.x, 22.0, _grass_center.y))
+
 	# Physical trunk and root flare collision (registered directly via PhysicsServer3D without SceneTree nodes)
 	if colliders_node != null:
-		for c in colliders_node.get_children():
-			c.queue_free()
 		var body_rid := colliders_node.get_rid()
-		PhysicsServer3D.body_clear_shapes(body_rid)
+		var base_shape_idx := 0
+		# Preserve any disabled editor placeholder CollisionShape3D if present
+		for c in colliders_node.get_children():
+			if c is CollisionShape3D:
+				base_shape_idx += 1
+		if base_shape_idx == 0:
+			PhysicsServer3D.body_clear_shapes(body_rid)
 		_tree_collider_shapes.clear()
+		_tree_trunk_body_rid = body_rid
 
 		if not Engine.is_editor_hint():
-			for t in tree_data:
+			for t_idx in range(tree_data.size()):
+				var t: Dictionary = tree_data[t_idx]
 				var sy: float = t.scale_y
 				var sxz: float = t.scale_xz
 				var pos: Vector3 = t.position
+				t["shape_idx"] = base_shape_idx + t_idx * 2
 
 				# 1. Base root flare cylinder (protects ground-level roots from clipping)
 				var cyl_base := CylinderShape3D.new()
@@ -2696,6 +2999,94 @@ func _build_trees(trees_node: Node3D) -> void:
 				cyl_trunk.height = 6.5 * sy
 				_tree_collider_shapes.append(cyl_trunk)
 				PhysicsServer3D.body_add_shape(body_rid, cyl_trunk.get_rid(), Transform3D(Basis.IDENTITY, pos + Vector3(0.0, 3.25 * sy, 0.0)))
+
+
+func _ensure_tree_eat_grid() -> void:
+	if _tree_eat_grid_built:
+		return
+	_tree_eat_grid_built = true
+	_tree_eat_grid.clear()
+	for i in range(_cached_tree_data.size()):
+		var t: Dictionary = _cached_tree_data[i]
+		var pos: Vector3 = t.position
+		var cell := Vector2i(int(floor(pos.x / 32.0)), int(floor(pos.z / 32.0)))
+		if not _tree_eat_grid.has(cell):
+			_tree_eat_grid[cell] = []
+		(_tree_eat_grid[cell] as Array).append(i)
+
+
+func _hide_tree_multimesh_instance(tree_pos: Vector3, arch: int) -> void:
+	var trees_node := get_node_or_null("Trees")
+	if trees_node == null:
+		return
+	var type_names := ["CommonTree1", "CommonTree2", "Pine1", "Pine2"]
+	if arch < 0 or arch >= type_names.size():
+		return
+	var type_node := trees_node.get_node_or_null(type_names[arch])
+	if type_node == null:
+		return
+	var zero_xf := Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), Vector3(0.0, -9999.0, 0.0))
+	for ch in type_node.get_children():
+		if ch is MultiMeshInstance3D:
+			var mmi := ch as MultiMeshInstance3D
+			var mm := mmi.multimesh
+			if mm == null:
+				continue
+			var cnt := mm.instance_count
+			for idx in range(cnt):
+				var xf := mm.get_instance_transform(idx)
+				if absf(xf.origin.x - tree_pos.x) < 0.08 and absf(xf.origin.z - tree_pos.z) < 0.08:
+					mm.set_instance_transform(idx, zero_xf)
+					return
+
+
+func try_eat_nearby_trees(slime: Node3D, props_sys: Node) -> int:
+	if slime == null or not is_instance_valid(slime):
+		return 0
+	var sl_scale: float = float(slime.get("slime_scale"))
+	if sl_scale < 1.65:
+		return 0
+	_ensure_tree_eat_grid()
+	var sp := slime.global_position
+	var sl_vol: float = float(slime.call("get_volume"))
+	var sl_h: float = 2.55 * sl_scale
+	var vis_r: float = 2.0 * sl_scale * 1.15
+	var reach := vis_r + 1.4
+	var c0 := Vector2i(int(floor(sp.x / 32.0)), int(floor(sp.z / 32.0)))
+	var span := int(ceil(reach / 32.0)) + 1
+	var eaten_now := 0
+	for dx in range(-span, span + 1):
+		for dz in range(-span, span + 1):
+			var bucket: Variant = _tree_eat_grid.get(Vector2i(c0.x + dx, c0.y + dz))
+			if bucket == null:
+				continue
+			for ti in (bucket as Array):
+				var t: Dictionary = _cached_tree_data[int(ti)]
+				if bool(t.get("eaten", false)):
+					continue
+				var tpos: Vector3 = t.position
+				if Vector2(tpos.x - sp.x, tpos.z - sp.z).length() > reach:
+					continue
+				var sy: float = t.scale_y
+				var sxz: float = t.scale_xz
+				var tree_vol := 14.0 * sxz * sxz * sy
+				if sl_vol < tree_vol / 0.85 or sl_h < 2.6 * sy:
+					continue
+				t["eaten"] = true
+				if _tree_trunk_body_rid.is_valid() and t.has("shape_idx"):
+					var sidx := int(t["shape_idx"])
+					PhysicsServer3D.body_set_shape_disabled(_tree_trunk_body_rid, sidx, true)
+					PhysicsServer3D.body_set_shape_disabled(_tree_trunk_body_rid, sidx + 1, true)
+				var arch: int = int(t.archetype)
+				_hide_tree_multimesh_instance(tpos, arch)
+				if props_sys != null and props_sys.has_method("spawn_transient_eat_visual"):
+					props_sys.call("spawn_transient_eat_visual", _get_tree_mesh(arch), t.transform, slime)
+				if props_sys != null and props_sys.has_method("record_external_eat"):
+					props_sys.call("record_external_eat", 1)
+				if slime.has_method("add_volume"):
+					slime.call("add_volume", tree_vol)
+				eaten_now += 1
+	return eaten_now
 
 
 # ==============================================================================
@@ -2894,7 +3285,7 @@ func build_rock_data() -> Array[Dictionary]:
 		for gz in range(-cr_grid, cr_grid + 1):
 			var off := Vector2(float(gx) * cr_cell, float(gz) * cr_cell)
 			var d := off.length()
-			if d < 84.0 or d > cr_max:
+			if d < 110.0 or d > cr_max:
 				continue
 			cr_cells.append(vc_r + off)
 	for i in range(cr_cells.size() - 1, 0, -1):
@@ -3063,19 +3454,28 @@ func _build_rocks(rocks_node: Node3D) -> void:
 		rock2_node = MultiMeshInstance3D.new()
 		rock2_node.name = "Rock2"
 		rocks_node.add_child(rock2_node)
+
+	if Engine.is_editor_hint() and not preview_rocks_in_editor:
+		if rock1_node: rock1_node.multimesh = null
+		if rock2_node: rock2_node.multimesh = null
+		if colliders_node != null:
+			colliders_node.queue_free()
+		return
+
 	if colliders_node == null:
 		colliders_node = StaticBody3D.new()
 		colliders_node.name = "RockColliders"
 		colliders_node.collision_layer = 4
 		colliders_node.collision_mask = 0
+		var ph_cs := CollisionShape3D.new()
+		var ph_box := BoxShape3D.new()
+		ph_box.size = Vector3(0.01, 0.01, 0.01)
+		ph_cs.shape = ph_box
+		ph_cs.disabled = true
+		colliders_node.add_child(ph_cs)
 		rocks_node.add_child(colliders_node)
 	else:
 		colliders_node.collision_layer = 4
-
-	if Engine.is_editor_hint() and not preview_rocks_in_editor:
-		if rock1_node: rock1_node.multimesh = null
-		if rock2_node: rock2_node.multimesh = null
-		return
 
 	var rock_data := build_rock_data()
 	var grouped_xforms: Array[Array] = [[], []]
@@ -3095,8 +3495,6 @@ func _build_rocks(rocks_node: Node3D) -> void:
 
 	# Physical rock collision (exact convex hull matching rock facets, via PhysicsServer3D)
 	if colliders_node != null:
-		for c in colliders_node.get_children():
-			c.queue_free()
 		var body_rid := colliders_node.get_rid()
 		PhysicsServer3D.body_clear_shapes(body_rid)
 		_rock_collider_shapes.clear()
@@ -3327,7 +3725,7 @@ func build_vegetation_data() -> Array[Dictionary]:
 		for gz in range(-cv_grid, cv_grid + 1):
 			var off := Vector2(float(gx) * cv_cell, float(gz) * cv_cell)
 			var d := off.length()
-			if d < 78.0 or d > cv_max:
+			if d < 108.0 or d > cv_max:
 				continue
 			cv_cells.append(vc_v + off)
 	for i in range(cv_cells.size() - 1, 0, -1):

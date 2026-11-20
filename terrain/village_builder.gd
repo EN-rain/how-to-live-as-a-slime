@@ -7,12 +7,15 @@ extends RefCounted
 ## connected by continuous Octagonal Stone Curtain Walls, far from CaveLayout.ORIGIN.
 
 const VILLAGE_CENTER := Vector3(590.0, 20.4, 2200.0)
-const VILLAGE_RADIUS_X := 76.0
-const VILLAGE_RADIUS_Z := 66.0
-const STORY_H := 3.0
-const CELL := 2.0
+const V_SCALE := 1.40
+const VILLAGE_RADIUS_X := 76.0 * V_SCALE
+const VILLAGE_RADIUS_Z := 66.0 * V_SCALE
+const STORY_H := 3.0 * V_SCALE
+const CELL := 2.0 * V_SCALE
 const LAYER_OBSTACLES := 4
 const ASSET_DIR := "res://assets/village/"
+const VILLAGE_CACHE_PATH := "user://cache/village_baked.scn"
+const GRAY_TILE_TEX_PATH := "user://cache/village_gray_tile_tex.res"
 
 const ROOF_PALETTES: Dictionary = {
 	"slate":      Color(0.48, 0.54, 0.62),
@@ -232,35 +235,113 @@ var _mat_window_glow: StandardMaterial3D
 var _mat_well_water: StandardMaterial3D
 var _mat_coastal_rock: StandardMaterial3D
 var _night_lights: Array[Dictionary] = []
+var _occluder_target_name: String = ""
 var _dock_shore_xy: Vector2 = Vector2.ZERO
 var _dock_cottage_xy: Vector2 = Vector2.ZERO
 var _dock_yaw: float = 0.0
+
+static var _cached_dock_ready: bool = false
+static var _cached_gate_xy: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0 * V_SCALE)
+static var _cached_ctrl_xy: Vector2 = Vector2(637.4, 2376.6)
+static var _cached_entry_xy: Vector2 = Vector2(654.0, 2438.0)
+static var _cached_shore_xy: Vector2 = Vector2(656.6, 2448.0)
+static var _cached_cottage_xy: Vector2 = Vector2(633.0, 2402.0)
+static var _cached_spur_a: Vector2 = Vector2(648.5, 2418.0)
+static var _cached_spur_b: Vector2 = Vector2(628.0, 2403.5)
+
+
+static func _sample_h_static(terrain: Node3D, wx: float, wz: float) -> float:
+	if terrain == null:
+		return 20.0
+	if terrain.has_method("sample_surface_exact"):
+		var res := terrain.call("sample_surface_exact", wx, wz) as Vector4
+		return float(res.w)
+	if terrain.has_method("sample_height"):
+		return float(terrain.call("sample_height", wx, wz))
+	return 20.0
+
+
+static func ensure_dock_layout(terrain: Node3D) -> void:
+	if terrain == null:
+		return
+	var v_xz := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
+	var shore_guess := v_xz + v_xz.normalized() * 257.0
+	var eps := 18.0
+	var hL := _sample_h_static(terrain, shore_guess.x - eps, shore_guess.y)
+	var hR := _sample_h_static(terrain, shore_guess.x + eps, shore_guess.y)
+	var hU := _sample_h_static(terrain, shore_guess.x, shore_guess.y - eps)
+	var hD := _sample_h_static(terrain, shore_guess.x, shore_guess.y + eps)
+	var sea_normal := Vector2(hL - hR, hU - hD)
+	if sea_normal.length_squared() < 0.0001:
+		sea_normal = v_xz.normalized()
+	else:
+		sea_normal = sea_normal.normalized()
+
+	var shore_xy := shore_guess
+	for step_i in range(56):
+		var cand := shore_guess - sea_normal * 40.0 + sea_normal * (float(step_i) * 2.0)
+		if _sample_h_static(terrain, cand.x, cand.y) <= 0.0:
+			shore_xy = cand
+			break
+
+	var dock_yaw := atan2(sea_normal.x, sea_normal.y)
+	var tangent := Vector2(-sea_normal.y, sea_normal.x)
+	var d_basis := Basis(Vector3.UP, dock_yaw)
+	var cottage_xy := shore_xy - sea_normal * 44.0 + tangent * 12.0
+	var gate_xy := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0 * V_SCALE)
+	var entry_w := Vector3(shore_xy.x, 0.0, shore_xy.y) + d_basis * Vector3(0.0, 0.0, -10.35)
+	var entry_xy := Vector2(entry_w.x, entry_w.z)
+	var ctrl_xy := entry_xy - sea_normal * 64.0
+	var t_spur := float(40) / 48.0
+	var omt_spur := 1.0 - t_spur
+	var spur_a := omt_spur * omt_spur * gate_xy + 2.0 * omt_spur * t_spur * ctrl_xy + t_spur * t_spur * entry_xy
+	var spur_b := cottage_xy - tangent * (3.8 * V_SCALE)
+
+	_cached_gate_xy = gate_xy
+	_cached_ctrl_xy = ctrl_xy
+	_cached_entry_xy = entry_xy
+	_cached_shore_xy = shore_xy
+	_cached_cottage_xy = cottage_xy
+	_cached_spur_a = spur_a
+	_cached_spur_b = spur_b
+	_cached_dock_ready = true
 
 
 static func is_in_village_exclusion(x: float, z: float, is_grass: bool = false) -> bool:
 	var dx: float = x - VILLAGE_CENTER.x
 	var dz: float = z - VILLAGE_CENTER.z
 	if dz > 50.0 and dz < 350.0 and dx > -65.0 and dx < 165.0:
-		# Exclude trees/rocks/grass along the exact coastal PierPathway curve, FishermanCottage yard & cove
+		# Exclude trees/rocks/grass along the exact coastal PierPathway curve, CottageCobbleSpur, FishermanCottage yard & cove
 		var pt := Vector2(x, z)
-		var b0 := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0)
-		var b1 := Vector2(VILLAGE_CENTER.x + 6.4, VILLAGE_CENTER.z + 254.5)
-		var b2 := Vector2(VILLAGE_CENTER.x + 70.0, VILLAGE_CENTER.z + 248.0)
+		var b0 := _cached_gate_xy
+		var b1 := _cached_ctrl_xy
+		var b2 := _cached_entry_xy
 		var min_path_d := 1e9
-		for si in range(9):
-			var ta := float(si) / 8.0
+		var q_prev := b0
+		const PATH_SEGS := 24
+		for si in range(1, PATH_SEGS + 1):
+			var ta := float(si) / float(PATH_SEGS)
 			var omta := 1.0 - ta
 			var q := omta * omta * b0 + 2.0 * omta * ta * b1 + ta * ta * b2
-			min_path_d = minf(min_path_d, pt.distance_to(q))
-		if min_path_d <= (6.0 if is_grass else 11.5):
+			var c_pt := Geometry2D.get_closest_point_to_segment(pt, q_prev, q)
+			min_path_d = minf(min_path_d, pt.distance_to(c_pt))
+			q_prev = q
+		if min_path_d <= (4.8 if is_grass else 10.5):
 			return true
-		# Cove & dock shoreline around (670, 2447)
+		var spur_c := Geometry2D.get_closest_point_to_segment(pt, _cached_spur_a, _cached_spur_b)
+		if pt.distance_to(spur_c) <= (3.6 if is_grass else 8.0):
+			return true
+		# Cove & dock shoreline
+		if pt.distance_to(_cached_shore_xy) <= (24.0 if is_grass else 32.0):
+			return true
 		if pt.distance_to(Vector2(VILLAGE_CENTER.x + 80.0, VILLAGE_CENTER.z + 247.0)) <= (24.0 if is_grass else 32.0):
 			return true
-		# Fisherman's Cottage clear perimeter around (~628, 2463)
-		if pt.distance_to(Vector2(VILLAGE_CENTER.x + 38.0, VILLAGE_CENTER.z + 263.0)) <= (14.0 if is_grass else 20.0):
+		# Fisherman's Cottage clear perimeter
+		if pt.distance_to(_cached_cottage_xy) <= (15.0 if is_grass else 22.0):
 			return true
-	if absf(dx) > VILLAGE_RADIUS_X + 2.0 or absf(dz) > VILLAGE_RADIUS_Z + 2.0:
+		if pt.distance_to(Vector2(VILLAGE_CENTER.x + 38.0, VILLAGE_CENTER.z + 263.0)) <= (15.0 if is_grass else 22.0):
+			return true
+	if absf(dx) > VILLAGE_RADIUS_X + 6.0 or absf(dz) > VILLAGE_RADIUS_Z + 6.0:
 		return false
 
 	if not is_grass:
@@ -268,21 +349,21 @@ static func is_in_village_exclusion(x: float, z: float, is_grass: bool = false) 
 		var nz: float = dz / VILLAGE_RADIUS_Z
 		return nx * nx + nz * nz <= 1.0
 
-	# Grass exclusion: keep Grand Market Square, Ring Road & Cardinal Avenues free of 3D grass blades
+	# Grass exclusion: keep Grand Market Square, Ring Road & Cardinal Avenues (including outer gate thresholds) free of 3D grass blades
 	# while allowing lush meadow grass to grow inside cloister gardens, paddocks, and outer orchards.
-	if absf(dx) <= 22.5 and absf(dz) <= 22.0:
+	if absf(dx) <= 22.5 * V_SCALE and absf(dz) <= 22.0 * V_SCALE:
 		return true
-	if absf(dx) <= 61.5 and absf(dz) <= 10.5:
+	if absf(dx) <= 64.5 * V_SCALE and absf(dz) <= 10.8 * V_SCALE:
 		return true
-	if absf(dx) <= 11.5 and absf(dz) <= 55.0:
+	if absf(dx) <= 11.8 * V_SCALE and absf(dz) <= 58.5 * V_SCALE:
 		return true
-	if absf(absf(dx) - 36.0) <= 6.5 and absf(dz) <= 36.5:
+	if absf(absf(dx) - 36.0 * V_SCALE) <= 7.8 * V_SCALE and absf(dz) <= 38.2 * V_SCALE:
 		return true
-	if absf(absf(dz) - 32.0) <= 6.5 and absf(dx) <= 39.5:
+	if absf(absf(dz) - 32.0 * V_SCALE) <= 7.8 * V_SCALE and absf(dx) <= 40.8 * V_SCALE:
 		return true
 
 	for spec in HOUSE_SPECS:
-		var off: Vector2 = spec["offset"]
+		var off: Vector2 = spec["offset"] * V_SCALE
 		var yaw: float = spec["yaw"]
 		var px: float = dx - off.x
 		var pz: float = dz - off.y
@@ -290,35 +371,121 @@ static func is_in_village_exclusion(x: float, z: float, is_grass: bool = false) 
 		var s: float = sin(yaw)
 		var lx: float = px * c - pz * s
 		var lz: float = px * s + pz * c
-		var hw: float = float(spec["w"]) * 0.5 + 1.5
-		var hd: float = float(spec["d"]) * 0.5 + 2.1
+		var hw: float = float(spec["w"]) * V_SCALE * 0.5 + 1.8
+		var hd: float = float(spec["d"]) * V_SCALE * 0.5 + 2.4
 		if absf(lx) <= hw and absf(lz) <= hd:
 			return true
 		if spec.has("wing"):
 			var wing: Dictionary = spec["wing"]
-			var loff: Vector2 = wing["local_off"]
-			var w_hw: float = float(wing.get("w", 4)) * 0.5 + 1.0
-			var w_hd: float = float(wing.get("d", 4)) * 0.5 + 1.0
+			var loff: Vector2 = wing["local_off"] * V_SCALE
+			var w_hw: float = float(wing.get("w", 4)) * V_SCALE * 0.5 + 1.2
+			var w_hd: float = float(wing.get("d", 4)) * V_SCALE * 0.5 + 1.2
 			if absf(lx - loff.x) <= w_hw and absf(lz - loff.y) <= w_hd:
 				return true
 
 	for stall in STALL_SPECS:
-		var soff: Vector2 = stall["offset"]
-		if absf(dx - soff.x) <= 2.2 and absf(dz - soff.y) <= 2.2:
+		var soff: Vector2 = stall["offset"] * V_SCALE
+		if absf(dx - soff.x) <= 2.2 * V_SCALE and absf(dz - soff.y) <= 2.2 * V_SCALE:
 			return true
 
 	for wag in WAGON_SPECS:
-		var woff: Vector2 = wag["offset"]
-		if Vector2(dx - woff.x, dz - woff.y).length_squared() <= 10.24:
+		var woff: Vector2 = wag["offset"] * V_SCALE
+		if Vector2(dx - woff.x, dz - woff.y).length_squared() <= 10.24 * V_SCALE * V_SCALE:
 			return true
 
 	return false
 
 
+static func _compute_village_sig(terrain: Node3D) -> String:
+	var tseed := int(terrain.get("terrain_seed")) if terrain != null and "terrain_seed" in terrain else 0
+	var script_md5 := FileAccess.get_md5("res://terrain/village_builder.gd")
+	return "v1|%s|%d|%d|%s" % [str(VILLAGE_CENTER), HOUSE_SPECS.size(), tseed, script_md5]
+
+
+static func _set_owner_recursive(node: Node, owner_root: Node) -> void:
+	for ch in node.get_children():
+		ch.owner = owner_root
+		_set_owner_recursive(ch, owner_root)
+
+
+static func _restore_cached_village_refs(root: Node3D) -> void:
+	var lights: Array = []
+	var lantern_mat: StandardMaterial3D = null
+	var window_mat: StandardMaterial3D = null
+	var mat_cobble: StandardMaterial3D = null
+	var mat_plaza: StandardMaterial3D = null
+	var mat_mud: StandardMaterial3D = null
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var cur: Node = stack.pop_back()
+		if cur is OmniLight3D and cur.has_meta("night_base_e"):
+			lights.append({"light": cur, "base": float(cur.get_meta("night_base_e"))})
+		elif cur is MeshInstance3D:
+			var mi := cur as MeshInstance3D
+			var mats: Array[Material] = []
+			if mi.material_override != null:
+				mats.append(mi.material_override)
+			if mi.mesh != null:
+				for si in mi.mesh.get_surface_count():
+					var sm := mi.get_active_material(si)
+					if sm != null:
+						mats.append(sm)
+			for m in mats:
+				if m is StandardMaterial3D:
+					match m.resource_name:
+						"VillageLanternGlow": lantern_mat = m as StandardMaterial3D
+						"VillageWindowGlow": window_mat = m as StandardMaterial3D
+						"VillageCobble": mat_cobble = m as StandardMaterial3D
+						"VillagePlazaBrick": mat_plaza = m as StandardMaterial3D
+						"VillagePackedMud": mat_mud = m as StandardMaterial3D
+		for gc in cur.get_children():
+			stack.append(gc)
+	root.set_meta("village_lights", lights)
+	if lantern_mat != null:
+		root.set_meta("lantern_mat", lantern_mat)
+	if window_mat != null:
+		root.set_meta("window_mat", window_mat)
+	var cobbles: Array = []
+	if mat_cobble != null: cobbles.append(mat_cobble)
+	if mat_plaza != null: cobbles.append(mat_plaza)
+	if mat_mud != null: cobbles.append(mat_mud)
+	root.set_meta("cobble_mats", cobbles)
+
+
 static func build_village(terrain: Node3D, village_region: Node = null) -> Node3D:
-	var script_res: GDScript = load("res://terrain/village_builder.gd") as GDScript
-	var builder: VillageBuilder = script_res.new()
-	var root := builder._build_into(terrain)
+	var sig := _compute_village_sig(terrain)
+	var root: Node3D = null
+	if ResourceLoader.exists(VILLAGE_CACHE_PATH):
+		var cached_ps := load(VILLAGE_CACHE_PATH) as PackedScene
+		if cached_ps != null:
+			var inst := cached_ps.instantiate() as Node3D
+			if inst != null and String(inst.get_meta("vb_sig", "")) == sig:
+				var old: Node = terrain.get_node_or_null("Village")
+				if old != null:
+					old.name = "Village_Old"
+					old.queue_free()
+				inst.name = "Village"
+				terrain.add_child(inst)
+				_restore_cached_village_refs(inst)
+				update_night_lights(inst, 0.0, 0.0)
+				root = inst
+			elif inst != null:
+				inst.free()
+
+	if root == null:
+		var script_res: GDScript = load("res://terrain/village_builder.gd") as GDScript
+		var builder: VillageBuilder = script_res.new()
+		root = builder._build_into(terrain)
+		if root != null:
+			root.set_meta("vb_sig", sig)
+			var dir_abs := ProjectSettings.globalize_path(VILLAGE_CACHE_PATH.get_base_dir())
+			DirAccess.make_dir_recursive_absolute(dir_abs)
+			if DirAccess.dir_exists_absolute(dir_abs):
+				_set_owner_recursive(root, root)
+				var ps := PackedScene.new()
+				if ps.pack(root) == OK:
+					ResourceSaver.save(ps, VILLAGE_CACHE_PATH, ResourceSaver.FLAG_COMPRESS)
+
 	if root != null and village_region != null and village_region.has_method("get_profile"):
 		var vp = village_region.call("get_profile")
 		if vp != null:
@@ -354,6 +521,7 @@ static func update_night_lights(village_root: Node, strength: float, wetness: fl
 
 
 func _register_night_light(light: OmniLight3D, base_energy: float) -> void:
+	light.set_meta("night_base_e", base_energy)
 	_night_lights.append({"light": light, "base": base_energy})
 
 
@@ -385,13 +553,13 @@ func _build_into(terrain: Node3D) -> Node3D:
 
 	# 4 Arched Town Gateways framing every main avenue approach on the Octagonal Perimeter
 	var north_y: float = maxf(float(floor_heights.get("GateTowerWest", VILLAGE_CENTER.y)), float(floor_heights.get("GateTowerEast", VILLAGE_CENTER.y)))
-	_build_gatehouse_bridge(root, colliders, "NorthGateBridge", Vector2(0.0, -52.5), 0.0, north_y)
+	_build_gatehouse_bridge(root, colliders, "NorthGateBridge", Vector2(0.0, -52.5) * V_SCALE, 0.0, north_y)
 	var south_y: float = maxf(float(floor_heights.get("SouthGateWest", VILLAGE_CENTER.y)), float(floor_heights.get("SouthGateEast", VILLAGE_CENTER.y)))
-	_build_gatehouse_bridge(root, colliders, "SouthGateBridge", Vector2(0.0, 52.5), PI, south_y)
+	_build_gatehouse_bridge(root, colliders, "SouthGateBridge", Vector2(0.0, 52.5) * V_SCALE, PI, south_y)
 	var west_y: float = maxf(float(floor_heights.get("WestGateTowerNorth", VILLAGE_CENTER.y)), float(floor_heights.get("WestGateTowerSouth", VILLAGE_CENTER.y)))
-	_build_gatehouse_bridge(root, colliders, "WestGateBridge", Vector2(-58.5, 0.0), -PI * 0.5, west_y)
+	_build_gatehouse_bridge(root, colliders, "WestGateBridge", Vector2(-58.5, 0.0) * V_SCALE, -PI * 0.5, west_y)
 	var east_y: float = maxf(float(floor_heights.get("EastGatehouseTower", VILLAGE_CENTER.y)), float(floor_heights.get("EastGateSouthTower", VILLAGE_CENTER.y)))
-	_build_gatehouse_bridge(root, colliders, "EastGateBridge", Vector2(58.5, 0.0), PI * 0.5, east_y)
+	_build_gatehouse_bridge(root, colliders, "EastGateBridge", Vector2(58.5, 0.0) * V_SCALE, PI * 0.5, east_y)
 
 	_build_well(root, colliders, terrain, plaza_center_top)
 	_build_market_stalls(root, colliders, terrain)
@@ -426,13 +594,17 @@ func _init_shared_materials() -> void:
 
 	# Extract real cobblestone & red brick textures from loaded floor glTFs for seamless roads & plaza
 	_mat_cobble = _extract_floor_material("Floor_UnevenBrick.gltf", Color(0.86, 0.85, 0.83), Color(0.45, 0.43, 0.40))
+	_mat_cobble.resource_name = "VillageCobble"
 	_mat_plaza_brick = _extract_floor_material("Floor_RedBrick.gltf", Color(0.90, 0.84, 0.80), Color(0.54, 0.38, 0.32))
+	_mat_plaza_brick.resource_name = "VillagePlazaBrick"
 	_mat_packed_mud = _make_matte_mat(Color(0.38, 0.30, 0.22), 0.96)
+	_mat_packed_mud.resource_name = "VillagePackedMud"
 
 	_mat_coastal_rock = _make_matte_mat(Color(0.62, 0.59, 0.53), 0.94)
 	_mat_coastal_rock.metallic_specular = 0.06
 
 	_mat_lantern_glow = StandardMaterial3D.new()
+	_mat_lantern_glow.resource_name = "VillageLanternGlow"
 	_mat_lantern_glow.albedo_color = Color(1.0, 0.90, 0.65)
 	_mat_lantern_glow.roughness = 0.85
 	_mat_lantern_glow.metallic = 0.0
@@ -442,6 +614,7 @@ func _init_shared_materials() -> void:
 	_mat_lantern_glow.emission_energy_multiplier = 3.8
 
 	_mat_window_glow = StandardMaterial3D.new()
+	_mat_window_glow.resource_name = "VillageWindowGlow"
 	_mat_window_glow.albedo_color = Color(0.95, 0.76, 0.44)
 	_mat_window_glow.roughness = 0.45
 	_mat_window_glow.metallic = 0.0
@@ -653,6 +826,11 @@ func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
 func _get_gray_tile_texture(src_tex: Texture2D) -> Texture2D:
 	if _gray_tile_tex != null:
 		return _gray_tile_tex
+	if ResourceLoader.exists(GRAY_TILE_TEX_PATH):
+		var loaded := load(GRAY_TILE_TEX_PATH) as ImageTexture
+		if loaded != null:
+			_gray_tile_tex = loaded
+			return _gray_tile_tex
 	var img: Image = null
 	var disk_tex := load(ASSET_DIR + "T_RoundTiles_BaseColor.png") as Texture2D
 	if disk_tex != null:
@@ -676,6 +854,10 @@ func _get_gray_tile_texture(src_tex: Texture2D) -> Texture2D:
 			gimg.set_pixel(px, py, Color(lum, lum, lum, c.a))
 	gimg.generate_mipmaps()
 	_gray_tile_tex = ImageTexture.create_from_image(gimg)
+	var dir_abs := ProjectSettings.globalize_path(GRAY_TILE_TEX_PATH.get_base_dir())
+	DirAccess.make_dir_recursive_absolute(dir_abs)
+	if DirAccess.dir_exists_absolute(dir_abs):
+		ResourceSaver.save(_gray_tile_tex, GRAY_TILE_TEX_PATH, ResourceSaver.FLAG_COMPRESS)
 	return _gray_tile_tex
 
 
@@ -716,8 +898,7 @@ func _spawn_tinted_part(parent: Node3D, rel_path: String, palette_name: String, 
 	mi.mesh = mesh
 	mi.position = pos
 	mi.rotation = Vector3(0.0, rot_y, 0.0)
-	if scale_vec != Vector3.ONE:
-		mi.scale = scale_vec
+	mi.scale = scale_vec * V_SCALE
 	parent.add_child(mi)
 	return mi
 
@@ -733,8 +914,7 @@ func _spawn_part(parent: Node3D, rel_path: String, pos: Vector3, rot_y: float = 
 		mi.rotation = rot_euler
 	else:
 		mi.rotation = Vector3(0.0, rot_y, 0.0)
-	if scale_vec != Vector3.ONE:
-		mi.scale = scale_vec
+	mi.scale = scale_vec * V_SCALE
 	parent.add_child(mi)
 	return mi
 
@@ -822,6 +1002,8 @@ func _add_box_collider(colliders: StaticBody3D, xform: Transform3D, size: Vector
 	shape.size = size
 	cs.shape = shape
 	cs.transform = xform
+	if not _occluder_target_name.is_empty():
+		cs.set_meta(&"occluder_node", _occluder_target_name)
 	colliders.add_child(cs)
 
 
@@ -832,6 +1014,8 @@ func _add_cylinder_collider(colliders: StaticBody3D, pos: Vector3, radius: float
 	shape.height = height
 	cs.shape = shape
 	cs.position = pos
+	if not _occluder_target_name.is_empty():
+		cs.set_meta(&"occluder_node", _occluder_target_name)
 	colliders.add_child(cs)
 
 
@@ -843,36 +1027,36 @@ func _build_plaza_and_roads(root: Node3D, colliders: StaticBody3D, terrain: Node
 	root.add_child(roads_node)
 
 	# 1. Flush draped cobblestone Grand Market Square, civic forecourts & 4 cardinal gate avenues
-	_add_draped_surface(roads_node, colliders, terrain, "PlazaOuterRing", -13.2, 13.2, -13.2, 13.2, 1.0, 0.040, _mat_plaza_brick)
-	_add_draped_surface(roads_node, colliders, terrain, "PlazaInnerCobble", -10.2, 10.2, -10.2, 10.2, 1.0, 0.055, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "PlazaCenterApron", -3.4, 3.4, -3.4, 3.4, 1.0, 0.070, _mat_plaza_brick)
+	_add_draped_surface(roads_node, colliders, terrain, "PlazaOuterRing", -13.2 * V_SCALE, 13.2 * V_SCALE, -13.2 * V_SCALE, 13.2 * V_SCALE, 1.0, 0.040, _mat_plaza_brick)
+	_add_draped_surface(roads_node, colliders, terrain, "PlazaInnerCobble", -10.2 * V_SCALE, 10.2 * V_SCALE, -10.2 * V_SCALE, 10.2 * V_SCALE, 1.0, 0.055, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "PlazaCenterApron", -3.4 * V_SCALE, 3.4 * V_SCALE, -3.4 * V_SCALE, 3.4 * V_SCALE, 1.0, 0.070, _mat_plaza_brick)
 
 	# Secondary civic forecourts in front of Guildhall & VillageAbbey
-	_add_draped_surface(roads_node, colliders, terrain, "GuildhallForecourt", -12.5, -4.5, -16.0, -12.8, 1.0, 0.038, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "AbbeyForecourt",       4.5, 12.5, -16.0, -12.8, 1.0, 0.038, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "GuildhallForecourt", -12.5 * V_SCALE, -4.5 * V_SCALE, -16.0 * V_SCALE, -12.8 * V_SCALE, 1.0, 0.038, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "AbbeyForecourt",       4.5 * V_SCALE, 12.5 * V_SCALE, -16.0 * V_SCALE, -12.8 * V_SCALE, 1.0, 0.038, _mat_cobble)
 
 	# 2. North & South High Streets (through Twin-Tower Gatehouses out to outer approaches)
-	_add_draped_surface(roads_node, colliders, terrain, "NorthHighStreet", -2.5, 2.5, -56.5, -12.8, 1.0, 0.048, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "SouthHighStreet", -2.5, 2.5,  12.8,  56.5, 1.0, 0.048, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "NorthHighStreet", -2.5 * V_SCALE, 2.5 * V_SCALE, -56.5 * V_SCALE, -12.8 * V_SCALE, 1.0, 0.048, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "SouthHighStreet", -2.5 * V_SCALE, 2.5 * V_SCALE,  12.8 * V_SCALE,  56.5 * V_SCALE, 1.0, 0.048, _mat_cobble)
 
 	# 3. West Artisan Ave & East Market Street (through West & East Gatehouses)
-	_add_draped_surface(roads_node, colliders, terrain, "WestArtisanAve",   -62.5, -12.8, -2.5, 2.5, 1.0, 0.048, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "EastMarketStreet",  12.8,  62.5, -2.5, 2.5, 1.0, 0.048, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "WestArtisanAve",   -62.5 * V_SCALE, -12.8 * V_SCALE, -2.5 * V_SCALE, 2.5 * V_SCALE, 1.0, 0.048, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "EastMarketStreet",  12.8 * V_SCALE,  62.5 * V_SCALE, -2.5 * V_SCALE, 2.5 * V_SCALE, 1.0, 0.048, _mat_cobble)
 
 	# 4. Concentric Cobblestone Ring Road looping around the Market Quarter
-	_add_draped_surface(roads_node, colliders, terrain, "NorthRingLane", -37.8,  37.8, -33.8, -30.2, 1.0, 0.044, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "SouthRingLane", -37.8,  37.8,  30.2,  33.8, 1.0, 0.044, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "WestRingLane",  -37.8, -34.2, -30.2,  30.2, 1.0, 0.044, _mat_cobble)
-	_add_draped_surface(roads_node, colliders, terrain, "EastRingLane",   34.2,  37.8, -30.2,  30.2, 1.0, 0.044, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "NorthRingLane", -37.8 * V_SCALE,  37.8 * V_SCALE, -33.8 * V_SCALE, -30.2 * V_SCALE, 1.0, 0.044, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "SouthRingLane", -37.8 * V_SCALE,  37.8 * V_SCALE,  30.2 * V_SCALE,  33.8 * V_SCALE, 1.0, 0.044, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "WestRingLane",  -37.8 * V_SCALE, -34.2 * V_SCALE, -30.2 * V_SCALE,  30.2 * V_SCALE, 1.0, 0.044, _mat_cobble)
+	_add_draped_surface(roads_node, colliders, terrain, "EastRingLane",   34.2 * V_SCALE,  37.8 * V_SCALE, -30.2 * V_SCALE,  30.2 * V_SCALE, 1.0, 0.044, _mat_cobble)
 
 	# 5. Carved rock-trim curbstones flanking the West, East, and South Plaza borders (leaving avenues & N forecourts open)
 	for side_x in [-11.0, -9.0, -7.0, -5.0, 5.0, 7.0, 9.0, 11.0]:
-		var nx_n := VILLAGE_CENTER.x + float(side_x)
-		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(nx_n, _sample_h(terrain, nx_n, VILLAGE_CENTER.z + 13.2) - 0.02, VILLAGE_CENTER.z + 13.2), 0.0)
+		var nx_n := VILLAGE_CENTER.x + float(side_x) * V_SCALE
+		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(nx_n, _sample_h(terrain, nx_n, VILLAGE_CENTER.z + 13.2 * V_SCALE) - 0.02, VILLAGE_CENTER.z + 13.2 * V_SCALE), 0.0)
 	for side_z in [-11.0, -9.0, -7.0, -5.0, 5.0, 7.0, 9.0, 11.0]:
-		var nz_n := VILLAGE_CENTER.z + float(side_z)
-		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(VILLAGE_CENTER.x - 13.2, _sample_h(terrain, VILLAGE_CENTER.x - 13.2, nz_n) - 0.02, nz_n), -PI * 0.5)
-		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(VILLAGE_CENTER.x + 13.2, _sample_h(terrain, VILLAGE_CENTER.x + 13.2, nz_n) - 0.02, nz_n), PI * 0.5)
+		var nz_n := VILLAGE_CENTER.z + float(side_z) * V_SCALE
+		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(VILLAGE_CENTER.x - 13.2 * V_SCALE, _sample_h(terrain, VILLAGE_CENTER.x - 13.2 * V_SCALE, nz_n) - 0.02, nz_n), -PI * 0.5)
+		_spawn_part(roads_node, "Prop_ExteriorBorder_Straight1.gltf", Vector3(VILLAGE_CENTER.x + 13.2 * V_SCALE, _sample_h(terrain, VILLAGE_CENTER.x + 13.2 * V_SCALE, nz_n) - 0.02, nz_n), PI * 0.5)
 
 	return _sample_h(terrain, VILLAGE_CENTER.x, VILLAGE_CENTER.z) + 0.070
 
@@ -1000,39 +1184,39 @@ func _build_gatehouse_bridge(root: Node3D, colliders: StaticBody3D, bridge_name:
 
 	var b_basis := Basis(Vector3.UP, rot_y)
 	var bridge_stone_mat := _mat_cobble
-	# Textured stone bridge gallery spanning the 5m avenue between twin gatehouse towers
-	var gallery_size := Vector3(5.3, 2.35, 3.6)
-	var gallery_pos := Vector3(0.0, 3.25 + gallery_size.y * 0.5, 0.0)
+	# Textured stone bridge gallery spanning the scaled avenue between twin gatehouse towers
+	var gallery_size := Vector3(5.3, 2.35, 3.6) * V_SCALE
+	var gallery_pos := Vector3(0.0, 3.25 * V_SCALE + gallery_size.y * 0.5, 0.0)
 	_add_box_visual(bridge, "BridgeGallery", gallery_pos, gallery_size, bridge_stone_mat)
 	_add_box_collider(colliders, Transform3D(b_basis, bridge.position + b_basis * gallery_pos), gallery_size)
 
 	# Upper plaster frieze band to match medieval brickwork & half-timber palette
 	var plaster_mat := _make_matte_mat(Color(0.76, 0.72, 0.64), 0.90)
-	for sz in [-1.82, 1.82]:
-		_add_box_visual(bridge, "BridgeFrieze", Vector3(0.0, 4.95, float(sz)), Vector3(5.2, 0.85, 0.08), plaster_mat)
-		_add_box_visual(bridge, "BridgeTrim", Vector3(0.0, 3.32, float(sz)), Vector3(5.35, 0.24, 0.22), _mat_wood_trim)
-		_add_box_visual(bridge, "BridgeCornice", Vector3(0.0, 5.52, float(sz)), Vector3(5.40, 0.22, 0.28), _mat_wood_trim)
+	for sz in [-1.82 * V_SCALE, 1.82 * V_SCALE]:
+		_add_box_visual(bridge, "BridgeFrieze", Vector3(0.0, 4.95 * V_SCALE, float(sz)), Vector3(5.2, 0.85, 0.08) * V_SCALE, plaster_mat)
+		_add_box_visual(bridge, "BridgeTrim", Vector3(0.0, 3.32 * V_SCALE, float(sz)), Vector3(5.35, 0.24, 0.22) * V_SCALE, _mat_wood_trim)
+		_add_box_visual(bridge, "BridgeCornice", Vector3(0.0, 5.52 * V_SCALE, float(sz)), Vector3(5.40, 0.22, 0.28) * V_SCALE, _mat_wood_trim)
 
-	for sx in [-2.15, 2.15]:
-		_add_box_visual(bridge, "ArchCorbel", Vector3(float(sx), 3.05, 0.0), Vector3(0.85, 0.55, 3.5), _mat_stone_foundation)
+	for sx in [-2.15 * V_SCALE, 2.15 * V_SCALE]:
+		_add_box_visual(bridge, "ArchCorbel", Vector3(float(sx), 3.05 * V_SCALE, 0.0), Vector3(0.85, 0.55, 3.5) * V_SCALE, _mat_stone_foundation)
 
 	for mx in [-1.8, -0.6, 0.6, 1.8]:
 		for sz in [-1.62, 1.62]:
-			_add_box_visual(bridge, "Merlon", Vector3(float(mx), 5.82, float(sz)), Vector3(0.65, 0.55, 0.36), _mat_stone_foundation)
+			_add_box_visual(bridge, "Merlon", Vector3(float(mx) * V_SCALE, 5.82 * V_SCALE, float(sz) * V_SCALE), Vector3(0.65, 0.55, 0.36) * V_SCALE, _mat_stone_foundation)
 
-	# Arched timber portals spanning the 4.9m central street gap inside the two GateTowers
-	for arch_pair in [[1.62, 0.0], [-1.62, PI]]:
+	# Arched timber portals spanning the central street gap inside the two GateTowers
+	for arch_pair in [[1.62 * V_SCALE, 0.0], [-1.62 * V_SCALE, PI]]:
 		_spawn_part(bridge, "Wall_Arch.gltf", Vector3(0.0, 0.02, float(arch_pair[0])), float(arch_pair[1]), Vector3.INF, Vector3(2.45, 1.12, 2.2))
 
-	for sx in [-2.05, 2.05]:
-		_spawn_wall_sconce(bridge, Vector3(float(sx), 2.65,  1.88), 0.0, false)
-		_spawn_wall_sconce(bridge, Vector3(float(sx), 2.65, -1.88), PI,  false)
+	for sx in [-2.05 * V_SCALE, 2.05 * V_SCALE]:
+		_spawn_wall_sconce(bridge, Vector3(float(sx), 2.65 * V_SCALE,  1.88 * V_SCALE), 0.0, false)
+		_spawn_wall_sconce(bridge, Vector3(float(sx), 2.65 * V_SCALE, -1.88 * V_SCALE), PI,  false)
 
 	var gate_light := OmniLight3D.new()
-	gate_light.position = Vector3(0.0, 3.1, 0.0)
+	gate_light.position = Vector3(0.0, 3.1 * V_SCALE, 0.0)
 	gate_light.light_color = Color(1.0, 0.76, 0.40)
 	gate_light.light_energy = 1.45
-	gate_light.omni_range = 14.0
+	gate_light.omni_range = 14.0 * V_SCALE
 	gate_light.shadow_enabled = false
 	gate_light.distance_fade_enabled = true
 	gate_light.distance_fade_begin = 110.0
@@ -1040,14 +1224,17 @@ func _build_gatehouse_bridge(root: Node3D, colliders: StaticBody3D, bridge_name:
 	bridge.add_child(gate_light)
 	_register_night_light(gate_light, 1.45)
 
-	_spawn_tinted_part(bridge, "Roof_RoundTiles_4x6.gltf", "slate", Vector3(0.0, 5.55, 0.0), PI * 0.5)
+	_spawn_tinted_part(bridge, "Roof_RoundTiles_4x6.gltf", "slate", Vector3(0.0, 5.55 * V_SCALE, 0.0), PI * 0.5)
 
 
 func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: Dictionary) -> float:
 	var hname: String = spec["name"]
-	var off: Vector2 = spec["offset"]
+	var raw_off: Vector2 = spec["offset"]
+	var off: Vector2 = raw_off if bool(spec.get("unscaled_offset", false)) else raw_off * V_SCALE
 	var w: int = spec["w"]
 	var d: int = spec["d"]
+	var ws: float = float(w) * V_SCALE
+	var ds: float = float(d) * V_SCALE
 	var stories: int = spec["stories"]
 	var style: String = spec["style"]
 	var roof_palette: String = String(spec.get("roof", "terracotta"))
@@ -1058,10 +1245,11 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 
 	var house := Node3D.new()
 	house.name = hname
+	_occluder_target_name = hname
 	var wx: float = VILLAGE_CENTER.x + off.x
 	var wz: float = VILLAGE_CENTER.z + off.y
 
-	var mm := _sample_patch_minmax(terrain, wx, wz, float(w) * 0.5 + 0.5, float(d) * 0.5 + 1.0, yaw)
+	var mm := _sample_patch_minmax(terrain, wx, wz, ws * 0.5 + 0.5 * V_SCALE, ds * 0.5 + 1.0 * V_SCALE, yaw)
 	var min_h: float = mm.x
 	var max_h: float = mm.y
 	var floor_y: float = max_h + 0.14
@@ -1077,37 +1265,37 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 
 	# 1. Ground-sunk stone foundation plinth + Layer 4 base collider
 	var found_pos := Vector3(0.0, found_bot + found_h * 0.5, 0.0)
-	var found_size := Vector3(float(w) + 0.22, found_h, float(d) + 0.22)
+	var found_size := Vector3(ws + 0.22 * V_SCALE, found_h, ds + 0.22 * V_SCALE)
 	_add_box_visual(house, "Foundation", found_pos, found_size, _mat_stone_foundation)
 	_add_box_collider(
 		colliders,
 		Transform3D(house_basis, house_origin + house_basis * found_pos),
-		Vector3(float(w) + 0.16, maxf(found_h - 0.04, 0.2), float(d) + 0.16)
+		Vector3(ws + 0.16 * V_SCALE, maxf(found_h - 0.04, 0.2), ds + 0.16 * V_SCALE)
 	)
 
 	var nx: int = w / 2
 	var nz: int = d / 2
-	var hw: float = float(w) * 0.5
-	var hd: float = float(d) * 0.5
+	var hw: float = ws * 0.5
+	var hd: float = ds * 0.5
 	var door_idx: int = nx / 2
 
 	if not is_tower:
-		var door_local_x_p: float = -hw + 1.0 + float(door_idx) * CELL
-		var apron_front: Vector3 = house_origin + house_basis * Vector3(door_local_x_p, 0.0, hd + 1.1)
-		var apron_far: Vector3 = house_origin + house_basis * Vector3(door_local_x_p, 0.0, hd + 1.9)
+		var door_local_x_p: float = -hw + CELL * 0.5 + float(door_idx) * CELL
+		var apron_front: Vector3 = house_origin + house_basis * Vector3(door_local_x_p, 0.0, hd + 1.1 * V_SCALE)
+		var apron_far: Vector3 = house_origin + house_basis * Vector3(door_local_x_p, 0.0, hd + 1.9 * V_SCALE)
 		var apron_min_h: float = minf(_sample_h(terrain, apron_front.x, apron_front.z), _sample_h(terrain, apron_far.x, apron_far.z))
 		var step_bot: float = minf(apron_min_h - 1.0, found_bot)
 
-		var sub_top: float = floor_y - 0.78
+		var sub_top: float = floor_y - 0.78 * V_SCALE
 		var sub_h: float = maxf(sub_top - step_bot, 0.35)
-		var sub_pos := Vector3(door_local_x_p, step_bot + sub_h * 0.5, hd + 0.95)
-		var sub_size := Vector3(1.82, sub_h, 1.80)
+		var sub_pos := Vector3(door_local_x_p, step_bot + sub_h * 0.5, hd + 0.95 * V_SCALE)
+		var sub_size := Vector3(1.82 * V_SCALE, sub_h, 1.80 * V_SCALE)
 		_add_box_visual(house, "PorchSubBase", sub_pos, sub_size, _mat_stone_foundation)
-		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * Vector3(door_local_x_p, (floor_y - 0.16 + step_bot) * 0.5, hd + 0.65)), Vector3(1.90, maxf(floor_y - 0.16 - step_bot, 0.4), 1.35))
+		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * Vector3(door_local_x_p, (floor_y - 0.16 + step_bot) * 0.5, hd + 0.65 * V_SCALE)), Vector3(1.90 * V_SCALE, maxf(floor_y - 0.16 - step_bot, 0.4), 1.35 * V_SCALE))
 
-		_spawn_part(house, "Stairs_Exterior_Straight.gltf", Vector3(door_local_x_p, floor_y - 0.82, hd + 0.96), 0.0, Vector3.INF, Vector3(1.02, 0.98, 0.94))
+		_spawn_part(house, "Stairs_Exterior_Straight.gltf", Vector3(door_local_x_p, floor_y - 0.82 * V_SCALE, hd + 0.96 * V_SCALE), 0.0, Vector3.INF, Vector3(1.02, 0.98, 0.94))
 
-	var door_local_x: float = -hw + 1.0 + float(door_idx) * CELL
+	var door_local_x: float = -hw + CELL * 0.5 + float(door_idx) * CELL
 	var use_wood_grid: bool = (hname == "GranaryBarn")
 
 	# 3. Stories: mixed brick ground + plaster upper floors, foundation trim, balconies, corbels, doors
@@ -1120,14 +1308,14 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 		var tile_rel: String = floor0_rel if s == 0 else "Floor_WoodLight.gltf"
 		var tile_y: float = sy + 0.01 if s == 0 else sy
 		for ix in range(nx):
-			var fx: float = -hw + 1.0 + float(ix) * CELL
+			var fx: float = -hw + CELL * 0.5 + float(ix) * CELL
 			for iz in range(nz):
-				var fz: float = -hd + 1.0 + float(iz) * CELL
+				var fz: float = -hd + CELL * 0.5 + float(iz) * CELL
 				_spawn_part(house, tile_rel, Vector3(fx, tile_y, fz))
 
 		# Front (+Z) wall
 		for ix in range(nx):
-			var bx: float = -hw + 1.0 + float(ix) * CELL
+			var bx: float = -hw + CELL * 0.5 + float(ix) * CELL
 			var fpos := Vector3(bx, sy, hd)
 			if s == 0 and ix == door_idx:
 				_spawn_part(house, wall_prefix + "Door_Round.gltf", fpos, 0.0)
@@ -1135,7 +1323,7 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 				_spawn_part(house, frame_rel, fpos, 0.0)
 				var door_pivot := Node3D.new()
 				door_pivot.name = "DoorPivot"
-				door_pivot.position = fpos + Vector3(-0.514, 0.0, 0.0)
+				door_pivot.position = fpos + Vector3(-0.514 * V_SCALE, 0.0, 0.0)
 				door_pivot.rotation = Vector3(0.0, 1.65 if open_door else 0.0, 0.0)
 				house.add_child(door_pivot)
 				var door_rel: String = "Door_2_Round.gltf" if civic else ("Door_4_Round.gltf" if story_style == "brick" else "Door_1_Round.gltf")
@@ -1145,40 +1333,40 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 					_spawn_part(house, "Wall_BottomCover.gltf", fpos, 0.0)
 				var want_win: bool = (not is_tower and ((ix + s) % 2 == 0 or (nx == 3 and ix == 1))) or (is_tower and s >= 1 and ix == 0)
 				if want_win:
-					var allow_shutters: bool = (nx >= 3) and ((absf(bx) + 1.25) <= hw - 0.15)
+					var allow_shutters: bool = (nx >= 3) and ((absf(bx) + 1.25 * V_SCALE) <= hw - 0.15 * V_SCALE)
 					_spawn_window_bay(house, wall_prefix, fpos, 0.0, allow_shutters, false, is_tower, s < 2)
 				else:
 					var solid_rel: String = "Wall_Plaster_WoodGrid.gltf" if (story_style == "plaster" and use_wood_grid) else wall_prefix + "Straight.gltf"
 					_spawn_part(house, solid_rel, fpos, 0.0)
 					if is_tower and s == 0 and ix == 1:
-						_spawn_part(house, "Prop_Vine2.gltf", Vector3(bx, sy + 2.45, hd + 0.06), 0.0)
+						_spawn_part(house, "Prop_Vine2.gltf", Vector3(bx, sy + 2.45 * V_SCALE, hd + 0.06 * V_SCALE), 0.0)
 			if s == 1 and not is_tower and (w < 6 or ix != door_idx):
 				_spawn_part(house, "Prop_ExteriorBorder_Straight1.gltf", fpos, 0.0)
 
 		# Back (-Z) wall
 		for ix in range(nx):
-			var bx: float = -hw + 1.0 + float(ix) * CELL
+			var bx: float = -hw + CELL * 0.5 + float(ix) * CELL
 			var bpos := Vector3(bx, sy, -hd)
 			if s == 0:
 				_spawn_part(house, "Wall_BottomCover.gltf", bpos, PI)
 			var want_back_win: bool = (not is_tower and nx >= 3 and (ix == 1 or (nx == 5 and ix == 3))) or (is_tower and s >= 1 and ix == 1)
 			if want_back_win:
-				var allow_shutters: bool = (nx >= 3) and ((absf(bx) + 1.25) <= hw - 0.15)
+				var allow_shutters: bool = (nx >= 3) and ((absf(bx) + 1.25 * V_SCALE) <= hw - 0.15 * V_SCALE)
 				var closed_sh: bool = (not civic and (ix + s) % 2 == 1)
 				_spawn_window_bay(house, wall_prefix, bpos, PI, allow_shutters, closed_sh, is_tower, s < 2)
 			else:
 				var solid_back: String = "Wall_Plaster_WoodGrid.gltf" if (story_style == "plaster" and use_wood_grid) else wall_prefix + "Straight.gltf"
 				_spawn_part(house, solid_back, bpos, PI)
 				if story_style == "brick" and s == 0 and ix == 0:
-					_spawn_part(house, "Prop_Vine1.gltf", Vector3(bx, sy + 2.42, -hd - 0.06), PI)
+					_spawn_part(house, "Prop_Vine1.gltf", Vector3(bx, sy + 2.42 * V_SCALE, -hd - 0.06 * V_SCALE), PI)
 			if s == 1 and not is_tower:
 				_spawn_part(house, "Prop_ExteriorBorder_Straight1.gltf", bpos, PI)
 
 		# Right (+X) and Left (-X) walls
 		for iz in range(nz):
-			var bz: float = -hd + 1.0 + float(iz) * CELL
+			var bz: float = -hd + CELL * 0.5 + float(iz) * CELL
 			var allow_side_win: bool = (not is_tower and nz >= 3 and ((nz == 3 and iz == 1) or (nz == 4 and iz == 1) or (nz == 5 and (iz == 1 or iz == 3)))) or (is_tower and s >= 1 and iz == 0)
-			var allow_side_shutters: bool = (nz >= 3) and ((absf(bz) + 1.25) <= hd - 0.15)
+			var allow_side_shutters: bool = (nz >= 3) and ((absf(bz) + 1.25 * V_SCALE) <= hd - 0.15 * V_SCALE)
 			var solid_side: String = "Wall_Plaster_WoodGrid.gltf" if (story_style == "plaster" and use_wood_grid) else wall_prefix + "Straight.gltf"
 
 			var rpos := Vector3(hw, sy, bz)
@@ -1187,7 +1375,7 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 			else:
 				_spawn_part(house, solid_side, rpos, PI * 0.5)
 				if s == 0 and story_style == "brick" and iz == nz - 1 and (civic or is_tower):
-					_spawn_part(house, "Prop_Vine4.gltf", Vector3(hw + 0.06, sy + 2.35, bz), PI * 0.5)
+					_spawn_part(house, "Prop_Vine4.gltf", Vector3(hw + 0.06 * V_SCALE, sy + 2.35 * V_SCALE, bz), PI * 0.5)
 
 			var lpos := Vector3(-hw, sy, bz)
 			if allow_side_win:
@@ -1212,36 +1400,36 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 			_spawn_part(house, "Corner_Exterior_Wood.gltf", Vector3(-hw, sy,  hd), 0.0)
 
 		if s == stories - 1 and not is_tower:
-			for cx in [-hw + 0.28, hw - 0.28]:
+			for cx in [-hw + 0.28 * V_SCALE, hw - 0.28 * V_SCALE]:
 				_spawn_part(house, "Prop_Support.gltf", Vector3(float(cx), sy,  hd), 0.0, Vector3.INF, Vector3(0.85, 1.0, 0.52))
 				_spawn_part(house, "Prop_Support.gltf", Vector3(float(cx), sy, -hd), PI,  Vector3.INF, Vector3(0.85, 1.0, 0.52))
 
 	if not is_tower:
-		_spawn_wall_sconce(house, Vector3(door_local_x - 0.78, floor_y + 2.08, hd + 0.14), 0.0, false)
-		_spawn_wall_sconce(house, Vector3(door_local_x + 0.78, floor_y + 2.08, hd + 0.14), 0.0, false)
+		_spawn_wall_sconce(house, Vector3(door_local_x - 0.78 * V_SCALE, floor_y + 2.08 * V_SCALE, hd + 0.14 * V_SCALE), 0.0, false)
+		_spawn_wall_sconce(house, Vector3(door_local_x + 0.78 * V_SCALE, floor_y + 2.08 * V_SCALE, hd + 0.14 * V_SCALE), 0.0, false)
 
 	# Second-story front balcony with matching kit end-rails and doorway-flanking corbels
 	if stories >= 2 and not is_tower and w >= 6:
 		var bal_y: float = floor_y + STORY_H
 		var bal_rel: String = "Balcony_Cross_Straight.gltf" if civic else "Balcony_Simple_Straight.gltf"
 		_spawn_part(house, bal_rel, Vector3(door_local_x, bal_y, hd), 0.0)
-		_spawn_part(house, bal_rel, Vector3(door_local_x, bal_y, hd + 0.50),  PI * 0.5, Vector3.INF, Vector3(0.50, 1.0, 1.0))
-		_spawn_part(house, bal_rel, Vector3(door_local_x, bal_y, hd + 0.50), -PI * 0.5, Vector3.INF, Vector3(0.50, 1.0, 1.0))
-		_spawn_part(house, "Floor_WoodLight.gltf", Vector3(door_local_x, bal_y, hd + 0.50), 0.0, Vector3.INF, Vector3(1.0, 1.0, 0.56))
+		_spawn_part(house, bal_rel, Vector3(door_local_x, bal_y, hd + 0.50 * V_SCALE),  PI * 0.5, Vector3.INF, Vector3(0.50, 1.0, 1.0))
+		_spawn_part(house, bal_rel, Vector3(door_local_x, bal_y, hd + 0.50 * V_SCALE), -PI * 0.5, Vector3.INF, Vector3(0.50, 1.0, 1.0))
+		_spawn_part(house, "Floor_WoodLight.gltf", Vector3(door_local_x, bal_y, hd + 0.50 * V_SCALE), 0.0, Vector3.INF, Vector3(1.0, 1.0, 0.56))
 		_add_box_collider(
 			colliders,
-			Transform3D(house_basis, house_origin + house_basis * Vector3(door_local_x, bal_y - 0.04, hd + 0.50)),
-			Vector3(2.05, 0.18, 1.06)
+			Transform3D(house_basis, house_origin + house_basis * Vector3(door_local_x, bal_y - 0.04 * V_SCALE, hd + 0.50 * V_SCALE)),
+			Vector3(2.05, 0.18, 1.06) * V_SCALE
 		)
-		for bx_side in [-0.88, 0.88]:
+		for bx_side in [-0.88 * V_SCALE, 0.88 * V_SCALE]:
 			_spawn_part(house, "Prop_Support.gltf", Vector3(door_local_x + float(bx_side), floor_y, hd), 0.0, Vector3.INF, Vector3(1.0, 1.0, 0.52))
 
 	# Top ceiling tiles under attic
 	var top_y: float = floor_y + float(stories) * STORY_H
 	for ix in range(nx):
-		var fx: float = -hw + 1.0 + float(ix) * CELL
+		var fx: float = -hw + CELL * 0.5 + float(ix) * CELL
 		for iz in range(nz):
-			var fz: float = -hd + 1.0 + float(iz) * CELL
+			var fz: float = -hd + CELL * 0.5 + float(iz) * CELL
 			_spawn_part(house, "Floor_WoodLight.gltf", Vector3(fx, top_y, fz))
 
 	# 4. Roof, front/back brick gables, dormers, and chimneys (using palette-tinted tiles)
@@ -1255,23 +1443,23 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 		_spawn_part(house, front_gable, Vector3(0.0, top_y, -hd), PI)
 
 		if w >= 6 and d >= 6 and stories >= 2:
-			var dormer_x: float = 1.15 if w >= 8 else 0.55
-			var dormer_y: float = top_y + (1.72 if w >= 8 else 1.12)
-			_spawn_tinted_part(house, "Roof_Dormer_RoundTile.gltf", roof_palette, Vector3(dormer_x, dormer_y, -1.0 if d >= 8 else 0.0), 0.0)
+			var dormer_x: float = (1.15 if w >= 8 else 0.55) * V_SCALE
+			var dormer_y: float = top_y + (1.72 if w >= 8 else 1.12) * V_SCALE
+			_spawn_tinted_part(house, "Roof_Dormer_RoundTile.gltf", roof_palette, Vector3(dormer_x, dormer_y, (-1.0 if d >= 8 else 0.0) * V_SCALE), 0.0)
 			if d >= 8:
-				_spawn_tinted_part(house, "Roof_Dormer_RoundTile.gltf", roof_palette, Vector3(-dormer_x, dormer_y, 1.0), PI)
+				_spawn_tinted_part(house, "Roof_Dormer_RoundTile.gltf", roof_palette, Vector3(-dormer_x, dormer_y, 1.0 * V_SCALE), PI)
 		elif w >= 6:
-			_spawn_part(house, "Window_Roof_Wide.gltf", Vector3(1.35, top_y + 0.45, 0.0), PI * 0.5)
+			_spawn_part(house, "Window_Roof_Wide.gltf", Vector3(1.35 * V_SCALE, top_y + 0.45 * V_SCALE, 0.0), PI * 0.5)
 
 		var chim_file: String = "Prop_Chimney2.gltf" if (w >= 8) else "Prop_Chimney.gltf"
-		var chim_x: float = hw - (1.25 if w >= 8 else 0.75)
-		var chim_y: float = top_y + (2.05 if w >= 8 else (1.55 if w == 6 else 1.05))
-		_spawn_part(house, chim_file, Vector3(chim_x, chim_y, -hd + 1.15), 0.0)
+		var chim_x: float = hw - (1.25 if w >= 8 else 0.75) * V_SCALE
+		var chim_y: float = top_y + (2.05 if w >= 8 else (1.55 if w == 6 else 1.05)) * V_SCALE
+		_spawn_part(house, chim_file, Vector3(chim_x, chim_y, -hd + 1.15 * V_SCALE), 0.0)
 		var bname: String = String(spec.get("name", ""))
 		if bname in ["GoldenSlimeInn", "Bakery", "Blacksmith", "BreweryHall", "PotteryCottage", "InnKitchenWing", "MarketHall"]:
 			var smoke := GPUParticles3D.new()
 			smoke.name = "ChimneySmoke"
-			smoke.position = Vector3(chim_x, chim_y + 1.45, -hd + 1.15)
+			smoke.position = Vector3(chim_x, chim_y + 1.45 * V_SCALE, -hd + 1.15 * V_SCALE)
 			smoke.amount = 7
 			smoke.lifetime = 3.8
 			smoke.preprocess = 2.5
@@ -1289,42 +1477,43 @@ func _build_house(root: Node3D, colliders: StaticBody3D, terrain: Node3D, spec: 
 	# 5. Layer 4 Wall, Floor, Door & Roof Colliders (split around front doorway so open buildings are enterable)
 	var wall_h: float = float(stories) * STORY_H
 	var wall_cy: float = floor_y + wall_h * 0.5
-	var wall_thick := 0.38
+	var wall_thick := 0.38 * V_SCALE
 
-	var slab_pos := Vector3(0.0, floor_y - 0.08, 0.0)
-	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * slab_pos), Vector3(float(w), 0.16, float(d)))
+	var slab_pos := Vector3(0.0, floor_y - 0.08 * V_SCALE, 0.0)
+	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * slab_pos), Vector3(ws, 0.16 * V_SCALE, ds))
 
-	var back_c := Vector3(0.0, wall_cy, -hd - 0.08)
-	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * back_c), Vector3(float(w) + 0.3, wall_h, wall_thick))
+	var back_c := Vector3(0.0, wall_cy, -hd - 0.08 * V_SCALE)
+	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * back_c), Vector3(ws + 0.3 * V_SCALE, wall_h, wall_thick))
 
-	var left_c := Vector3(-hw - 0.08, wall_cy, 0.0)
-	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * left_c), Vector3(wall_thick, wall_h, float(d) + 0.3))
-	var right_c := Vector3(hw + 0.08, wall_cy, 0.0)
-	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * right_c), Vector3(wall_thick, wall_h, float(d) + 0.3))
+	var left_c := Vector3(-hw - 0.08 * V_SCALE, wall_cy, 0.0)
+	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * left_c), Vector3(wall_thick, wall_h, ds + 0.3 * V_SCALE))
+	var right_c := Vector3(hw + 0.08 * V_SCALE, wall_cy, 0.0)
+	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * right_c), Vector3(wall_thick, wall_h, ds + 0.3 * V_SCALE))
 
-	var door_left_edge: float = door_local_x - 0.70
-	var door_right_edge: float = door_local_x + 0.70
-	var front_left_w: float = door_left_edge - (-hw - 0.15)
+	var door_left_edge: float = door_local_x - 0.70 * V_SCALE
+	var door_right_edge: float = door_local_x + 0.70 * V_SCALE
+	var front_left_w: float = door_left_edge - (-hw - 0.15 * V_SCALE)
 	if front_left_w > 0.05:
-		var fl_pos := Vector3(-hw - 0.15 + front_left_w * 0.5, wall_cy, hd + 0.08)
+		var fl_pos := Vector3(-hw - 0.15 * V_SCALE + front_left_w * 0.5, wall_cy, hd + 0.08 * V_SCALE)
 		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * fl_pos), Vector3(front_left_w, wall_h, wall_thick))
-	var front_right_w: float = (hw + 0.15) - door_right_edge
+	var front_right_w: float = (hw + 0.15 * V_SCALE) - door_right_edge
 	if front_right_w > 0.05:
-		var fr_pos := Vector3(door_right_edge + front_right_w * 0.5, wall_cy, hd + 0.08)
+		var fr_pos := Vector3(door_right_edge + front_right_w * 0.5, wall_cy, hd + 0.08 * V_SCALE)
 		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * fr_pos), Vector3(front_right_w, wall_h, wall_thick))
-	var door_clear_h := 2.40
+	var door_clear_h := 2.40 * V_SCALE
 	if wall_h > door_clear_h + 0.1:
 		var hdr_h: float = wall_h - door_clear_h
-		var hdr_pos := Vector3(door_local_x, floor_y + door_clear_h + hdr_h * 0.5, hd + 0.08)
-		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * hdr_pos), Vector3(1.40, hdr_h, wall_thick))
+		var hdr_pos := Vector3(door_local_x, floor_y + door_clear_h + hdr_h * 0.5, hd + 0.08 * V_SCALE)
+		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * hdr_pos), Vector3(1.40 * V_SCALE, hdr_h, wall_thick))
 	if not open_door:
 		var closed_pos := Vector3(door_local_x, floor_y + door_clear_h * 0.5, hd)
-		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * closed_pos), Vector3(1.36, door_clear_h, 0.24))
+		_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * closed_pos), Vector3(1.36 * V_SCALE, door_clear_h, 0.24 * V_SCALE))
 
-	var roof_cap_h := 2.6 if not is_tower else 3.8
-	var roof_cap_pos := Vector3(0.0, top_y + roof_cap_h * 0.5 - 0.1, 0.0)
-	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * roof_cap_pos), Vector3(float(w) + 0.6, roof_cap_h, float(d) + 0.6))
+	var roof_cap_h := (2.6 if not is_tower else 3.8) * V_SCALE
+	var roof_cap_pos := Vector3(0.0, top_y + roof_cap_h * 0.5 - 0.1 * V_SCALE, 0.0)
+	_add_box_collider(colliders, Transform3D(house_basis, house_origin + house_basis * roof_cap_pos), Vector3(ws + 0.6 * V_SCALE, roof_cap_h, ds + 0.6 * V_SCALE))
 
+	_occluder_target_name = ""
 	return floor_y
 
 
@@ -1332,13 +1521,15 @@ func _build_attached_wing(
 	house: Node3D, colliders: StaticBody3D, terrain: Node3D,
 	house_origin: Vector3, house_basis: Basis, floor_y: float, roof_palette: String, wing: Dictionary
 ) -> void:
-	var loff: Vector2 = wing["local_off"]
+	var loff: Vector2 = wing["local_off"] * V_SCALE
 	var w: int = int(wing.get("w", 4))
 	var d: int = int(wing.get("d", 4))
+	var ws: float = float(w) * V_SCALE
+	var ds: float = float(d) * V_SCALE
 	var w_style: String = String(wing.get("style", "brick"))
 	var stories: int = int(wing.get("stories", 1))
-	var hw: float = float(w) * 0.5
-	var hd: float = float(d) * 0.5
+	var hw: float = ws * 0.5
+	var hd: float = ds * 0.5
 
 	var w_root := Node3D.new()
 	w_root.name = "AttachedWing"
@@ -1346,15 +1537,15 @@ func _build_attached_wing(
 	house.add_child(w_root)
 
 	var wing_world := house_origin + house_basis * Vector3(loff.x, 0.0, loff.y)
-	var wing_mm := _sample_patch_minmax(terrain, wing_world.x, wing_world.z, hw + 0.3, hd + 0.3, 0.0)
+	var wing_mm := _sample_patch_minmax(terrain, wing_world.x, wing_world.z, hw + 0.3 * V_SCALE, hd + 0.3 * V_SCALE, 0.0)
 	var wing_bot: float = wing_mm.x - 1.5
 	var wing_fh: float = floor_y - wing_bot
 	var found_pos := Vector3(0.0, wing_bot + wing_fh * 0.5, 0.0)
-	_add_box_visual(w_root, "WingFoundation", found_pos, Vector3(float(w) + 0.16, wing_fh, float(d) + 0.16), _mat_stone_foundation)
+	_add_box_visual(w_root, "WingFoundation", found_pos, Vector3(ws + 0.16 * V_SCALE, wing_fh, ds + 0.16 * V_SCALE), _mat_stone_foundation)
 	_add_box_collider(
 		colliders,
 		Transform3D(house_basis, wing_world + house_basis * Vector3(0.0, floor_y + float(stories) * STORY_H * 0.5, 0.0)),
-		Vector3(float(w) + 0.25, float(stories) * STORY_H + wing_fh, float(d) + 0.25)
+		Vector3(ws + 0.25 * V_SCALE, float(stories) * STORY_H + wing_fh, ds + 0.25 * V_SCALE)
 	)
 
 	var nx: int = w / 2
@@ -1366,7 +1557,7 @@ func _build_attached_wing(
 		var solid_rel: String = wprefix + "Straight.gltf"
 
 		for ix in range(nx):
-			var bx: float = -hw + 1.0 + float(ix) * CELL
+			var bx: float = -hw + CELL * 0.5 + float(ix) * CELL
 			var bpos := Vector3(bx, sy, -hd)
 			if s == 0:
 				_spawn_part(w_root, "Wall_BottomCover.gltf", bpos, PI)
@@ -1376,7 +1567,7 @@ func _build_attached_wing(
 				_spawn_part(w_root, solid_rel, bpos, PI)
 
 		for iz in range(nz):
-			var bz: float = -hd + 1.0 + float(iz) * CELL
+			var bz: float = -hd + CELL * 0.5 + float(iz) * CELL
 			_spawn_part(w_root, solid_rel, Vector3( hw, sy, bz),  PI * 0.5)
 			_spawn_part(w_root, solid_rel, Vector3(-hw, sy, bz), -PI * 0.5)
 
@@ -1395,7 +1586,7 @@ func _build_attached_wing(
 	_spawn_tinted_part(w_root, "Roof_RoundTiles_4x4.gltf", roof_palette, Vector3(0.0, top_y, 0.0), PI * 0.5)
 	_spawn_part(w_root, "Roof_Front_Brick4.gltf", Vector3(-hw, top_y, 0.0), -PI * 0.5)
 	_spawn_part(w_root, "Roof_Front_Brick4.gltf", Vector3( hw, top_y, 0.0),  PI * 0.5)
-	_spawn_part(w_root, "Prop_Chimney.gltf", Vector3(-hw + 0.85, top_y + 1.05, 0.0), 0.0)
+	_spawn_part(w_root, "Prop_Chimney.gltf", Vector3(-hw + 0.85 * V_SCALE, top_y + 1.05 * V_SCALE, 0.0), 0.0)
 
 
 func _spawn_wall_sconce(parent: Node3D, pos: Vector3, rot_y: float, add_light: bool = false) -> void:
@@ -1405,24 +1596,24 @@ func _spawn_wall_sconce(parent: Node3D, pos: Vector3, rot_y: float, add_light: b
 	sconce.rotation = Vector3(0.0, rot_y, 0.0)
 	parent.add_child(sconce)
 
-	_add_box_visual(sconce, "SconceBackplate", Vector3(0.0, 0.0, -0.04), Vector3(0.14, 0.32, 0.06), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_add_box_visual(sconce, "SconceArm", Vector3(0.0, 0.06, 0.12), Vector3(0.07, 0.07, 0.30), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var glow := _add_box_visual(sconce, "SconceGlow", Vector3(0.0, -0.10, 0.22), Vector3(0.18, 0.26, 0.18), _mat_lantern_glow)
+	_add_box_visual(sconce, "SconceBackplate", Vector3(0.0, 0.0, -0.04) * V_SCALE, Vector3(0.14, 0.32, 0.06) * V_SCALE, _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_add_box_visual(sconce, "SconceArm", Vector3(0.0, 0.06, 0.12) * V_SCALE, Vector3(0.07, 0.07, 0.30) * V_SCALE, _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var glow := _add_box_visual(sconce, "SconceGlow", Vector3(0.0, -0.10, 0.22) * V_SCALE, Vector3(0.18, 0.26, 0.18) * V_SCALE, _mat_lantern_glow)
 	glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_add_box_visual(sconce, "SconceCap", Vector3(0.0, 0.06, 0.22), Vector3(0.24, 0.08, 0.24), _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_add_box_visual(sconce, "SconceCap", Vector3(0.0, 0.06, 0.22) * V_SCALE, Vector3(0.24, 0.08, 0.24) * V_SCALE, _mat_iron).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	if add_light:
 		var light := OmniLight3D.new()
-		light.position = Vector3(0.0, -0.12, 0.34)
+		light.position = Vector3(0.0, -0.12, 0.34) * V_SCALE
 		light.light_color = Color(1.0, 0.78, 0.42)
-		light.light_energy = 1.15
-		light.omni_range = 10.5
+		light.light_energy = 1.25
+		light.omni_range = 10.5 * V_SCALE
 		light.shadow_enabled = false
 		light.distance_fade_enabled = true
 		light.distance_fade_begin = 95.0
 		light.distance_fade_length = 30.0
 		sconce.add_child(light)
-		_register_night_light(light, 1.15)
+		_register_night_light(light, 1.25)
 
 
 func _spawn_window_bay(house: Node3D, wall_prefix: String, pos: Vector3, rot_y: float, add_shutters: bool, closed_shutters: bool = false, thin_bay: bool = false, add_glow: bool = true) -> void:
@@ -1438,8 +1629,8 @@ func _spawn_window_bay(house: Node3D, wall_prefix: String, pos: Vector3, rot_y: 
 			var shut_rel: String = "WindowShutters_Wide_Round_Closed.gltf" if closed_shutters else "WindowShutters_Wide_Round_Open.gltf"
 			_spawn_part(house, shut_rel, pos, rot_y)
 	if add_glow:
-		var glow_pos: Vector3 = pos + Basis(Vector3.UP, rot_y) * Vector3(0.0, 1.48, -0.12)
-		var glow_size: Vector3 = Vector3(0.56 if thin_bay else 1.02, 1.08, 0.04)
+		var glow_pos: Vector3 = pos + Basis(Vector3.UP, rot_y) * Vector3(0.0, 1.48 * V_SCALE, -0.12 * V_SCALE)
+		var glow_size: Vector3 = Vector3((0.56 if thin_bay else 1.02) * V_SCALE, 1.08 * V_SCALE, 0.04 * V_SCALE)
 		var gw := _add_box_visual(house, "WindowGlow", glow_pos, glow_size, _mat_window_glow, Vector3(0.0, rot_y, 0.0))
 		gw.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
@@ -1456,59 +1647,60 @@ func _build_well(root: Node3D, colliders: StaticBody3D, terrain: Node3D, plaza_t
 	# Textured rock-masonry drum + carved coping borders
 	var rim := MeshInstance3D.new()
 	var rim_mesh := CylinderMesh.new()
-	rim_mesh.top_radius = 1.24
-	rim_mesh.bottom_radius = 1.32
-	rim_mesh.height = 1.00
+	rim_mesh.top_radius = 1.24 * V_SCALE
+	rim_mesh.bottom_radius = 1.32 * V_SCALE
+	rim_mesh.height = 1.00 * V_SCALE
 	rim_mesh.radial_segments = 16
 	rim.mesh = rim_mesh
 	rim.material_override = _mat_stone_foundation
-	rim.position = Vector3(0.0, 0.34, 0.0)
+	rim.position = Vector3(0.0, 0.34 * V_SCALE, 0.0)
 	well.add_child(rim)
 
 	var water := MeshInstance3D.new()
 	var water_mesh := CylinderMesh.new()
-	water_mesh.top_radius = 0.96
-	water_mesh.bottom_radius = 0.96
-	water_mesh.height = 0.12
+	water_mesh.top_radius = 0.96 * V_SCALE
+	water_mesh.bottom_radius = 0.96 * V_SCALE
+	water_mesh.height = 0.12 * V_SCALE
 	water_mesh.radial_segments = 16
 	water.mesh = water_mesh
 	water.material_override = _mat_well_water
-	water.position = Vector3(0.0, 0.72, 0.0)
+	water.position = Vector3(0.0, 0.72 * V_SCALE, 0.0)
 	well.add_child(water)
 
 	# Carved stone coping borders around well base
 	for edge_rot in [0.0, PI * 0.5, PI, -PI * 0.5]:
 		var dir := Vector3(sin(edge_rot), 0.0, cos(edge_rot))
-		_spawn_part(well, "Prop_ExteriorBorder_Straight1.gltf", dir * 1.18 + Vector3(0.0, 0.72, 0.0), edge_rot, Vector3.INF, Vector3(1.10, 1.25, 0.55))
+		_spawn_part(well, "Prop_ExteriorBorder_Straight1.gltf", dir * (1.18 * V_SCALE) + Vector3(0.0, 0.72 * V_SCALE, 0.0), edge_rot, Vector3.INF, Vector3(1.10, 1.25, 0.55))
 
 	# 4 corner timber posts + crossbeam + winch drum supporting a slate-tiled tower spire roof
-	for px in [-1.14, 1.14]:
-		for pz in [-1.14, 1.14]:
-			_add_box_visual(well, "WellPostBase", Vector3(float(px), 0.28, float(pz)), Vector3(0.32, 0.62, 0.32), _mat_stone_foundation)
-			_add_box_visual(well, "WellPost", Vector3(float(px), 1.48, float(pz)), Vector3(0.20, 2.15, 0.20), _mat_wood_trim)
-	_add_box_visual(well, "WellWinchBeam", Vector3(0.0, 1.72, 0.0), Vector3(2.20, 0.14, 0.14), _mat_wood_trim)
-	_add_box_visual(well, "WellPulley", Vector3(0.0, 1.72, 0.0), Vector3(0.72, 0.28, 0.28), _mat_wood_dark)
-	_add_box_visual(well, "WellRope", Vector3(0.0, 1.38, 0.0), Vector3(0.05, 0.62, 0.05), _get_color_mat("hemp", Color(0.76, 0.64, 0.44)))
-	_add_box_visual(well, "WellBucket", Vector3(0.0, 1.08, 0.0), Vector3(0.36, 0.34, 0.36), _mat_wood_trim)
-	_add_box_visual(well, "WellBucketBand", Vector3(0.0, 1.12, 0.0), Vector3(0.38, 0.07, 0.38), _mat_iron)
-	_spawn_tinted_part(well, "Roof_Tower_RoundTiles.gltf", "slate", Vector3(0.0, 2.52, 0.0), 0.0, Vector3(0.58, 0.56, 0.58))
-	for corner_sign in [Vector2(-1.42, -1.42), Vector2(1.42, -1.42), Vector2(-1.42, 1.42), Vector2(1.42, 1.42)]:
-		_add_box_visual(well, "WellPlanterBox", Vector3(corner_sign.x, 0.22, corner_sign.y), Vector3(0.58, 0.40, 0.58), _mat_wood_dark)
-		_spawn_ext_prop(well, "res://assets/nature/Flower_4_Group.gltf", Vector3(corner_sign.x, 0.42, corner_sign.y), corner_sign.x, Vector3.ONE * 0.72, false)
+	for px in [-1.14 * V_SCALE, 1.14 * V_SCALE]:
+		for pz in [-1.14 * V_SCALE, 1.14 * V_SCALE]:
+			_add_box_visual(well, "WellPostBase", Vector3(float(px), 0.28 * V_SCALE, float(pz)), Vector3(0.32, 0.62, 0.32) * V_SCALE, _mat_stone_foundation)
+			_add_box_visual(well, "WellPost", Vector3(float(px), 1.48 * V_SCALE, float(pz)), Vector3(0.20, 2.15, 0.20) * V_SCALE, _mat_wood_trim)
+	_add_box_visual(well, "WellWinchBeam", Vector3(0.0, 1.72 * V_SCALE, 0.0), Vector3(2.20, 0.14, 0.14) * V_SCALE, _mat_wood_trim)
+	_add_box_visual(well, "WellPulley", Vector3(0.0, 1.72 * V_SCALE, 0.0), Vector3(0.72, 0.28, 0.28) * V_SCALE, _mat_wood_dark)
+	_add_box_visual(well, "WellRope", Vector3(0.0, 1.38 * V_SCALE, 0.0), Vector3(0.05, 0.62, 0.05) * V_SCALE, _get_color_mat("hemp", Color(0.76, 0.64, 0.44)))
+	_add_box_visual(well, "WellBucket", Vector3(0.0, 1.08 * V_SCALE, 0.0), Vector3(0.36, 0.34, 0.36) * V_SCALE, _mat_wood_trim)
+	_add_box_visual(well, "WellBucketBand", Vector3(0.0, 1.12 * V_SCALE, 0.0), Vector3(0.38, 0.07, 0.38) * V_SCALE, _mat_iron)
+	_spawn_tinted_part(well, "Roof_Tower_RoundTiles.gltf", "slate", Vector3(0.0, 2.52 * V_SCALE, 0.0), 0.0, Vector3(0.58, 0.56, 0.58))
+	for corner_sign: Vector2 in [Vector2(-1.42, -1.42), Vector2(1.42, -1.42), Vector2(-1.42, 1.42), Vector2(1.42, 1.42)]:
+		var cs_pos: Vector2 = corner_sign * V_SCALE
+		_add_box_visual(well, "WellPlanterBox", Vector3(cs_pos.x, 0.22 * V_SCALE, cs_pos.y), Vector3(0.58, 0.40, 0.58) * V_SCALE, _mat_wood_dark)
+		_spawn_ext_prop(well, "res://assets/nature/Flower_4_Group.gltf", Vector3(cs_pos.x, 0.42 * V_SCALE, cs_pos.y), corner_sign.x, Vector3.ONE * (0.72 * V_SCALE), false)
 
 	var well_light := OmniLight3D.new()
-	well_light.position = Vector3(0.0, 2.25, 0.0)
+	well_light.position = Vector3(0.0, 2.25 * V_SCALE, 0.0)
 	well_light.light_color = Color(1.0, 0.80, 0.44)
-	well_light.light_energy = 1.35
-	well_light.omni_range = 12.0
+	well_light.light_energy = 1.45
+	well_light.omni_range = 12.0 * V_SCALE
 	well_light.shadow_enabled = false
 	well_light.distance_fade_enabled = true
 	well_light.distance_fade_begin = 110.0
 	well_light.distance_fade_length = 35.0
 	well.add_child(well_light)
-	_register_night_light(well_light, 1.35)
+	_register_night_light(well_light, 1.45)
 
-	_add_cylinder_collider(colliders, Vector3(wx, ground_y + 1.3, wz), 1.38, 2.9)
+	_add_cylinder_collider(colliders, Vector3(wx, ground_y + 1.3 * V_SCALE, wz), 1.38 * V_SCALE, 2.9 * V_SCALE)
 
 
 func _build_market_stalls(root: Node3D, colliders: StaticBody3D, terrain: Node3D) -> void:
@@ -1518,13 +1710,13 @@ func _build_market_stalls(root: Node3D, colliders: StaticBody3D, terrain: Node3D
 
 	for i in range(STALL_SPECS.size()):
 		var spec := STALL_SPECS[i]
-		var off: Vector2 = spec["offset"]
+		var off: Vector2 = spec["offset"] * V_SCALE
 		var yaw: float = spec["yaw"]
 		var canopy_col: Color = spec["canopy"]
 
 		var wx: float = VILLAGE_CENTER.x + off.x
 		var wz: float = VILLAGE_CENTER.z + off.y
-		var mm := _sample_patch_minmax(terrain, wx, wz, 1.65, 0.95, yaw)
+		var mm := _sample_patch_minmax(terrain, wx, wz, 1.65 * V_SCALE, 0.95 * V_SCALE, yaw)
 		var top_y: float = mm.y + 0.07
 		var bot_y: float = mm.x - 0.8
 		var plinth_h: float = maxf(top_y - bot_y, 0.90)
@@ -1536,16 +1728,21 @@ func _build_market_stalls(root: Node3D, colliders: StaticBody3D, terrain: Node3D
 		group.add_child(stall)
 
 		var plinth_pos := Vector3(0.0, bot_y + plinth_h * 0.5, 0.0)
-		var plinth_size := Vector3(3.2, plinth_h, 1.8)
+		var plinth_size := Vector3(3.2 * V_SCALE, plinth_h, 1.8 * V_SCALE)
 		_add_box_visual(stall, "Plinth", plinth_pos, plinth_size, _mat_stone_foundation)
 
-		var fy := top_y
-		_add_box_visual(stall, "Counter", Vector3(0.0, fy + 0.46, 0.25), Vector3(2.85, 0.92, 0.78), _mat_wood_dark)
-		_add_box_visual(stall, "CounterTop", Vector3(0.0, fy + 0.96, 0.25), Vector3(2.96, 0.12, 0.92), _mat_wood_trim)
+		var stall_body := Node3D.new()
+		stall_body.name = "StallBody"
+		stall_body.position = Vector3(0.0, top_y, 0.0)
+		stall_body.scale = Vector3.ONE * V_SCALE
+		stall.add_child(stall_body)
+
+		_add_box_visual(stall_body, "Counter", Vector3(0.0, 0.46, 0.25), Vector3(2.85, 0.92, 0.78), _mat_wood_dark)
+		_add_box_visual(stall_body, "CounterTop", Vector3(0.0, 0.96, 0.25), Vector3(2.96, 0.12, 0.92), _mat_wood_trim)
 
 		for px in [-1.36, 1.36]:
-			_add_box_visual(stall, "BackPost", Vector3(float(px), fy + 1.25, -0.68), Vector3(0.16, 2.50, 0.16), _mat_wood_trim)
-			_add_box_visual(stall, "FrontPost", Vector3(float(px), fy + 1.25, 0.68), Vector3(0.16, 2.50, 0.16), _mat_wood_trim)
+			_add_box_visual(stall_body, "BackPost", Vector3(float(px), 1.25, -0.68), Vector3(0.16, 2.50, 0.16), _mat_wood_trim)
+			_add_box_visual(stall_body, "FrontPost", Vector3(float(px), 1.25, 0.68), Vector3(0.16, 2.50, 0.16), _mat_wood_trim)
 
 		# Real kit tiled market canopy tinted per guild color
 		var roof_mesh := _get_mesh("Roof_2x4_RoundTile.gltf")
@@ -1569,26 +1766,26 @@ func _build_market_stalls(root: Node3D, colliders: StaticBody3D, terrain: Node3D
 			var rmi := MeshInstance3D.new()
 			rmi.name = "TiledAwning"
 			rmi.mesh = dup_roof
-			rmi.position = Vector3(0.0, fy + 2.38, 0.0)
+			rmi.position = Vector3(0.0, 2.38, 0.0)
 			rmi.rotation = Vector3(0.0, PI * 0.5, 0.0)
 			rmi.scale = Vector3(0.66, 0.64, 0.88)
-			stall.add_child(rmi)
+			stall_body.add_child(rmi)
 
 		# Stocked guild goods & wares cleanly placed on counters and beneath awnings
-		_populate_stall_wares(stall, i, fy)
+		_populate_stall_wares(stall_body, i, 0.0)
 
 		# Small hanging warm brass lantern under awning eaves
-		_add_box_visual(stall, "StallLanternMount", Vector3(0.0, fy + 2.26, 0.66), Vector3(0.10, 0.18, 0.10), _mat_iron)
-		var sl_glass := _add_box_visual(stall, "StallLanternGlow", Vector3(0.0, fy + 2.10, 0.66), Vector3(0.20, 0.24, 0.20), _mat_lantern_glow)
+		_add_box_visual(stall_body, "StallLanternMount", Vector3(0.0, 2.26, 0.66), Vector3(0.10, 0.18, 0.10), _mat_iron)
+		var sl_glass := _add_box_visual(stall_body, "StallLanternGlow", Vector3(0.0, 2.10, 0.66), Vector3(0.20, 0.24, 0.20), _mat_lantern_glow)
 		if sl_glass != null:
 			sl_glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 		var stall_basis := Basis(Vector3.UP, yaw)
-		var col_local := Vector3(0.0, bot_y + (plinth_h + 2.4) * 0.5, 0.0)
+		var col_local := Vector3(0.0, bot_y + (plinth_h + 2.4 * V_SCALE) * 0.5, 0.0)
 		_add_box_collider(
 			colliders,
 			Transform3D(stall_basis, Vector3(wx, 0.0, wz) + stall_basis * col_local),
-			Vector3(3.2, plinth_h + 2.4, 1.8)
+			Vector3(3.2 * V_SCALE, plinth_h + 2.4 * V_SCALE, 1.8 * V_SCALE)
 		)
 
 
@@ -1598,15 +1795,15 @@ func _build_street_lanterns(root: Node3D, colliders: StaticBody3D, terrain: Node
 	root.add_child(group)
 
 	for i in range(LANTERN_OFFSETS.size()):
-		var off := LANTERN_OFFSETS[i]
+		var off := LANTERN_OFFSETS[i] * V_SCALE
 		var wx: float = VILLAGE_CENTER.x + off.x
 		var wz: float = VILLAGE_CENTER.z + off.y
 		var gy: float = _sample_h(terrain, wx, wz)
 
 		var aim := Vector2(1.0, 0.0)
-		if absf(off.x) < 5.0 and absf(off.y) > 8.0:
+		if absf(off.x) < 5.0 * V_SCALE and absf(off.y) > 8.0 * V_SCALE:
 			aim = Vector2(-signf(off.x), 0.0)
-		elif absf(off.y) < 5.0 and absf(off.x) > 8.0:
+		elif absf(off.y) < 5.0 * V_SCALE and absf(off.x) > 8.0 * V_SCALE:
 			aim = Vector2(0.0, -signf(off.y))
 		else:
 			aim = (-off).normalized()
@@ -1615,6 +1812,7 @@ func _build_street_lanterns(root: Node3D, colliders: StaticBody3D, terrain: Node
 		post.name = "StreetLantern_%d" % i
 		post.position = Vector3(wx, gy, wz)
 		post.rotation.y = atan2(-aim.y, aim.x)
+		post.scale = Vector3.ONE * V_SCALE
 		group.add_child(post)
 
 		_add_box_visual(post, "Socket", Vector3(0.0, 0.05, 0.0), Vector3(0.56, 0.90, 0.56), _mat_stone_foundation)
@@ -1637,16 +1835,16 @@ func _build_street_lanterns(root: Node3D, colliders: StaticBody3D, terrain: Node
 			var light := OmniLight3D.new()
 			light.position = Vector3(0.58, 2.70, 0.0)
 			light.light_color = Color(1.0, 0.79, 0.44)
-			light.light_energy = 1.35
-			light.omni_range = 16.0
+			light.light_energy = 1.45
+			light.omni_range = 16.0 * V_SCALE
 			light.shadow_enabled = false
 			light.distance_fade_enabled = true
 			light.distance_fade_begin = 110.0
 			light.distance_fade_length = 35.0
 			post.add_child(light)
-			_register_night_light(light, 1.35)
+			_register_night_light(light, 1.45)
 
-		_add_cylinder_collider(colliders, Vector3(wx, gy + 1.5, wz), 0.28, 3.2)
+		_add_cylinder_collider(colliders, Vector3(wx, gy + 1.5 * V_SCALE, wz), 0.28 * V_SCALE, 3.2 * V_SCALE)
 
 
 func _build_town_trees(root: Node3D, colliders: StaticBody3D, terrain: Node3D) -> void:
@@ -1656,9 +1854,9 @@ func _build_town_trees(root: Node3D, colliders: StaticBody3D, terrain: Node3D) -
 
 	for i in range(TREE_SPECS.size()):
 		var spec := TREE_SPECS[i]
-		var off: Vector2 = spec["offset"]
+		var off: Vector2 = spec["offset"] * V_SCALE
 		var arch: int = spec["arch"]
-		var sc: float = spec["scale"]
+		var sc: float = float(spec["scale"]) * 1.18
 		var yaw: float = spec["yaw"]
 
 		var tree_mesh := terrain.call("_get_tree_mesh", arch) as Mesh
@@ -1687,20 +1885,20 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 
 	for i in range(WAGON_SPECS.size()):
 		var spec := WAGON_SPECS[i]
-		var off: Vector2 = spec["offset"]
+		var off: Vector2 = spec["offset"] * V_SCALE
 		var yaw: float = spec["yaw"]
 		var wx: float = VILLAGE_CENTER.x + off.x
 		var wz: float = VILLAGE_CENTER.z + off.y
-		var plaza_lift := 0.048 if (absf(off.x) <= 13.2 and absf(off.y) <= 13.2) else 0.0
+		var plaza_lift := 0.048 if (absf(off.x) <= 13.2 * V_SCALE and absf(off.y) <= 13.2 * V_SCALE) else 0.0
 
 		var dir_z := Vector2(sin(yaw), cos(yaw))
-		var p_front := Vector2(wx, wz) - dir_z * 2.1
-		var p_back := Vector2(wx, wz) + dir_z * 0.6
+		var p_front := Vector2(wx, wz) - dir_z * 2.1 * V_SCALE
+		var p_back := Vector2(wx, wz) + dir_z * 0.6 * V_SCALE
 		var h_front: float = _sample_h(terrain, p_front.x, p_front.y) + plaza_lift
 		var h_back: float = _sample_h(terrain, p_back.x, p_back.y) + plaza_lift
 		var h_mid: float = _sample_h(terrain, wx, wz) + plaza_lift
 		var wag_y: float = minf(h_mid, (h_front + h_back) * 0.5) - 0.02
-		var slope_x: float = clampf(atan2(h_front - h_back, 2.7), -0.25, 0.25)
+		var slope_x: float = clampf(atan2(h_front - h_back, 2.7 * V_SCALE), -0.25, 0.25)
 
 		var wag_node := Node3D.new()
 		wag_node.name = "Wagon_%d" % i
@@ -1712,32 +1910,32 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 		var wb := Basis.from_euler(Vector3(slope_x, yaw, 0.0))
 		_add_box_collider(
 			colliders,
-			Transform3D(wb, wag_node.position + wb * Vector3(0.0, 0.78, -1.14)),
-			Vector3(1.92, 1.48, 3.85)
+			Transform3D(wb, wag_node.position + wb * (Vector3(0.0, 0.78, -1.14) * V_SCALE)),
+			Vector3(1.92, 1.48, 3.85) * V_SCALE
 		)
 
 	for ci in range(CRATE_CLUSTERS.size()):
 		var cspec := CRATE_CLUSTERS[ci]
-		var off: Vector2 = cspec["offset"]
+		var off: Vector2 = cspec["offset"] * V_SCALE
 		var cnt: int = cspec["count"]
 		var base_yaw: float = cspec["yaw"]
 		var wx: float = VILLAGE_CENTER.x + off.x
 		var wz: float = VILLAGE_CENTER.z + off.y
 
-		var offsets_local := [Vector2.ZERO, Vector2(1.16, 0.14), Vector2(0.55, 0.0)]
+		var offsets_local := [Vector2.ZERO, Vector2(1.16, 0.14) * V_SCALE, Vector2(0.55, 0.0) * V_SCALE]
 		for k in range(cnt):
 			var oy: float = 0.0
 			var ox_off := Vector2.ZERO
 			if k == 1:
 				ox_off = offsets_local[1].rotated(base_yaw)
 			elif k == 2:
-				ox_off = Vector2(0.45, 0.06).rotated(base_yaw)
-				oy = 1.04
+				ox_off = (Vector2(0.45, 0.06) * V_SCALE).rotated(base_yaw)
+				oy = 1.04 * V_SCALE
 			var cx: float = wx + ox_off.x
 			var cz: float = wz + ox_off.y
 			var rdx: float = cx - VILLAGE_CENTER.x
 			var rdz: float = cz - VILLAGE_CENTER.z
-			var on_cobble: bool = (absf(rdx) <= 13.2 and absf(rdz) <= 13.2) or (absf(rdx) <= 2.5 and absf(rdz) <= 56.5) or (absf(rdz) <= 2.5 and absf(rdx) <= 62.5)
+			var on_cobble: bool = (absf(rdx) <= 13.2 * V_SCALE and absf(rdz) <= 13.2 * V_SCALE) or (absf(rdx) <= 2.5 * V_SCALE and absf(rdz) <= 56.5 * V_SCALE) or (absf(rdz) <= 2.5 * V_SCALE and absf(rdx) <= 62.5 * V_SCALE)
 			var road_lift: float = 0.048 if on_cobble else 0.0
 			var cy: float = _sample_h(terrain, cx, cz) + road_lift - 0.03 + oy
 			var pos := Vector3(cx, cy, cz)
@@ -1745,8 +1943,8 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			_spawn_part(group, "Prop_Crate.gltf", pos, cyaw)
 			_add_box_collider(
 				colliders,
-				Transform3D(Basis(Vector3.UP, cyaw), pos + Vector3(0.0, 0.53, 0.0)),
-				Vector3(1.06, 1.04, 1.06)
+				Transform3D(Basis(Vector3.UP, cyaw), pos + Vector3(0.0, 0.53 * V_SCALE, 0.0)),
+				Vector3(1.06, 1.04, 1.06) * V_SCALE
 			)
 
 	# Continuous 16-segment double-faced crenellated stone ramparts connecting 4 Gatehouses, 4 Corner Watchtowers & 8 Bastion Turrets
@@ -1763,11 +1961,11 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 	var stone_wall_runs: Array[Dictionary] = []
 	for s_idx in range(octant_spans.size()):
 		var span: Array = octant_spans[s_idx]
-		var t0: Vector2 = span[0]
-		var t1: Vector2 = span[1]
+		var t0: Vector2 = span[0] * V_SCALE
+		var t1: Vector2 = span[1] * V_SCALE
 		var s_vec: Vector2 = (t1 - t0).normalized()
-		var wa: Vector2 = t0 + s_vec * 1.85
-		var wb: Vector2 = t1 - s_vec * 1.85
+		var wa: Vector2 = t0 + s_vec * (1.85 * V_SCALE)
+		var wb: Vector2 = t1 - s_vec * (1.85 * V_SCALE)
 		var wmid: Vector2 = (wa + wb) * 0.5
 		stone_wall_runs.append({"a": wa, "b": wmid, "pier": true, "span_idx": s_idx})
 		stone_wall_runs.append({"a": wmid, "b": wb, "pier": false, "span_idx": s_idx})
@@ -1778,7 +1976,7 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 		var sa: Vector2 = srun["a"] + bridge_center_2d
 		var sb: Vector2 = srun["b"] + bridge_center_2d
 		var slen: float = sa.distance_to(sb)
-		var segs: int = maxi(1, int(round(slen / 2.0)))
+		var segs: int = maxi(1, int(round(slen / CELL)))
 		var sdir: Vector2 = (sb - sa) / float(segs)
 		var seg_w: float = sdir.length()
 		var sdir_n: Vector2 = sdir.normalized()
@@ -1795,8 +1993,8 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 
 			var ha: float = _sample_h(terrain, pa.x, pa.y)
 			var hb: float = _sample_h(terrain, pb.x, pb.y)
-			var hin: float = _sample_h(terrain, mid.x - outward_n.x * 0.80, mid.y - outward_n.y * 0.80)
-			var hout: float = _sample_h(terrain, mid.x + outward_n.x * 0.80, mid.y + outward_n.y * 0.80)
+			var hin: float = _sample_h(terrain, mid.x - outward_n.x * 0.80 * V_SCALE, mid.y - outward_n.y * 0.80 * V_SCALE)
+			var hout: float = _sample_h(terrain, mid.x + outward_n.x * 0.80 * V_SCALE, mid.y + outward_n.y * 0.80 * V_SCALE)
 			var min_h: float = minf(minf(ha, hb), minf(hin, hout))
 			var avg_h: float = (ha + hb) * 0.5
 
@@ -1807,26 +2005,26 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			group.add_child(wall_seg)
 
 			var plinth_bot: float = (min_h - avg_h) - 1.80
-			var plinth_top: float = 0.72
+			var plinth_top: float = 0.72 * V_SCALE
 			var plinth_h: float = plinth_top - plinth_bot
-			_add_box_visual(wall_seg, "WallPlinth", Vector3(0.0, plinth_bot + plinth_h * 0.5, 0.0), Vector3(seg_w + 0.08, plinth_h, 1.72), _mat_stone_foundation)
-			_add_box_visual(wall_seg, "WallCore", Vector3(0.0, 2.08, 0.0), Vector3(seg_w + 0.04, 2.96, 1.18), _mat_stone_foundation)
-			_spawn_part(wall_seg, "Wall_UnevenBrick_Straight.gltf", Vector3(0.0, 0.60,  0.70), 0.0, Vector3.INF, Vector3(seg_w / 2.0, 1.0, 1.0))
-			_spawn_part(wall_seg, "Wall_UnevenBrick_Straight.gltf", Vector3(0.0, 0.60, -0.70), PI,  Vector3.INF, Vector3(seg_w / 2.0, 1.0, 1.0))
-			_add_box_visual(wall_seg, "RampartWalk", Vector3(0.0, 3.52, 0.0), Vector3(seg_w + 0.08, 0.22, 1.70), _mat_cobble)
-			_add_box_visual(wall_seg, "OuterCornice", Vector3(0.0, 3.46,  0.86), Vector3(seg_w + 0.10, 0.18, 0.16), _mat_stone_foundation)
-			_add_box_visual(wall_seg, "InnerCornice", Vector3(0.0, 3.46, -0.86), Vector3(seg_w + 0.10, 0.18, 0.16), _mat_stone_foundation)
-			_add_box_visual(wall_seg, "OuterBreastwork", Vector3(0.0, 3.74, 0.72), Vector3(seg_w + 0.06, 0.28, 0.28), _mat_stone_foundation)
+			_add_box_visual(wall_seg, "WallPlinth", Vector3(0.0, plinth_bot + plinth_h * 0.5, 0.0), Vector3(seg_w + 0.08 * V_SCALE, plinth_h, 1.72 * V_SCALE), _mat_stone_foundation)
+			_add_box_visual(wall_seg, "WallCore", Vector3(0.0, 2.08 * V_SCALE, 0.0), Vector3(seg_w + 0.04 * V_SCALE, 2.96 * V_SCALE, 1.18 * V_SCALE), _mat_stone_foundation)
+			_spawn_part(wall_seg, "Wall_UnevenBrick_Straight.gltf", Vector3(0.0, 0.60 * V_SCALE,  0.70 * V_SCALE), 0.0, Vector3.INF, Vector3(seg_w / CELL, 1.0, 1.0))
+			_spawn_part(wall_seg, "Wall_UnevenBrick_Straight.gltf", Vector3(0.0, 0.60 * V_SCALE, -0.70 * V_SCALE), PI,  Vector3.INF, Vector3(seg_w / CELL, 1.0, 1.0))
+			_add_box_visual(wall_seg, "RampartWalk", Vector3(0.0, 3.52 * V_SCALE, 0.0), Vector3(seg_w + 0.08 * V_SCALE, 0.22 * V_SCALE, 1.70 * V_SCALE), _mat_cobble)
+			_add_box_visual(wall_seg, "OuterCornice", Vector3(0.0, 3.46 * V_SCALE,  0.86 * V_SCALE), Vector3(seg_w + 0.10 * V_SCALE, 0.18 * V_SCALE, 0.16 * V_SCALE), _mat_stone_foundation)
+			_add_box_visual(wall_seg, "InnerCornice", Vector3(0.0, 3.46 * V_SCALE, -0.86 * V_SCALE), Vector3(seg_w + 0.10 * V_SCALE, 0.18 * V_SCALE, 0.16 * V_SCALE), _mat_stone_foundation)
+			_add_box_visual(wall_seg, "OuterBreastwork", Vector3(0.0, 3.74 * V_SCALE, 0.72 * V_SCALE), Vector3(seg_w + 0.06 * V_SCALE, 0.28 * V_SCALE, 0.28 * V_SCALE), _mat_stone_foundation)
 			for mx_sign in [-0.25, 0.25]:
 				var mx: float = seg_w * float(mx_sign)
-				_add_box_visual(wall_seg, "Merlon", Vector3(mx, 4.10, 0.72), Vector3(0.56, 0.52, 0.28), _mat_stone_foundation)
-				_add_box_visual(wall_seg, "MerlonCap", Vector3(mx, 4.40, 0.72), Vector3(0.64, 0.09, 0.34), _mat_stone_foundation)
-			_add_box_visual(wall_seg, "InnerParapet", Vector3(0.0, 3.82, -0.74), Vector3(seg_w + 0.06, 0.44, 0.22), _mat_stone_foundation)
+				_add_box_visual(wall_seg, "Merlon", Vector3(mx, 4.10 * V_SCALE, 0.72 * V_SCALE), Vector3(0.56, 0.52, 0.28) * V_SCALE, _mat_stone_foundation)
+				_add_box_visual(wall_seg, "MerlonCap", Vector3(mx, 4.40 * V_SCALE, 0.72 * V_SCALE), Vector3(0.64, 0.09, 0.34) * V_SCALE, _mat_stone_foundation)
+			_add_box_visual(wall_seg, "InnerParapet", Vector3(0.0, 3.82 * V_SCALE, -0.74 * V_SCALE), Vector3(seg_w + 0.06 * V_SCALE, 0.44 * V_SCALE, 0.22 * V_SCALE), _mat_stone_foundation)
 
 			_add_box_collider(
 				colliders,
-				Transform3D(Basis(Vector3.UP, wall_yaw), Vector3(mid.x, avg_h + 2.15, mid.y)),
-				Vector3(seg_w, 4.6, 1.68)
+				Transform3D(Basis(Vector3.UP, wall_yaw), Vector3(mid.x, avg_h + 2.15 * V_SCALE, mid.y)),
+				Vector3(seg_w, 4.6 * V_SCALE, 1.68 * V_SCALE)
 			)
 
 		if bool(srun.get("pier", false)):
@@ -1844,41 +2042,41 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			group.add_child(turret)
 			turret_idx += 1
 
-			_add_box_visual(turret, "TurretPlinth", Vector3(0.0, -0.675, 0.0), Vector3(2.68, 3.05, 2.68), _mat_stone_foundation)
-			_add_box_visual(turret, "TurretCore", Vector3(0.0, 2.30, 0.0), Vector3(2.26, 3.00, 2.26), _mat_stone_foundation)
-			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 0.0,  0.80,  1.25),  0.0,      Vector3.INF, Vector3(1.25, 1.0, 1.0))
-			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 0.0,  0.80, -1.25),  PI,       Vector3.INF, Vector3(1.25, 1.0, 1.0))
-			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 1.25, 0.80,  0.0),   PI * 0.5, Vector3.INF, Vector3(1.25, 1.0, 1.0))
-			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3(-1.25, 0.80,  0.0),  -PI * 0.5, Vector3.INF, Vector3(1.25, 1.0, 1.0))
-			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3(-1.25, 0.80, -1.25),  PI * 0.5)
-			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3( 1.25, 0.80, -1.25),  0.0)
-			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3( 1.25, 0.80,  1.25), -PI * 0.5)
-			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3(-1.25, 0.80,  1.25),  PI)
+			_add_box_visual(turret, "TurretPlinth", Vector3(0.0, -0.675 * V_SCALE, 0.0), Vector3(2.68, 3.05, 2.68) * V_SCALE, _mat_stone_foundation)
+			_add_box_visual(turret, "TurretCore", Vector3(0.0, 2.30 * V_SCALE, 0.0), Vector3(2.26, 3.00, 2.26) * V_SCALE, _mat_stone_foundation)
+			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 0.0,  0.80,  1.25) * V_SCALE,  0.0,      Vector3.INF, Vector3(1.25, 1.0, 1.0))
+			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 0.0,  0.80, -1.25) * V_SCALE,  PI,       Vector3.INF, Vector3(1.25, 1.0, 1.0))
+			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3( 1.25, 0.80,  0.0) * V_SCALE,   PI * 0.5, Vector3.INF, Vector3(1.25, 1.0, 1.0))
+			_spawn_part(turret, "Wall_UnevenBrick_Straight.gltf", Vector3(-1.25, 0.80,  0.0) * V_SCALE,  -PI * 0.5, Vector3.INF, Vector3(1.25, 1.0, 1.0))
+			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3(-1.25, 0.80, -1.25) * V_SCALE,  PI * 0.5)
+			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3( 1.25, 0.80, -1.25) * V_SCALE,  0.0)
+			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3( 1.25, 0.80,  1.25) * V_SCALE, -PI * 0.5)
+			_spawn_part(turret, "Corner_Exterior_Brick.gltf", Vector3(-1.25, 0.80,  1.25) * V_SCALE,  PI)
 
-			_add_box_visual(turret, "TurretCornice", Vector3(0.0, 3.86, 0.0), Vector3(2.76, 0.22, 2.76), _mat_stone_foundation)
-			_add_box_visual(turret, "TurretDeck", Vector3(0.0, 3.98, 0.0), Vector3(2.50, 0.16, 2.50), _mat_cobble)
+			_add_box_visual(turret, "TurretCornice", Vector3(0.0, 3.86 * V_SCALE, 0.0), Vector3(2.76, 0.22, 2.76) * V_SCALE, _mat_stone_foundation)
+			_add_box_visual(turret, "TurretDeck", Vector3(0.0, 3.98 * V_SCALE, 0.0), Vector3(2.50, 0.16, 2.50) * V_SCALE, _mat_cobble)
 			for px in [-1.08, 1.08]:
 				for pz in [-1.08, 1.08]:
-					_add_box_visual(turret, "TurretPier", Vector3(float(px), 4.58, float(pz)), Vector3(0.42, 1.24, 0.42), _mat_stone_foundation)
+					_add_box_visual(turret, "TurretPier", Vector3(float(px), 4.58, float(pz)) * V_SCALE, Vector3(0.42, 1.24, 0.42) * V_SCALE, _mat_stone_foundation)
 			for pside in [-1.14, 1.14]:
-				_add_box_visual(turret, "TurretParapetZ", Vector3(0.0, 4.20, float(pside)), Vector3(2.40, 0.52, 0.22), _mat_stone_foundation)
-				_add_box_visual(turret, "TurretParapetX", Vector3(float(pside), 4.20, 0.0), Vector3(0.22, 0.52, 2.40), _mat_stone_foundation)
-			_add_box_visual(turret, "TurretEaves", Vector3(0.0, 5.18, 0.0), Vector3(2.58, 0.14, 2.58), _mat_wood_dark)
-			_spawn_tinted_part(turret, "Roof_RoundTiles_4x4.gltf", "slate", Vector3(0.0, 5.22, 0.0), 0.0, Vector3(0.70, 0.70, 0.70))
-			_spawn_wall_sconce(turret, Vector3(0.0, 3.15, -1.36), PI, false)
+				_add_box_visual(turret, "TurretParapetZ", Vector3(0.0, 4.20, float(pside)) * V_SCALE, Vector3(2.40, 0.52, 0.22) * V_SCALE, _mat_stone_foundation)
+				_add_box_visual(turret, "TurretParapetX", Vector3(float(pside), 4.20, 0.0) * V_SCALE, Vector3(0.22, 0.52, 2.40) * V_SCALE, _mat_stone_foundation)
+			_add_box_visual(turret, "TurretEaves", Vector3(0.0, 5.18 * V_SCALE, 0.0), Vector3(2.58, 0.14, 2.58) * V_SCALE, _mat_wood_dark)
+			_spawn_tinted_part(turret, "Roof_RoundTiles_4x4.gltf", "slate", Vector3(0.0, 5.22 * V_SCALE, 0.0), 0.0, Vector3(0.70, 0.70, 0.70))
+			_spawn_wall_sconce(turret, Vector3(0.0, 3.15, -1.36) * V_SCALE, PI, false)
 
 			_add_box_collider(
 				colliders,
-				Transform3D(Basis(Vector3.UP, tw_yaw), Vector3(sb.x, tw_h + 2.6, sb.y)),
-				Vector3(2.58, 5.4, 2.58)
+				Transform3D(Basis(Vector3.UP, tw_yaw), Vector3(sb.x, tw_h + 2.6 * V_SCALE, sb.y)),
+				Vector3(2.58, 5.4, 2.58) * V_SCALE
 			)
 
 	# 4 inner corner-paddock stone rampart access stairs parallel to the North & South curtain walls
 	for st_i in range(4):
 		var st_span_idx: int = [0, 1, 4, 5][st_i]
 		var sp: Array = octant_spans[st_span_idx]
-		var corner_pt: Vector2 = sp[1] if (st_span_idx == 0 or st_span_idx == 4) else sp[0]
-		var gate_pt: Vector2 = sp[0] if (st_span_idx == 0 or st_span_idx == 4) else sp[1]
+		var corner_pt: Vector2 = (sp[1] if (st_span_idx == 0 or st_span_idx == 4) else sp[0]) * V_SCALE
+		var gate_pt: Vector2 = (sp[0] if (st_span_idx == 0 or st_span_idx == 4) else sp[1]) * V_SCALE
 		var stair_wall_rel: Vector2 = corner_pt.lerp(gate_pt, 0.25)
 		var wall_tangent: Vector2 = (gate_pt - corner_pt).normalized()
 		var st_out: Vector2 = Vector2(-wall_tangent.y, wall_tangent.x)
@@ -1888,9 +2086,9 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 
 		var wall_sample: Vector2 = bridge_center_2d + stair_wall_rel
 		var wall_h: float = _sample_h(terrain, wall_sample.x, wall_sample.y)
-		var stair_pos_2d: Vector2 = wall_sample - st_out * 1.45
+		var stair_pos_2d: Vector2 = wall_sample - st_out * (1.45 * V_SCALE)
 		var st_h: float = _sample_h(terrain, stair_pos_2d.x, stair_pos_2d.y)
-		var top_rel_y: float = (wall_h + 3.55) - st_h
+		var top_rel_y: float = (wall_h + 3.55 * V_SCALE) - st_h
 
 		var r_stair := Node3D.new()
 		r_stair.name = "RampartStairs_%d" % st_i
@@ -1899,23 +2097,23 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 		group.add_child(r_stair)
 
 		var landing_h: float = top_rel_y + 1.60
-		_add_box_visual(r_stair, "LandingPier", Vector3(2.10, -1.60 + landing_h * 0.5, 0.0), Vector3(1.50, landing_h, 1.25), _mat_stone_foundation)
-		_add_box_visual(r_stair, "LandingDeck", Vector3(2.10, top_rel_y, 0.0), Vector3(1.56, 0.14, 1.30), _mat_cobble)
+		_add_box_visual(r_stair, "LandingPier", Vector3(2.10 * V_SCALE, -1.60 + landing_h * 0.5, 0.0), Vector3(1.50 * V_SCALE, landing_h, 1.25 * V_SCALE), _mat_stone_foundation)
+		_add_box_visual(r_stair, "LandingDeck", Vector3(2.10 * V_SCALE, top_rel_y, 0.0), Vector3(1.56, 0.14, 1.30) * V_SCALE, _mat_cobble)
 
 		var flight_step_y: float = top_rel_y / 3.0
-		var flight_xs: Array[float] = [-1.35, -0.30, 0.75]
+		var flight_xs: Array[float] = [-1.35 * V_SCALE, -0.30 * V_SCALE, 0.75 * V_SCALE]
 		for fi in range(3):
 			var fy: float = float(fi) * flight_step_y
 			var fx: float = flight_xs[fi]
 			var plinth_fy_h: float = fy + 1.60 + flight_step_y * 0.45
-			_add_box_visual(r_stair, "StairPlinth", Vector3(fx, -1.60 + plinth_fy_h * 0.5, 0.0), Vector3(1.08, plinth_fy_h, 1.22), _mat_stone_foundation)
-			_spawn_part(r_stair, "Stairs_Exterior_Straight.gltf", Vector3(fx, fy, 0.0), -PI * 0.5, Vector3.INF, Vector3(0.68, flight_step_y * 1.05, 0.66))
+			_add_box_visual(r_stair, "StairPlinth", Vector3(fx, -1.60 + plinth_fy_h * 0.5, 0.0), Vector3(1.08 * V_SCALE, plinth_fy_h, 1.22 * V_SCALE), _mat_stone_foundation)
+			_spawn_part(r_stair, "Stairs_Exterior_Straight.gltf", Vector3(fx, fy, 0.0), -PI * 0.5, Vector3.INF, Vector3(0.68, flight_step_y * 1.05 / V_SCALE, 0.66))
 
 		var st_basis := Basis(Vector3.UP, st_yaw)
 		_add_box_collider(
 			colliders,
-			Transform3D(st_basis, r_stair.position + st_basis * Vector3(0.65, top_rel_y * 0.5, 0.0)),
-			Vector3(4.6, top_rel_y + 0.4, 1.26)
+			Transform3D(st_basis, r_stair.position + st_basis * Vector3(0.65 * V_SCALE, top_rel_y * 0.5, 0.0)),
+			Vector3(4.6 * V_SCALE, top_rel_y + 0.4, 1.26 * V_SCALE)
 		)
 
 	# Ornamental wrought-iron forecourt fences framing the Guildhall and VillageAbbey courtyards
@@ -1926,10 +2124,10 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 		{"a": Vector2(  4.0, -24.0), "b": Vector2(  4.0, -16.5)},
 	]
 	for irun in iron_runs:
-		var ia: Vector2 = irun["a"] + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
-		var ib: Vector2 = irun["b"] + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
+		var ia: Vector2 = irun["a"] * V_SCALE + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
+		var ib: Vector2 = irun["b"] * V_SCALE + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
 		var ilen: float = ia.distance_to(ib)
-		var ipanels: int = maxi(1, int(round(ilen / 1.5)))
+		var ipanels: int = maxi(1, int(round(ilen / (1.5 * V_SCALE))))
 		var idir: Vector2 = (ib - ia) / float(ipanels)
 		var ipanel_w: float = idir.length()
 		var iyaw: float = atan2(-idir.y, idir.x)
@@ -1938,20 +2136,20 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			var ipb: Vector2 = ipa + idir
 			var imid: Vector2 = (ipa + ipb) * 0.5
 			var min_ground: float = minf(_sample_h(terrain, ipa.x, ipa.y), _sample_h(terrain, ipb.x, ipb.y))
-			var ifpos := Vector3(imid.x, min_ground - 0.14, imid.y)
-			_spawn_part(group, "Prop_MetalFence_Ornament.gltf", ifpos, iyaw, Vector3.INF, Vector3(ipanel_w / 1.95, 0.72, 1.0))
+			var ifpos := Vector3(imid.x, min_ground - 0.14 * V_SCALE, imid.y)
+			_spawn_part(group, "Prop_MetalFence_Ornament.gltf", ifpos, iyaw, Vector3.INF, Vector3(ipanel_w / (1.95 * V_SCALE), 0.72, 1.0))
 			_add_box_collider(
 				colliders,
-				Transform3D(Basis(Vector3.UP, iyaw), ifpos + Vector3(0.0, 1.02, 0.0)),
-				Vector3(ipanel_w, 2.04, 0.24)
+				Transform3D(Basis(Vector3.UP, iyaw), ifpos + Vector3(0.0, 1.02 * V_SCALE, 0.0)),
+				Vector3(ipanel_w, 2.04 * V_SCALE, 0.24 * V_SCALE)
 			)
 
 	for ri in range(FENCE_RUNS.size()):
 		var run := FENCE_RUNS[ri]
-		var a: Vector2 = run["a"] + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
-		var b: Vector2 = run["b"] + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
+		var a: Vector2 = run["a"] * V_SCALE + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
+		var b: Vector2 = run["b"] * V_SCALE + Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z)
 		var total_len: float = a.distance_to(b)
-		var panels: int = maxi(1, int(round(total_len / 2.0)))
+		var panels: int = maxi(1, int(round(total_len / CELL)))
 		var dir2: Vector2 = (b - a) / float(panels)
 		var panel_len: float = dir2.length()
 		var yaw: float = atan2(-dir2.y, dir2.x)
@@ -1967,7 +2165,7 @@ func _build_props_and_fences(root: Node3D, colliders: StaticBody3D, terrain: Nod
 			var rot_euler := Vector3(0.0, yaw, slope_z)
 			_spawn_part(group, "Prop_WoodenFence_Single.gltf", fpos, 0.0, rot_euler)
 			var fb := Basis.from_euler(rot_euler)
-			_add_box_collider(colliders, Transform3D(fb, fpos + fb * Vector3(0.0, 0.42, 0.0)), Vector3(panel_len, 0.84, 0.24))
+			_add_box_collider(colliders, Transform3D(fb, fpos + fb * Vector3(0.0, 0.42 * V_SCALE, 0.0)), Vector3(panel_len, 0.84 * V_SCALE, 0.24 * V_SCALE))
 
 	# Cozy civic life clusters: outdoor Inn tables, Bakery bread display, Blacksmith anvil & forge rack,
 	# plaza wooden benches, wine barrels, bottle crates, and timber flower boxes (all statically batched!).
@@ -2108,7 +2306,7 @@ func _populate_civic_life_props(group: Node3D, colliders: StaticBody3D, terrain:
 		{"off": Vector2( 5.2, -14.8), "yaw": 0.0},
 	]
 	for bspec in bench_specs:
-		var boff: Vector2 = bspec["off"]
+		var boff: Vector2 = bspec["off"] * V_SCALE
 		var byaw: float = bspec["yaw"]
 		var bx: float = VILLAGE_CENTER.x + boff.x
 		var bz: float = VILLAGE_CENTER.z + boff.y
@@ -2117,23 +2315,25 @@ func _populate_civic_life_props(group: Node3D, colliders: StaticBody3D, terrain:
 		bench.name = "PlazaBench"
 		bench.position = Vector3(bx, by, bz)
 		bench.rotation = Vector3(0.0, byaw, 0.0)
+		bench.scale = Vector3.ONE * V_SCALE
 		group.add_child(bench)
 		_add_box_visual(bench, "Seat", Vector3(0.0, 0.42, 0.0), Vector3(1.65, 0.10, 0.50), _mat_wood_trim)
 		_add_box_visual(bench, "LegL", Vector3(-0.68, 0.21, 0.0), Vector3(0.14, 0.42, 0.44), _mat_wood_dark)
 		_add_box_visual(bench, "LegR", Vector3( 0.68, 0.21, 0.0), Vector3(0.14, 0.42, 0.44), _mat_wood_dark)
 		_add_box_visual(bench, "Back", Vector3(0.0, 0.74, -0.20), Vector3(1.65, 0.34, 0.08), _mat_wood_trim)
-		_add_box_collider(colliders, Transform3D(Basis(Vector3.UP, byaw), Vector3(bx, by + 0.38, bz)), Vector3(1.65, 0.76, 0.52))
+		_add_box_collider(colliders, Transform3D(Basis(Vector3.UP, byaw), Vector3(bx, by + 0.38 * V_SCALE, bz)), Vector3(1.65, 0.76, 0.52) * V_SCALE)
 
 	# 2. GoldenSlimeInn & Bakery Outdoor Terrace Tables + Benches + Barrels (x=-14.2 apron)
 	var inn_tables := [Vector2(-14.2, -9.8), Vector2(-14.2, -5.8), Vector2(-14.2, 6.2)]
 	for ti in range(inn_tables.size()):
-		var toff: Vector2 = inn_tables[ti]
+		var toff: Vector2 = inn_tables[ti] * V_SCALE
 		var tx: float = VILLAGE_CENTER.x + toff.x
 		var tz: float = VILLAGE_CENTER.z + toff.y
 		var ty: float = _sample_h(terrain, tx, tz) + 0.048
 		var tbl := Node3D.new()
 		tbl.name = "InnTable_%d" % ti
 		tbl.position = Vector3(tx, ty, tz)
+		tbl.scale = Vector3.ONE * V_SCALE
 		group.add_child(tbl)
 		_add_box_visual(tbl, "TableTop", Vector3(0.0, 0.74, 0.0), Vector3(1.60, 0.10, 0.92), _mat_wood_trim)
 		_add_box_visual(tbl, "TableLegL", Vector3(-0.62, 0.37, 0.0), Vector3(0.14, 0.74, 0.72), _mat_wood_dark)
@@ -2147,7 +2347,7 @@ func _populate_civic_life_props(group: Node3D, colliders: StaticBody3D, terrain:
 			var bread_m := _get_color_mat("bread_crust", Color(0.84, 0.58, 0.26), 0.86)
 			_add_box_visual(tbl, "BakeryLoaf1", Vector3(-0.35, 0.86, 0.08), Vector3(0.30, 0.14, 0.18), bread_m).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			_add_box_visual(tbl, "BakeryLoaf2", Vector3(0.28, 0.86, -0.10), Vector3(0.28, 0.14, 0.18), bread_m).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(tx, ty + 0.44, tz)), Vector3(1.65, 0.88, 1.85))
+		_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(tx, ty + 0.44 * V_SCALE, tz)), Vector3(1.65, 0.88, 1.85) * V_SCALE)
 
 	# 3. Tavern, Brewery, Market & Apothecary Barrel + Bottle Crate Clusters
 	var barrel_spots := [
@@ -2156,40 +2356,42 @@ func _populate_civic_life_props(group: Node3D, colliders: StaticBody3D, terrain:
 		Vector2(6.5, 36.2), Vector2(-24.8, -35.8),
 	]
 	for bi in range(barrel_spots.size()):
-		var bo: Vector2 = barrel_spots[bi]
+		var bo: Vector2 = barrel_spots[bi] * V_SCALE
 		var bx: float = VILLAGE_CENTER.x + bo.x
 		var bz: float = VILLAGE_CENTER.z + bo.y
-		var by: float = _sample_h(terrain, bx, bz) + (0.048 if absf(bo.x) <= 13.5 and absf(bo.y) <= 13.5 else 0.0)
-		_spawn_ext_prop(group, "res://assets/fishing/barrel.glb", Vector3(bx, by, bz), float(bi) * 0.6, Vector3.ONE, true)
-		_spawn_ext_prop(group, "res://assets/fishing/crate-bottles.glb", Vector3(bx + 0.88, by, bz + 0.22), float(bi) * 0.4, Vector3.ONE * 0.88, true)
-		_add_cylinder_collider(colliders, Vector3(bx, by + 0.55, bz), 0.60, 1.15)
+		var by: float = _sample_h(terrain, bx, bz) + (0.048 if absf(bo.x) <= 13.5 * V_SCALE and absf(bo.y) <= 13.5 * V_SCALE else 0.0)
+		_spawn_ext_prop(group, "res://assets/fishing/barrel.glb", Vector3(bx, by, bz), float(bi) * 0.6, Vector3.ONE * V_SCALE, true)
+		_spawn_ext_prop(group, "res://assets/fishing/crate-bottles.glb", Vector3(bx + 0.88 * V_SCALE, by, bz + 0.22 * V_SCALE), float(bi) * 0.4, Vector3.ONE * (0.88 * V_SCALE), true)
+		_add_cylinder_collider(colliders, Vector3(bx, by + 0.55 * V_SCALE, bz), 0.60 * V_SCALE, 1.15 * V_SCALE)
 
-	# 4. Blacksmith Forge Courtyard (outside Blacksmith at (+8.5, +14.8))
-	var fx: float = VILLAGE_CENTER.x + 5.8
-	var fz: float = VILLAGE_CENTER.z + 14.8
+	# 4. Blacksmith Forge Courtyard (outside Blacksmith at (+8.5, +14.8) * V_SCALE)
+	var fx: float = VILLAGE_CENTER.x + 5.8 * V_SCALE
+	var fz: float = VILLAGE_CENTER.z + 14.8 * V_SCALE
 	var fy_smith: float = _sample_h(terrain, fx, fz) + 0.048
 	var smith_yard := Node3D.new()
 	smith_yard.name = "BlacksmithCourtyard"
 	smith_yard.position = Vector3(fx, fy_smith, fz)
+	smith_yard.scale = Vector3.ONE * V_SCALE
 	group.add_child(smith_yard)
 	_add_box_visual(smith_yard, "AnvilStump", Vector3(0.0, 0.34, 0.0), Vector3(0.56, 0.68, 0.56), _mat_wood_dark)
 	_add_box_visual(smith_yard, "AnvilBase", Vector3(0.0, 0.76, 0.0), Vector3(0.46, 0.16, 0.32), _mat_iron)
 	_add_box_visual(smith_yard, "AnvilHorn", Vector3(0.0, 0.90, 0.0), Vector3(0.68, 0.14, 0.24), _mat_iron)
 	_spawn_ext_prop(smith_yard, "res://assets/fishing/barrel.glb", Vector3(1.15, 0.0, 0.15), 0.3, Vector3.ONE, true)
 	_spawn_ext_prop(smith_yard, "res://assets/npcs/sword_1handed.gltf", Vector3(1.15, 0.96, 0.15), 0.4, Vector3.ONE, false)
-	_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(fx + 0.45, fy_smith + 0.55, fz)), Vector3(1.90, 1.10, 0.85))
+	_add_box_collider(colliders, Transform3D(Basis.IDENTITY, Vector3(fx + 0.45 * V_SCALE, fy_smith + 0.55 * V_SCALE, fz)), Vector3(1.90, 1.10, 0.85) * V_SCALE)
 
 	# 5. Vibrant Flower Planter Boxes along Plaza Promenade Corners
-	for poff in [
+	for poff: Vector2 in [
 		Vector2(-12.2, -12.2), Vector2(12.2, -12.2), Vector2(-12.2, 12.2), Vector2(12.2, 12.2),
 		Vector2(-7.8, -14.8), Vector2(7.8, -14.8), Vector2(-7.8, 14.8), Vector2(7.8, 14.8),
 	]:
-		var px: float = VILLAGE_CENTER.x + poff.x
-		var pz: float = VILLAGE_CENTER.z + poff.y
+		var ps: Vector2 = poff * V_SCALE
+		var px: float = VILLAGE_CENTER.x + ps.x
+		var pz: float = VILLAGE_CENTER.z + ps.y
 		var py: float = _sample_h(terrain, px, pz) + 0.048
-		_add_box_visual(group, "FlowerPlanter", Vector3(px, py + 0.20, pz), Vector3(0.92, 0.40, 0.56), _mat_wood_dark)
-		_spawn_ext_prop(group, "res://assets/nature/Flower_3_Group.gltf", Vector3(px - 0.18, py + 0.40, pz), poff.x, Vector3.ONE * 0.78, false)
-		_spawn_ext_prop(group, "res://assets/nature/Flower_4_Group.gltf", Vector3(px + 0.18, py + 0.40, pz), poff.y, Vector3.ONE * 0.78, false)
+		_add_box_visual(group, "FlowerPlanter", Vector3(px, py + 0.20 * V_SCALE, pz), Vector3(0.92, 0.40, 0.56) * V_SCALE, _mat_wood_dark)
+		_spawn_ext_prop(group, "res://assets/nature/Flower_3_Group.gltf", Vector3(px - 0.18 * V_SCALE, py + 0.40 * V_SCALE, pz), poff.x, Vector3.ONE * (0.78 * V_SCALE), false)
+		_spawn_ext_prop(group, "res://assets/nature/Flower_4_Group.gltf", Vector3(px + 0.18 * V_SCALE, py + 0.40 * V_SCALE, pz), poff.y, Vector3.ONE * (0.78 * V_SCALE), false)
 
 
 func _build_plaza_bunting(root: Node3D, terrain: Node3D, plaza_top_y: float) -> void:
@@ -2217,38 +2419,38 @@ func _build_plaza_bunting(root: Node3D, terrain: Node3D, plaza_top_y: float) -> 
 	var base_y := maxf(_sample_h(terrain, VILLAGE_CENTER.x, VILLAGE_CENTER.z), plaza_top_y)
 
 	for s_idx in range(spans.size()):
-		var a2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][0] as Vector2)
-		var b2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][1] as Vector2)
-		var ha: float = maxf(_sample_h(terrain, a2.x, a2.y), base_y) + 3.85
-		var hb: float = maxf(_sample_h(terrain, b2.x, b2.y), base_y) + 3.85
+		var a2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][0] as Vector2) * V_SCALE
+		var b2: Vector2 = Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z) + (spans[s_idx][1] as Vector2) * V_SCALE
+		var ha: float = maxf(_sample_h(terrain, a2.x, a2.y), base_y) + 3.85 * V_SCALE
+		var hb: float = maxf(_sample_h(terrain, b2.x, b2.y), base_y) + 3.85 * V_SCALE
 		var dvec := b2 - a2
 		var len2 := dvec.length()
 		var yaw := atan2(dvec.x, dvec.y)
-		var n_flags := maxi(5, int(round(len2 / 0.62)))
+		var n_flags := maxi(5, int(round(len2 / (0.62 * V_SCALE))))
 		for fi in range(n_flags):
 			var t := (float(fi) + 0.5) / float(n_flags)
 			var p2 := a2.lerp(b2, t)
-			var sag := 4.0 * t * (1.0 - t) * 0.45
+			var sag := 4.0 * t * (1.0 - t) * 0.45 * V_SCALE
 			var py := lerpf(ha, hb, t) - sag
 			var fmat: Material = flag_mats[(fi + s_idx) % flag_mats.size()]
 			var pennant := MeshInstance3D.new()
 			var pm := PrismMesh.new()
-			pm.size = Vector3(0.04, 0.34, 0.36)
+			pm.size = Vector3(0.04, 0.34, 0.36) * V_SCALE
 			pennant.mesh = pm
 			pennant.material_override = fmat
 			pennant.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			pennant.position = Vector3(p2.x, py - 0.16, p2.y)
+			pennant.position = Vector3(p2.x, py - 0.16 * V_SCALE, p2.y)
 			pennant.rotation = Vector3(PI, yaw, 0.0)
 			holder.add_child(pennant)
 		# Thin taut rope cord segment at midpoint
 		var mid2 := (a2 + b2) * 0.5
 		var cord := MeshInstance3D.new()
 		var cm := BoxMesh.new()
-		cm.size = Vector3(0.03, 0.03, len2)
+		cm.size = Vector3(0.03 * V_SCALE, 0.03 * V_SCALE, len2)
 		cord.mesh = cm
 		cord.material_override = cord_mat
 		cord.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		cord.position = Vector3(mid2.x, (ha + hb) * 0.5 - 0.22, mid2.y)
+		cord.position = Vector3(mid2.x, (ha + hb) * 0.5 - 0.22 * V_SCALE, mid2.y)
 		cord.rotation = Vector3(0.0, yaw, 0.0)
 		holder.add_child(cord)
 
@@ -2257,17 +2459,17 @@ func _build_plaza_ambiance(root: Node3D, plaza_y: float) -> void:
 	# Gentle sunlit pollen/blossom motes floating above Grand Market Square
 	var motes := GPUParticles3D.new()
 	motes.name = "PlazaBlossomMotes"
-	motes.position = Vector3(VILLAGE_CENTER.x, plaza_y + 2.4, VILLAGE_CENTER.z)
+	motes.position = Vector3(VILLAGE_CENTER.x, plaza_y + 2.4 * V_SCALE, VILLAGE_CENTER.z)
 	motes.amount = 24
 	motes.lifetime = 4.6
 	motes.preprocess = 2.0
 	motes.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	motes.visibility_range_end = 58.0
+	motes.visibility_range_end = 70.0
 	motes.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	var pmat := ParticleProcessMaterial.new()
 	pmat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	pmat.emission_box_extents = Vector3(13.0, 1.8, 13.0)
+	pmat.emission_box_extents = Vector3(13.0, 1.8, 13.0) * V_SCALE
 	pmat.direction = Vector3(0.45, 0.18, 0.25)
 	pmat.spread = 45.0
 	pmat.initial_velocity_min = 0.25
@@ -2453,6 +2655,7 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	_build_house(root, colliders, terrain, {
 		"name": "FishermanCottage",
 		"offset": cottage_xy - v_xz,
+		"unscaled_offset": true,
 		"w": 4,
 		"d": 6,
 		"stories": 1,
@@ -2467,21 +2670,21 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	# Cottage coastal porch barrels, crates, chest, oar, and rustic fence
 	var cot_yaw := dock_yaw + PI * 0.45
 	var cot_basis := Basis(Vector3.UP, cot_yaw)
-	var cot_side_a := cottage_xy + tangent * -2.6 + sea_normal * -1.4
+	var cot_side_a := cottage_xy + tangent * (-2.6 * V_SCALE) + sea_normal * (-1.4 * V_SCALE)
 	var cot_side_ay := _sample_h(terrain, cot_side_a.x, cot_side_a.y)
-	_spawn_glb_scene(root, fdir + "barrel.glb", Vector3(cot_side_a.x, cot_side_ay, cot_side_a.y), cot_yaw + 0.3)
-	_spawn_glb_scene(root, fdir + "crate.glb", Vector3(cot_side_a.x + sea_normal.x * 1.15, cot_side_ay, cot_side_a.y + sea_normal.y * 1.15), cot_yaw - 0.2)
-	_spawn_glb_scene(root, fdir + "tool-paddle.glb", Vector3(cot_side_a.x - sea_normal.x * 0.85, cot_side_ay + 0.08, cot_side_a.y - sea_normal.y * 0.85), 0.0, Vector3(0.25, cot_yaw, 0.12))
-	_add_box_collider(colliders, Transform3D(cot_basis, Vector3(cot_side_a.x, cot_side_ay + 0.55, cot_side_a.y)), Vector3(2.2, 1.1, 1.4))
+	_spawn_glb_scene(root, fdir + "barrel.glb", Vector3(cot_side_a.x, cot_side_ay, cot_side_a.y), cot_yaw + 0.3, Vector3.INF, Vector3.ONE * V_SCALE)
+	_spawn_glb_scene(root, fdir + "crate.glb", Vector3(cot_side_a.x + sea_normal.x * (1.15 * V_SCALE), cot_side_ay, cot_side_a.y + sea_normal.y * (1.15 * V_SCALE)), cot_yaw - 0.2, Vector3.INF, Vector3.ONE * V_SCALE)
+	_spawn_glb_scene(root, fdir + "tool-paddle.glb", Vector3(cot_side_a.x - sea_normal.x * (0.85 * V_SCALE), cot_side_ay + 0.08, cot_side_a.y - sea_normal.y * (0.85 * V_SCALE)), 0.0, Vector3(0.25, cot_yaw, 0.12), Vector3.ONE * V_SCALE)
+	_add_box_collider(colliders, Transform3D(cot_basis, Vector3(cot_side_a.x, cot_side_ay + 0.55 * V_SCALE, cot_side_a.y)), Vector3(2.2, 1.1, 1.4) * V_SCALE)
 
 	# Rustic terrain-following timber rail framing the seaward side of Fisherman's Cottage
 	var fence_pts: Array[Vector3] = []
 	for fi in range(-2, 3):
-		var fp2 := cottage_xy + sea_normal * 4.2 + tangent * (float(fi) * 2.2)
+		var fp2 := cottage_xy + sea_normal * (4.2 * V_SCALE) + tangent * (float(fi) * 2.2 * V_SCALE)
 		var fy := _sample_h(terrain, fp2.x, fp2.y)
 		fence_pts.append(Vector3(fp2.x, fy, fp2.y))
-		_add_box_visual(root, "CottageFencePost_%d" % fi, Vector3(fp2.x, fy + 0.48, fp2.y), Vector3(0.16, 1.15, 0.16), _mat_wood_dark)
-		_add_cylinder_collider(colliders, Vector3(fp2.x, fy + 0.48, fp2.y), 0.14, 1.15)
+		_add_box_visual(root, "CottageFencePost_%d" % fi, Vector3(fp2.x, fy + 0.64, fp2.y), Vector3(0.20, 1.48, 0.20), _mat_wood_dark)
+		_add_cylinder_collider(colliders, Vector3(fp2.x, fy + 0.64, fp2.y), 0.18, 1.48)
 	for si_f in range(fence_pts.size() - 1):
 		var a := fence_pts[si_f]
 		var b := fence_pts[si_f + 1]
@@ -2490,11 +2693,11 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 		var dlen := dvec.length()
 		var ry_yaw := atan2(dvec.x, dvec.z)
 		var rx_pitch := -atan2(dvec.y, maxf(Vector2(dvec.x, dvec.z).length(), 0.01))
-		_add_box_visual(root, "CottageFenceRailHi_%d" % si_f, mid + Vector3(0.0, 0.84, 0.0), Vector3(0.10, 0.10, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
-		_add_box_visual(root, "CottageFenceRailLo_%d" % si_f, mid + Vector3(0.0, 0.48, 0.0), Vector3(0.10, 0.10, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
+		_add_box_visual(root, "CottageFenceRailHi_%d" % si_f, mid + Vector3(0.0, 1.08, 0.0), Vector3(0.12, 0.12, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
+		_add_box_visual(root, "CottageFenceRailLo_%d" % si_f, mid + Vector3(0.0, 0.62, 0.0), Vector3(0.12, 0.12, dlen), _mat_wood_dark, Vector3(rx_pitch, ry_yaw, 0.0))
 
 	# 0b. Terrain-draped Cobble Pathway from Village South Gatehouse aligned straight onto the Harbor Wharf
-	var gate_xy := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0)
+	var gate_xy := Vector2(VILLAGE_CENTER.x, VILLAGE_CENTER.z + 55.0 * V_SCALE)
 	var entry_w := dock.position + d_basis * Vector3(0.0, 0.0, -10.35)
 	var entry_xy := Vector2(entry_w.x, entry_w.z)
 	var ctrl_xy := entry_xy - sea_normal * 64.0
@@ -2553,7 +2756,7 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	# Cottage cobble doorway spur connecting PierPathway up to Fisherman's Cottage front
 	var spur_start := path_pts[n_seg - 8]
 	var spur_start_xz := Vector2(spur_start.x, spur_start.z)
-	var spur_end_xz := cottage_xy - tangent * 3.8
+	var spur_end_xz := cottage_xy - tangent * (3.8 * V_SCALE)
 	var spur_segs := 6
 	var f_spur := (spur_end_xz - spur_start_xz).normalized()
 	var r_spur := Vector2(-f_spur.y, f_spur.x)
@@ -2606,22 +2809,22 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	var mat_awning_trim := _make_matte_mat(Color(0.84, 0.76, 0.58), 0.92)
 	for sx_p in [-3.35, -1.65]:
 		for sz_p in [-7.45, -4.55]:
-			var sp_h := 2.45 if sx_p < -2.5 else 2.18
-			_add_cylinder_visual(dock, "WharfStallPost", Vector3(sx_p, wharf_top_y + sp_h * 0.5, sz_p), 0.07, 0.08, sp_h, _mat_dock_oak)
-	_add_box_visual(dock, "WharfStallCanopy", Vector3(-2.45, wharf_top_y + 2.34, -6.00), Vector3(2.25, 0.08, 3.35), mat_stall_awning, Vector3(0.0, 0.0, -0.18))
-	_add_box_visual(dock, "WharfStallValance", Vector3(-1.38, wharf_top_y + 2.08, -6.00), Vector3(0.06, 0.18, 3.32), mat_awning_trim)
-	_add_box_visual(dock, "WharfStallCounter", Vector3(-2.05, wharf_top_y + 0.42, -6.00), Vector3(0.65, 0.84, 2.30), _mat_wood_trim)
-	_spawn_wall_sconce(dock, Vector3(-1.58, wharf_top_y + 1.88, -6.00), PI * 0.5, true)
-	_spawn_glb_scene(dock, fdir + "chest.glb", Vector3(-2.95, wharf_top_y + 0.02, -7.25), 0.35, Vector3.INF, Vector3.ONE * 0.76)
-	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-3.00, wharf_top_y + 0.02, -5.95), 1.4, Vector3.INF, Vector3.ONE * 0.74)
-	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(-2.85, wharf_top_y + 0.02, -4.85), -0.25, Vector3.INF, Vector3.ONE * 0.76)
-	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-2.20, wharf_top_y + 0.02, -7.35), 0.0, Vector3(0.22, 0.40, 0.14), Vector3.ONE * 0.90)
-	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(-2.55, wharf_top_y + 0.50, -6.02)), Vector3(1.85, 1.00, 3.25))
+			var sp_h := 3.35 if sx_p < -2.5 else 3.00
+			_add_cylinder_visual(dock, "WharfStallPost", Vector3(sx_p, wharf_top_y + sp_h * 0.5, sz_p), 0.08, 0.09, sp_h, _mat_dock_oak)
+	_add_box_visual(dock, "WharfStallCanopy", Vector3(-2.45, wharf_top_y + 3.18, -6.00), Vector3(2.25, 0.09, 3.35), mat_stall_awning, Vector3(0.0, 0.0, -0.18))
+	_add_box_visual(dock, "WharfStallValance", Vector3(-1.38, wharf_top_y + 2.92, -6.00), Vector3(0.06, 0.18, 3.32), mat_awning_trim)
+	_add_box_visual(dock, "WharfStallCounter", Vector3(-2.05, wharf_top_y + 0.54, -6.00), Vector3(0.76, 1.08, 2.30), _mat_wood_trim)
+	_spawn_wall_sconce(dock, Vector3(-1.58, wharf_top_y + 2.55, -6.00), PI * 0.5, true)
+	_spawn_glb_scene(dock, fdir + "chest.glb", Vector3(-2.95, wharf_top_y + 0.02, -7.25), 0.35, Vector3.INF, Vector3.ONE * 1.08)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(-3.00, wharf_top_y + 0.02, -5.95), 1.4, Vector3.INF, Vector3.ONE * 1.06)
+	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(-2.85, wharf_top_y + 0.02, -4.85), -0.25, Vector3.INF, Vector3.ONE * 1.08)
+	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-2.20, wharf_top_y + 0.02, -7.35), 0.0, Vector3(0.22, 0.40, 0.14), Vector3.ONE * 1.25)
+	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(-2.55, wharf_top_y + 0.62, -6.02)), Vector3(1.95, 1.25, 3.25))
 
 	# East Wharf Cargo Cluster & Harbor Mooring Railings framing Main Pier entrance
-	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(2.85, wharf_top_y + 0.02, -7.05), 0.7, Vector3.INF, Vector3.ONE * 0.78)
-	_spawn_glb_scene(dock, fdir + "crate-bottles.glb", Vector3(2.85, wharf_top_y + 0.02, -5.75), -0.45, Vector3.INF, Vector3.ONE * 0.76)
-	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(2.20, wharf_top_y + 0.02, -4.55), 0.20, Vector3.INF, Vector3.ONE * 0.72)
+	_spawn_glb_scene(dock, fdir + "barrel.glb", Vector3(2.85, wharf_top_y + 0.02, -7.05), 0.7, Vector3.INF, Vector3.ONE * 1.10)
+	_spawn_glb_scene(dock, fdir + "crate-bottles.glb", Vector3(2.85, wharf_top_y + 0.02, -5.75), -0.45, Vector3.INF, Vector3.ONE * 1.08)
+	_spawn_glb_scene(dock, fdir + "crate.glb", Vector3(2.20, wharf_top_y + 0.02, -4.55), 0.20, Vector3.INF, Vector3.ONE * 1.05)
 	_add_box_collider(colliders, Transform3D(d_basis, dock.position + d_basis * Vector3(2.70, wharf_top_y + 0.46, -5.90)), Vector3(1.45, 0.95, 3.15))
 
 	# Wharf perimeter mooring posts & hemp-rope guard spans (center 2.5m pier entry left clear)
@@ -2727,24 +2930,24 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 	var mat_pier_slate := _make_matte_mat(Color(0.25, 0.28, 0.33), 0.90)
 	var pav_x := -2.25
 	var pav_z := 18.95
-	var pav_post_h := 2.34
+	var pav_post_h := 3.22
 	for px_o: float in [-1.05, 1.05]:
 		for pz_o: float in [-1.20, 1.20]:
 			var p_pos := Vector3(pav_x + px_o, pier_top_y + pav_post_h * 0.5, pav_z + pz_o)
-			_add_cylinder_visual(dock, "HarborPavilionPost", p_pos, 0.085, 0.105, pav_post_h, _mat_dock_oak)
-			_add_box_visual(dock, "HarborPavilionPlinth", Vector3(pav_x + px_o, pier_top_y + 0.09, pav_z + pz_o), Vector3(0.26, 0.18, 0.26), _mat_stone_foundation)
+			_add_cylinder_visual(dock, "HarborPavilionPost", p_pos, 0.095, 0.12, pav_post_h, _mat_dock_oak)
+			_add_box_visual(dock, "HarborPavilionPlinth", Vector3(pav_x + px_o, pier_top_y + 0.11, pav_z + pz_o), Vector3(0.30, 0.22, 0.30), _mat_stone_foundation)
 			# Subtle diagonal knee brace along roof eaves
 			var brace_in := -px_o * 0.45
-			_spawn_rope_span(dock, "HarborPavilionBrace", Vector3(pav_x + px_o, pier_top_y + 1.82, pav_z + pz_o), Vector3(pav_x + px_o + brace_in, pier_top_y + 2.28, pav_z + pz_o), 0.055, _mat_dock_oak)
+			_spawn_rope_span(dock, "HarborPavilionBrace", Vector3(pav_x + px_o, pier_top_y + 2.52, pav_z + pz_o), Vector3(pav_x + px_o + brace_in, pier_top_y + 3.14, pav_z + pz_o), 0.06, _mat_dock_oak)
 		# Wall-plate beam along Z
-		_add_box_visual(dock, "HarborPavilionEave", Vector3(pav_x + px_o, pier_top_y + 2.32, pav_z), Vector3(0.16, 0.16, 2.75), _mat_dock_oak)
+		_add_box_visual(dock, "HarborPavilionEave", Vector3(pav_x + px_o, pier_top_y + 3.20, pav_z), Vector3(0.18, 0.18, 2.75), _mat_dock_oak)
 	# Pitched Slate Shingle Gable Roof (port & starboard slopes + ridge beam + overhang fascia)
-	_add_box_visual(dock, "HarborPavilionRoofW", Vector3(pav_x - 0.68, pier_top_y + 2.66, pav_z), Vector3(1.56, 0.11, 2.96), mat_pier_slate, Vector3(0.0, 0.0, 0.42))
-	_add_box_visual(dock, "HarborPavilionRoofE", Vector3(pav_x + 0.68, pier_top_y + 2.66, pav_z), Vector3(1.56, 0.11, 2.96), mat_pier_slate, Vector3(0.0, 0.0, -0.42))
-	_add_box_visual(dock, "HarborPavilionRidge", Vector3(pav_x, pier_top_y + 2.98, pav_z), Vector3(0.20, 0.18, 3.04), _mat_dock_oak)
+	_add_box_visual(dock, "HarborPavilionRoofW", Vector3(pav_x - 0.68, pier_top_y + 3.56, pav_z), Vector3(1.56, 0.12, 2.96), mat_pier_slate, Vector3(0.0, 0.0, 0.42))
+	_add_box_visual(dock, "HarborPavilionRoofE", Vector3(pav_x + 0.68, pier_top_y + 3.56, pav_z), Vector3(1.56, 0.12, 2.96), mat_pier_slate, Vector3(0.0, 0.0, -0.42))
+	_add_box_visual(dock, "HarborPavilionRidge", Vector3(pav_x, pier_top_y + 3.88, pav_z), Vector3(0.22, 0.20, 3.04), _mat_dock_oak)
 	# Hanging Iron Lantern inside Canopy Ridge
-	var pav_lamp := Vector3(pav_x, pier_top_y + 2.24, pav_z)
-	_spawn_rope_span(dock, "PavilionLampChain", Vector3(pav_x, pier_top_y + 2.90, pav_z), pav_lamp + Vector3(0.0, 0.14, 0.0), 0.022, _mat_iron)
+	var pav_lamp := Vector3(pav_x, pier_top_y + 3.12, pav_z)
+	_spawn_rope_span(dock, "PavilionLampChain", Vector3(pav_x, pier_top_y + 3.80, pav_z), pav_lamp + Vector3(0.0, 0.14, 0.0), 0.022, _mat_iron)
 	_add_box_visual(dock, "PavilionLampCap", pav_lamp + Vector3(0.0, 0.12, 0.0), Vector3(0.24, 0.06, 0.24), _mat_iron)
 	var pav_glow := _add_box_visual(dock, "PavilionLampGlow", pav_lamp, Vector3(0.16, 0.20, 0.16), _mat_lantern_glow)
 	pav_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -2814,17 +3017,17 @@ func _build_fishing_dock(root: Node3D, colliders: StaticBody3D, terrain: Node3D)
 		_spawn_rope_span(dock, "PierHeadRopeMid", Vector3(ha.x, pier_top_y + 0.42, ha.y), Vector3(hb.x, pier_top_y + 0.42, hb.y), 0.026, _mat_rope)
 
 	# 5. Moored Rowboats alongside East Low-Water Finger Slip & West Main Pier + Beached Skiff
-	_spawn_glb_scene(dock, fdir + "boat-row-large.glb", Vector3(6.65, -0.14, 7.6), -0.08)
-	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, -0.08), dock.position + d_basis * Vector3(6.65, 0.22, 7.6)), Vector3(2.60, 0.72, 2.75))
+	_spawn_glb_scene(dock, fdir + "boat-row-large.glb", Vector3(7.15, -0.14, 7.6), -0.08, Vector3.INF, Vector3.ONE * 1.35)
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, -0.08), dock.position + d_basis * Vector3(7.15, 0.28, 7.6)), Vector3(2.60, 0.72, 2.75) * 1.35)
 
-	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-2.95, -0.14, 11.4), 0.10)
-	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.10), dock.position + d_basis * Vector3(-2.95, 0.22, 11.4)), Vector3(2.55, 0.72, 2.30))
+	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-3.35, -0.14, 11.4), 0.10, Vector3.INF, Vector3.ONE * 1.35)
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.10), dock.position + d_basis * Vector3(-3.35, 0.28, 11.4)), Vector3(2.55, 0.72, 2.30) * 1.35)
 
 	var beach_boat_w := dock.position + d_basis * Vector3(-8.2, 0.0, -6.2)
 	var beach_boat_y := _sample_h(terrain, beach_boat_w.x, beach_boat_w.z) - 0.06
-	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-8.2, beach_boat_y, -6.2), 0.0, Vector3(0.08, 0.45, -0.06))
-	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-6.9, beach_boat_y + 0.12, -6.0), 0.0, Vector3(1.42, 0.65, 0.0))
-	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.45), Vector3(beach_boat_w.x, beach_boat_y + 0.35, beach_boat_w.z)), Vector3(2.55, 0.72, 2.30))
+	_spawn_glb_scene(dock, fdir + "boat-row-small.glb", Vector3(-8.2, beach_boat_y, -6.2), 0.0, Vector3(0.08, 0.45, -0.06), Vector3.ONE * 1.35)
+	_spawn_glb_scene(dock, fdir + "tool-paddle.glb", Vector3(-6.6, beach_boat_y + 0.15, -6.0), 0.0, Vector3(1.42, 0.65, 0.0), Vector3.ONE * 1.35)
+	_add_box_collider(colliders, Transform3D(d_basis * Basis(Vector3.UP, 0.45), Vector3(beach_boat_w.x, beach_boat_y + 0.42, beach_boat_w.z)), Vector3(2.55, 0.72, 2.30) * 1.35)
 
 	# 6. Coastal Sand Rocks & 3-Post Lashed Harbor Mooring Dolphins
 	var cove_rocks: Array[Dictionary] = [

@@ -8,6 +8,13 @@ const CAVE_MESH_PATH := "res://terrain/cave/cave_mesh.res"
 const CAVE_FLOOR_SHAPE_PATH := "res://terrain/cave/cave_floor_shape.res"
 const CAVE_WALL_SHAPE_PATH := "res://terrain/cave/cave_wall_shape.res"
 const CAVE_PROPS_CACHE_PATH := "res://terrain/cave/cave_props_cache.dat"
+const CAVE_SHELL_CHUNKS_PATH := "user://cache/cave_shell_chunks.res"
+const CAVE_WATER_MESHES_PATH := "user://cache/cave_water_meshes.res"
+const DOOR_WALL_MESH_PATH := "res://terrain/cave/door_wall_mesh.res"
+const DOOR_MONOLITH_MESH_PATH := "user://cache/door_monolith_mesh.res"
+const CRYSTAL_INTERIOR_TEX_PATH := "res://terrain/cave/crystal_interior_tex.res"
+const FIRE_NOISE_TEX_PATH := "res://terrain/cave/fire_noise_tex.res"
+const FIRE_FLIPBOOK_TEX_PATH := "res://terrain/cave/fire_flipbook_tex.res"
 
 const GEOFENCE_OVERWORLD_H := 56.5
 
@@ -41,6 +48,20 @@ static var _crystal_striation_tex: ImageTexture = null
 static var _crystal_interior_tex: ImageTexture = null
 static var _fire_flipbook_tex: ImageTexture = null
 static var _fire_noise_tex: ImageTexture = null
+static var _cached_door_wall_mesh: ArrayMesh = null
+static var _cached_door_monolith_mesh: ArrayMesh = null
+
+
+static func _save_cached_res(res: Resource, path: String) -> void:
+	if res == null:
+		return
+	var dir_abs := ProjectSettings.globalize_path(path.get_base_dir())
+	if not DirAccess.dir_exists_absolute(dir_abs):
+		if path.begins_with("user://"):
+			DirAccess.make_dir_recursive_absolute(dir_abs)
+		else:
+			return
+	ResourceSaver.save(res, path, ResourceSaver.FLAG_COMPRESS)
 
 var _pending_crystal_props: Array[Dictionary] = []
 var _crystal_mat_cache := {}
@@ -49,6 +70,13 @@ var _cached_rock_mat: ShaderMaterial = null
 var _grass_shader_mat: ShaderMaterial = null
 var _flora_grass_node: Node3D = null
 var _cave_shell_chunks: Array[MeshInstance3D] = []
+var _cave_shell_shadow_proxy: MeshInstance3D = null
+var _zoned_mmis: Array = [[], [], [], [], []]
+var _zone_vis_state: Array[bool] = [true, true, true, true, true]
+var _lake_water_node: Node3D = null
+var _pool_water_node: Node3D = null
+var _stream_water_node: Node3D = null
+var _waterfall_node: Node3D = null
 var _cave_boulder_shapes: Array[Shape3D] = []
 var _slime_ref: Node3D = null
 var _pool_water_mat: ShaderMaterial = null
@@ -73,7 +101,6 @@ var _door_astrolabe_inner: Node3D = null
 var _door_relief_mat: ShaderMaterial = null
 const SN_SLIME_POS := &"slime_pos"
 const SN_SLIME_RADIUS := &"slime_radius"
-const SN_SLIME_HEIGHT := &"slime_height"
 const SN_SLIME_VEL := &"slime_vel"
 const SN_SLIME_SUBMERSION := &"slime_submersion"
 const SN_ACTIVE_WAKE_COUNT := &"active_wake_count"
@@ -99,7 +126,6 @@ var _water_ripple_submersion := 0.0
 var _water_ripple_pos := Vector3(9999.0, -9999.0, 9999.0)
 var _water_ripple_rad := 1.6
 var _water_uniforms_dirty := true
-var _last_grass_slime_pos := Vector3(1e9, 1e9, 1e9)
 
 # Zone & frustum culling node refs
 var _cave_shell: MeshInstance3D = null
@@ -179,11 +205,7 @@ static func is_subterranean_or_cutout(x: float, z: float, foot_y: float, overwor
 		return false
 
 	# 1. Inside either heightfield cutout (Entrance Outcrop or Skylight hole), always use SDF mesh
-	if CaveSDF.eval_mouth_patch_t(cl.x, cl.z) < 0.68:
-		return true
-	var sky_c: Vector3 = CaveLayout.SKYLIGHT["c"]
-	var d_sky: float = Vector2(cl.x - (sky_c.x - 0.8), cl.z - sky_c.z).length()
-	if d_sky < 11.2:
+	if CaveSDF.eval_mouth_patch_t(cl.x, cl.z) < 0.68 or CaveSDF.eval_sky_patch_t(cl.x, cl.z) < 0.68:
 		return true
 
 	# 2. If actor is up on the grassy mountain roof outside the cutouts, use overworld heightfield
@@ -375,7 +397,7 @@ static func sample_water_at(world_pos: Vector3, ground_y: float, is_subterranean
 		var r2_ow := world_pos.x * world_pos.x + world_pos.z * world_pos.z
 		if r2_ow > 1500.0 * 1500.0:
 			return {"in_water": true, "water_y": sl, "flow_vel": Vector3.ZERO}
-	if not is_subterranean and world_pos.z > 416.0 and world_pos.z < 556.0 and world_pos.x > -330.0 and world_pos.x < -140.0:
+	if not is_subterranean and world_pos.z > WorldLandmarks.RAT_WARREN_MOUTH.y + 1.0 and world_pos.z < WorldLandmarks.RAT_WARREN_MOUTH.y + 141.0 and absf(world_pos.x - WorldLandmarks.RAT_WARREN_MOUTH.x) < 95.0:
 		var sw_y := WorldLandmarks.RAT_SWAMP_WATER_Y
 		if ground_y < sw_y + 0.03 and world_pos.y < sw_y + 1.8:
 			return {"in_water": true, "water_y": sw_y, "flow_vel": Vector3.ZERO}
@@ -532,6 +554,10 @@ func _init_zone_culling_refs() -> void:
 					_vault_door_omni = ch as OmniLight3D
 					_vault_door_omni_base_pos = _vault_door_omni.position
 	_water_holder = get_node_or_null("CaveWater") as Node3D
+	_lake_water_node = _water_holder.get_node_or_null("UndergroundLakeWater") as Node3D if _water_holder != null else null
+	_pool_water_node = _water_holder.get_node_or_null("PoolWater") as Node3D if _water_holder != null else null
+	_stream_water_node = _water_holder.get_node_or_null("StreamWater") as Node3D if _water_holder != null else null
+	_waterfall_node = _water_holder.get_node_or_null("WaterfallRibbon") as Node3D if _water_holder != null else null
 	_shards_holder = get_node_or_null("CaveCrystalShards") as Node3D
 	_abyssal_holder = get_node_or_null("CaveAbyssalCrystalShards") as Node3D
 	_crystal_stones_node = get_node_or_null("CaveCrystalStones") as Node3D
@@ -557,6 +583,7 @@ func _init_zone_culling_refs() -> void:
 		var main_n := terrain_p.get_parent()
 		_ow_sun = main_n.get_node_or_null("Sun") as DirectionalLight3D if main_n != null else null
 	_zone_cull_mode = -1
+	_zone_vis_state = [false, false, false, false, false]
 	_last_cull_cam = Vector3(1e9, 1e9, 1e9)
 	_water_uniforms_dirty = true
 
@@ -584,6 +611,24 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 	var show_overworld := (target_mode != 2) or (d_mouth_2d < 85.0) or (d_skylight_2d < 60.0)
 	var hide_ocean_in_cave := (cave_factor > 0.70 and cl.z > 20.0 and cl.y < 40.0)
 
+	var zone_vis: Array[bool]
+	if target_mode == 1:
+		zone_vis = [
+			d_mouth_2d <= 125.0,
+			(d_mouth_2d <= 78.0) or (d_skylight_2d <= 72.0),
+			d_skylight_2d <= 85.0,
+			false,
+			false,
+		]
+	else:
+		zone_vis = [
+			(cl.z < 94.0) or (d_mouth_2d <= 98.0),
+			cl.z < 144.0,
+			(cl.z >= 12.0 and cl.z < 166.0 and cl.x > -72.0),
+			(cl.z >= 78.0) or (cl.x > -2.0),
+			(cl.x < -30.0 and cl.z >= 115.0) or (cl.x < -68.0),
+		]
+
 	if _zone_cull_mode != target_mode:
 		_zone_cull_mode = target_mode
 		if _lighting_rig != null:
@@ -592,12 +637,8 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 			_water_holder.visible = show_cave_interior
 		if _shards_holder != null:
 			_shards_holder.visible = show_cave_interior
-		if _abyssal_holder != null:
-			_abyssal_holder.visible = show_cave_interior
 		if _crystal_stones_node != null:
 			_crystal_stones_node.visible = show_cave_interior
-		if _abyssal_base_node != null:
-			_abyssal_base_node.visible = show_cave_interior
 		if _pebbles_node != null:
 			_pebbles_node.visible = show_cave_interior
 		if _speleothems_node != null:
@@ -606,12 +647,6 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 			_flora_node.visible = show_cave_interior
 		if _beams_node != null:
 			_beams_node.visible = show_cave_interior
-		if _door_node != null:
-			_door_node.visible = show_cave_interior
-		if _pedestal_node != null:
-			_pedestal_node.visible = show_cave_interior
-		if _geode_reward_node != null:
-			_geode_reward_node.visible = show_cave_interior
 
 		if _ow_terrain != null:
 			_ow_terrain.visible = show_overworld
@@ -630,6 +665,42 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 		if _ow_sun != null:
 			_ow_sun.visible = show_overworld
 
+	if _door_node != null:
+		var want_door := show_cave_interior and zone_vis[4]
+		if _door_node.visible != want_door:
+			_door_node.visible = want_door
+	if _pedestal_node != null:
+		var want_geo := show_cave_interior and zone_vis[2]
+		if _pedestal_node.visible != want_geo:
+			_pedestal_node.visible = want_geo
+	if _geode_reward_node != null:
+		var want_rew := show_cave_interior and zone_vis[2]
+		if _geode_reward_node.visible != want_rew:
+			_geode_reward_node.visible = want_rew
+	var want_abyss := show_cave_interior and (zone_vis[2] or zone_vis[3])
+	if _abyssal_holder != null and _abyssal_holder.visible != want_abyss:
+		_abyssal_holder.visible = want_abyss
+	if _abyssal_base_node != null and _abyssal_base_node.visible != want_abyss:
+		_abyssal_base_node.visible = want_abyss
+	if show_cave_interior:
+		if _lake_water_node != null and _lake_water_node.visible != zone_vis[3]:
+			_lake_water_node.visible = zone_vis[3]
+		var want_grotto_w := zone_vis[1] or zone_vis[2]
+		if _pool_water_node != null and _pool_water_node.visible != want_grotto_w:
+			_pool_water_node.visible = want_grotto_w
+		if _stream_water_node != null and _stream_water_node.visible != want_grotto_w:
+			_stream_water_node.visible = want_grotto_w
+		if _waterfall_node != null and _waterfall_node.visible != want_grotto_w:
+			_waterfall_node.visible = want_grotto_w
+		for zid in 5:
+			var zv := zone_vis[zid]
+			if _zone_vis_state[zid] != zv:
+				_zone_vis_state[zid] = zv
+				var arr: Array = _zoned_mmis[zid]
+				for mmi in arr:
+					if mmi != null and is_instance_valid(mmi) and (mmi as Node3D).visible != zv:
+						(mmi as Node3D).visible = zv
+
 	if _ow_water != null:
 		var want_ocean := show_overworld and not hide_ocean_in_cave
 		if _ow_water.visible != want_ocean:
@@ -637,46 +708,54 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 
 	# Always fine-tune SkylightKeySpot shadow pass & far exterior CaveShell shadows/visibility
 	if _skylight_spot != null:
-		var spot_in_range := show_cave_interior and d_skylight_2d < 72.0
+		var spot_in_range := show_cave_interior and zone_vis[1] and d_skylight_2d < 72.0
 		if _skylight_spot.visible != spot_in_range:
 			_skylight_spot.visible = spot_in_range
 	if show_cave_interior:
 		for omni in _accent_lights:
 			if omni != null:
-				var max_r := omni.omni_range + 42.0
-				omni.visible = cam_pos.distance_squared_to(omni.global_position) <= max_r * max_r
+				var ok_zone := true
+				if omni.name == "UndergroundLakeOmni":
+					ok_zone = zone_vis[3]
+				elif omni.name == "VaultDoorOmni":
+					ok_zone = zone_vis[4]
+				elif omni.name == "GeodeCrystalOmni":
+					ok_zone = zone_vis[2] or cl.x > -28.0
+				elif omni.name == "GrottoArchOmni":
+					ok_zone = zone_vis[1] or zone_vis[3]
+				var max_r := omni.omni_range + 16.0
+				omni.visible = ok_zone and cam_pos.distance_squared_to(omni.global_position) <= max_r * max_r
 	if _cave_shell != null:
-		var want_shell_shadow := (target_mode != 1 and d_skylight_2d < 32.0)
-		var target_shadow := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if want_shell_shadow else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if _cave_shell.cast_shadow != target_shadow:
-			_cave_shell.cast_shadow = target_shadow
-			for chunk_mi in _cave_shell_chunks:
-				if chunk_mi != null and is_instance_valid(chunk_mi):
-					chunk_mi.cast_shadow = target_shadow
+		var want_shell_shadow := (target_mode != 1 and d_skylight_2d < 34.0)
+		var want_mouth_shadow := (d_mouth_2d < 38.0)
 		var want_shell_vis := not (target_mode == 1 and d_mouth_2d > 125.0 and d_skylight_2d > 85.0)
 		if _cave_shell.visible != want_shell_vis:
 			_cave_shell.visible = want_shell_vis
+		if _cave_shell.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+			_cave_shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		if want_shell_vis:
 			for chunk_mi in _cave_shell_chunks:
 				if chunk_mi == null or not is_instance_valid(chunk_mi):
 					continue
 				var zid := int(chunk_mi.get_meta("zid", 0))
-				var cvis := true
-				if target_mode == 1:
-					match zid:
-						0:
-							cvis = (d_mouth_2d <= 125.0)
-						1:
-							cvis = (d_mouth_2d <= 78.0) or (d_skylight_2d <= 72.0)
-						2:
-							cvis = (d_skylight_2d <= 85.0)
-						_:
-							cvis = false
+				var cvis: bool = zone_vis[zid] if (zid >= 0 and zid < 5) else false
 				if chunk_mi.visible != cvis:
 					chunk_mi.visible = cvis
+				var c_sh := GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				if cvis:
+					if zid == 0 and want_mouth_shadow:
+						c_sh = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+					elif zid == 1 and want_shell_shadow and _cave_shell_shadow_proxy == null:
+						c_sh = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+				if chunk_mi.cast_shadow != c_sh:
+					chunk_mi.cast_shadow = c_sh
+		if _cave_shell_shadow_proxy != null and is_instance_valid(_cave_shell_shadow_proxy):
+			var want_proxy := want_shell_vis and want_shell_shadow and zone_vis[1]
+			if _cave_shell_shadow_proxy.visible != want_proxy:
+				_cave_shell_shadow_proxy.visible = want_proxy
 
-	# Gate deep vault brazier particles & heat-haze backbuffer copy behind cavern bend (cl.z < 62m or outdoors)
-	var want_vault_vfx := show_cave_interior and cl.z >= 62.0
+	# Gate deep vault brazier particles & heat-haze backbuffer copy behind cavern bend
+	var want_vault_vfx := show_cave_interior and zone_vis[4]
 	if _door_vfx_active != want_vault_vfx:
 		_door_vfx_active = want_vault_vfx
 		for gp in _door_particles:
@@ -723,27 +802,6 @@ func _process(delta: float) -> void:
 		var ow_w := parent.get_node_or_null("Water") as MeshInstance3D
 		if ow_w != null and ow_w.material_override is ShaderMaterial:
 			_ocean_water_mat = ow_w.material_override as ShaderMaterial
-
-	if _grass_shader_mat != null and _slime_ref != null and (_flora_node == null or _flora_node.visible):
-		var sp_g := _slime_ref.global_position
-		var g_scale := float(_slime_ref.get("slime_scale")) if "slime_scale" in _slime_ref else 1.0
-		var g_rad := maxf(2.15, g_scale * 2.25)
-		var g_h := maxf(2.4, g_scale * 2.65)
-		var g_belly := sp_g
-		if "model" in _slime_ref and _slime_ref.model != null:
-			var m_g: Variant = _slime_ref.model
-			var spr_x := 1.0 + (maxf(0.0, float(_slime_ref.get("spread_x"))) * 0.55 if "spread_x" in _slime_ref else 0.0)
-			g_rad = maxf(2.15, maxf(float(m_g.semi_a), float(m_g.semi_b)) * spr_x * 1.10)
-			g_h = maxf(2.0, float(m_g.full_height))
-			g_belly = sp_g - Vector3(0.0, float(m_g.rest_half_height) * g_scale * 0.45, 0.0)
-		var g_vel := Vector3.ZERO
-		if "motor" in _slime_ref and _slime_ref.motor != null and "velocity" in _slime_ref.motor:
-			g_vel = _slime_ref.motor.velocity
-		_last_grass_slime_pos = g_belly
-		_grass_shader_mat.set_shader_parameter(SN_SLIME_POS, g_belly)
-		_grass_shader_mat.set_shader_parameter(SN_SLIME_RADIUS, g_rad)
-		_grass_shader_mat.set_shader_parameter(SN_SLIME_HEIGHT, g_h)
-		_grass_shader_mat.set_shader_parameter(SN_SLIME_VEL, g_vel)
 
 	var active_water_slime: Node3D = _slime_ref
 	if active_water_slime != null:
@@ -1014,6 +1072,8 @@ func _clear_generated_children() -> void:
 	_pending_crystal_props.clear()
 	_crystal_mat_cache.clear()
 	_cave_shell_chunks.clear()
+	_cave_shell_shadow_proxy = null
+	_zoned_mmis = [[], [], [], [], []]
 	_cave_boulder_shapes.clear()
 	if not Engine.is_editor_hint() and is_inside_tree():
 		var parent := get_parent()
@@ -1080,14 +1140,109 @@ static func _cave_zone_for_world_pos(wp: Vector3) -> int:
 	return 4
 
 
+static func _build_decimated_shadow_mesh(src_verts: PackedVector3Array, src_indices: PackedInt32Array, grid_step: float = 0.92) -> ArrayMesh:
+	var inv := 1.0 / maxf(grid_step, 0.25)
+	var cell_to_idx: Dictionary = {}
+	var sum_pos: Array[Vector3] = []
+	var sum_cnt: Array[int] = []
+	var vmap := PackedInt32Array()
+	vmap.resize(src_verts.size())
+	for vi in src_verts.size():
+		var p := src_verts[vi]
+		var key := Vector3i(roundi(p.x * inv), roundi(p.y * inv), roundi(p.z * inv))
+		var ci: int = cell_to_idx.get(key, -1)
+		if ci < 0:
+			ci = sum_pos.size()
+			cell_to_idx[key] = ci
+			sum_pos.append(p)
+			sum_cnt.append(1)
+		else:
+			sum_pos[ci] += p
+			sum_cnt[ci] += 1
+		vmap[vi] = ci
+
+	var out_verts := PackedVector3Array()
+	out_verts.resize(sum_pos.size())
+	for i in sum_pos.size():
+		out_verts[i] = sum_pos[i] / float(sum_cnt[i])
+
+	var out_idx := PackedInt32Array()
+	var tri_n := src_indices.size() / 3
+	for ti in tri_n:
+		var b := ti * 3
+		var a := vmap[src_indices[b]]
+		var bb := vmap[src_indices[b + 1]]
+		var c := vmap[src_indices[b + 2]]
+		if a == bb or bb == c or a == c:
+			continue
+		out_idx.append(a)
+		out_idx.append(bb)
+		out_idx.append(c)
+
+	if out_idx.is_empty():
+		return null
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = out_verts
+	arr[Mesh.ARRAY_INDEX] = out_idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return mesh
+
+
+func _attach_shadow_proxy_node(shell: MeshInstance3D, sh_mesh: Mesh, aabb: AABB) -> void:
+	if sh_mesh == null:
+		return
+	var sp := MeshInstance3D.new()
+	sp.name = "CaveShellChunk_1_Shadow"
+	sp.mesh = sh_mesh
+	sp.layers = 2
+	sp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	sp.custom_aabb = aabb
+	sp.visible = false
+	shell.add_child(sp)
+	_cave_shell_shadow_proxy = sp
+
+
 func _build_chunked_cave_shell(shell: MeshInstance3D, cave_mesh: ArrayMesh, mat: Material) -> void:
 	_cave_shell_chunks.clear()
+	_cave_shell_shadow_proxy = null
 	if cave_mesh.get_surface_count() == 0:
 		return
 	var arrs := cave_mesh.surface_get_arrays(0)
 	var verts: PackedVector3Array = arrs[Mesh.ARRAY_VERTEX]
 	if verts.is_empty():
 		return
+
+	if ResourceLoader.exists(CAVE_SHELL_CHUNKS_PATH):
+		var cached := load(CAVE_SHELL_CHUNKS_PATH) as ArrayMesh
+		if cached != null and int(cached.get_meta("vert_count", -1)) == verts.size() and bool(cached.get_meta("has_shadow_proxy_v2", false)):
+			var zids: PackedInt32Array = cached.get_meta("zids", PackedInt32Array())
+			var aabbs: Array = cached.get_meta("aabbs", [])
+			var chunk_surf_n := zids.size()
+			if chunk_surf_n > 0 and chunk_surf_n <= cached.get_surface_count() and aabbs.size() == chunk_surf_n:
+				var z1_aabb := AABB()
+				for si in chunk_surf_n:
+					var c_mesh := ArrayMesh.new()
+					c_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cached.surface_get_arrays(si))
+					var chunk_mi := MeshInstance3D.new()
+					var zid := int(zids[si])
+					chunk_mi.name = "CaveShellChunk_%d" % zid
+					chunk_mi.set_meta("zid", zid)
+					chunk_mi.mesh = c_mesh
+					chunk_mi.material_override = mat
+					chunk_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+					chunk_mi.custom_aabb = aabbs[si] as AABB
+					if zid == 1:
+						z1_aabb = chunk_mi.custom_aabb
+					shell.add_child(chunk_mi)
+					_cave_shell_chunks.append(chunk_mi)
+				if cached.get_surface_count() > chunk_surf_n:
+					var sh_mesh := ArrayMesh.new()
+					sh_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cached.surface_get_arrays(chunk_surf_n))
+					_attach_shadow_proxy_node(shell, sh_mesh, z1_aabb)
+				return
+
 	var normals: PackedVector3Array = arrs[Mesh.ARRAY_NORMAL]
 	var colors: PackedColorArray = arrs[Mesh.ARRAY_COLOR]
 	var uvs: PackedVector2Array = arrs[Mesh.ARRAY_TEX_UV]
@@ -1118,6 +1273,10 @@ func _build_chunked_cave_shell(shell: MeshInstance3D, cave_mesh: ArrayMesh, mat:
 	var vmap_stamp := PackedInt32Array()
 	vmap_stamp.resize(verts.size())
 	var stamp := 0
+
+	var cache_pack := ArrayMesh.new()
+	var cache_zids := PackedInt32Array()
+	var cache_aabbs: Array[AABB] = []
 
 	for zid in 5:
 		var tris := zone_tris[zid]
@@ -1171,15 +1330,36 @@ func _build_chunked_cave_shell(shell: MeshInstance3D, cave_mesh: ArrayMesh, mat:
 
 		var c_mesh := ArrayMesh.new()
 		c_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrs)
+		var chunk_aabb := AABB(min_pt, max_pt - min_pt).grow(0.5)
 		var chunk_mi := MeshInstance3D.new()
 		chunk_mi.name = "CaveShellChunk_%d" % zid
 		chunk_mi.set_meta("zid", zid)
 		chunk_mi.mesh = c_mesh
 		chunk_mi.material_override = mat
 		chunk_mi.cast_shadow = shell.cast_shadow
-		chunk_mi.custom_aabb = AABB(min_pt, max_pt - min_pt).grow(0.5)
+		chunk_mi.custom_aabb = chunk_aabb
 		shell.add_child(chunk_mi)
 		_cave_shell_chunks.append(chunk_mi)
+
+		cache_pack.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, c_arrs)
+		cache_zids.append(zid)
+		cache_aabbs.append(chunk_aabb)
+		if zid == 1:
+			var sh_proxy := _build_decimated_shadow_mesh(c_verts, c_indices, 1.65)
+			if sh_proxy != null:
+				_attach_shadow_proxy_node(shell, sh_proxy, chunk_aabb)
+
+	if _cave_shell_shadow_proxy != null and _cave_shell_shadow_proxy.mesh is ArrayMesh:
+		var shm := _cave_shell_shadow_proxy.mesh as ArrayMesh
+		if shm.get_surface_count() > 0:
+			cache_pack.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, shm.surface_get_arrays(0))
+
+	if cache_pack.get_surface_count() > 0:
+		cache_pack.set_meta("vert_count", verts.size())
+		cache_pack.set_meta("zids", cache_zids)
+		cache_pack.set_meta("aabbs", cache_aabbs)
+		cache_pack.set_meta("has_shadow_proxy_v2", true)
+		_save_cached_res(cache_pack, CAVE_SHELL_CHUNKS_PATH)
 
 
 func _add_zoned_multimeshes(parent_node: Node3D, base_name: String, mesh: Mesh, xforms: Array, colors: Array, cast_shadow: GeometryInstance3D.ShadowCastingSetting, mat_ov: Material = null, vis_end: float = 0.0, vis_margin: float = 0.0, aabb_grow: float = 3.0) -> void:
@@ -1237,6 +1417,7 @@ func _add_zoned_multimeshes(parent_node: Node3D, base_name: String, mesh: Mesh, 
 			mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		mmi.custom_aabb = AABB(min_pt - center, max_pt - min_pt).grow(aabb_grow)
 		parent_node.add_child(mmi)
+		_zoned_mmis[zid].append(mmi)
 
 
 func _build_interior_lighting_rig() -> void:
@@ -1280,6 +1461,7 @@ func _build_interior_lighting_rig() -> void:
 	key_spot.spot_angle = 40.0
 	key_spot.spot_angle_attenuation = 2.05
 	key_spot.shadow_enabled = true
+	key_spot.light_cull_mask = 3
 	key_spot.shadow_bias = 0.08
 	key_spot.shadow_normal_bias = 0.2
 	key_spot.shadow_blur = 0.0
@@ -1739,6 +1921,57 @@ static func compute_cave_props(terrain_scene: Node3D, seed_val: int = 1337) -> D
 			var off_xz := Vector3(0.0, 0.0, 0.0) if s_idx == 0 else Vector3(cos(ang_c) * 0.55, 0.0, sin(ang_c) * 0.55)
 			crystal_xforms.append(Transform3D(b_c, w_base + off_xz))
 			crystal_colors.append(lcol)
+
+	# 2a-small. Scattered Small & Micro Crystal Fragments across Collapse Hall Spawn Mound,
+	# Hall Throat, Breakdown Fork, Split Crawlway, Stream Grotto, Geode Pocket & Deep Descent
+	# (sized sh = 0.24..0.58 so the super-small 0.36x cave-spawn slime and its split clones can forage immediately)
+	var frag_rng := RandomNumberGenerator.new()
+	frag_rng.seed = seed_val + 44117
+	var frag_zones := [
+		# Collapse Hall Spawn Mound & Skylight rim ring (immediate starter forage!)
+		[Vector3(-56.5, 21.4, 62.5), 2.0, 9.5, 18, 0.24, 0.42],
+		[Vector3(-60.5, 19.5, 70.0), 3.0, 13.5, 14, 0.26, 0.48],
+		# Hall Throat & Breakdown Fork
+		[Vector3(-42.0, 20.5, 51.0), 1.5, 7.5, 10, 0.28, 0.50],
+		[Vector3(-32.5, 23.5, 41.5), 1.5, 7.0, 8, 0.26, 0.48],
+		# Split-Slime Crawlway interior reward trail
+		[Vector3(-18.0, 21.2, 47.5), 0.4, 2.2, 5, 0.24, 0.38],
+		[Vector3(-8.0, 18.2, 51.5), 0.4, 2.2, 5, 0.24, 0.38],
+		# Stream Grotto & Geode Pocket floor fragments
+		[Vector3(-24.0, 17.2, 97.0), 1.0, 5.5, 8, 0.30, 0.54],
+		[Vector3(2.0, 15.2, 56.0), 1.5, 5.2, 10, 0.28, 0.54],
+		# Deep Descent & Abyssal Atrium floor fragments
+		[Vector3(36.0, 12.0, 82.0), 1.5, 6.5, 8, 0.32, 0.58],
+	]
+	for fz: Array in frag_zones:
+		var zc: Vector3 = fz[0]
+		var r_min: float = float(fz[1])
+		var r_max: float = float(fz[2])
+		var f_cnt: int = int(fz[3])
+		var sc_min: float = float(fz[4])
+		var sc_max: float = float(fz[5])
+		for fi in f_cnt:
+			var ang_f := (float(fi) / float(maxi(f_cnt, 1))) * TAU + frag_rng.randf_range(-0.28, 0.28)
+			var rad_f := lerpf(r_min, r_max, sqrt(frag_rng.randf()))
+			var lu_f := zc.x + cos(ang_f) * rad_f
+			var ls_f := zc.z + sin(ang_f) * rad_f
+			# Keep immediate spawn center (r < 1.8m) clear so the slime doesn't spawn overlapping a shard
+			if Vector2(lu_f - CaveLayout.SPAWN.x, ls_f - CaveLayout.SPAWN.z).length() < 1.85:
+				continue
+			if sdf.eval_cave_void_smooth(lu_f, zc.y + 1.1, ls_f) > -0.25:
+				continue
+			var fy_f := _sample_floor_y(sdf, lu_f, zc.y + 3.2, ls_f)
+			if absf(fy_f - zc.y) > 4.2:
+				continue
+			var w_frag := CaveLayout.to_world(Vector3(lu_f, fy_f - 0.04, ls_f))
+			var tilt_f := frag_rng.randf_range(0.06, 0.34)
+			var t_ang := frag_rng.randf() * TAU
+			var dir_f := Vector3(cos(t_ang) * sin(tilt_f), cos(tilt_f), sin(t_ang) * sin(tilt_f)).normalized()
+			var sh_f := frag_rng.randf_range(sc_min, sc_max)
+			var sw_f := sh_f * frag_rng.randf_range(0.96, 1.16)
+			var b_f := _basis_align_y(dir_f, frag_rng.randf() * TAU).scaled(Vector3(sw_f, sh_f, sw_f))
+			crystal_xforms.append(Transform3D(b_f, w_frag))
+			crystal_colors.append(palette[(fi + int(absf(zc.x))) % palette.size()])
 
 	# Dense Underwater Crystal Reef Groves across the Deep Abyssal Trench & Sculpted Underground Lake Depths
 	var pit_c: Vector3 = CaveLayout.LAKE_ABYSS_PIT["c"]
@@ -2325,6 +2558,11 @@ static func _get_crystal_striation_normal_tex() -> ImageTexture:
 static func _get_crystal_interior_tex() -> ImageTexture:
 	if _crystal_interior_tex != null:
 		return _crystal_interior_tex
+	if ResourceLoader.exists(CRYSTAL_INTERIOR_TEX_PATH):
+		var loaded := load(CRYSTAL_INTERIOR_TEX_PATH) as ImageTexture
+		if loaded != null:
+			_crystal_interior_tex = loaded
+			return _crystal_interior_tex
 	var size := 128
 	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
 	var rng := RandomNumberGenerator.new()
@@ -2390,6 +2628,7 @@ static func _get_crystal_interior_tex() -> ImageTexture:
 			img.set_pixel(x, y, Color(cleave, cell_bright, diag_veil, basalt_grain))
 	img.generate_mipmaps()
 	_crystal_interior_tex = ImageTexture.create_from_image(img)
+	_save_cached_res(_crystal_interior_tex, CRYSTAL_INTERIOR_TEX_PATH)
 	return _crystal_interior_tex
 
 
@@ -2653,7 +2892,8 @@ func _build_crystals(_rng: RandomNumberGenerator = null, props_data: Dictionary 
 		var col := colors[i] as Color
 		var rot_b := xf.basis.orthonormalized()
 		var sh := xf.basis.y.length()
-		var world_center := xf.origin + rot_b.y * (0.68 * sh)
+		var center_lift := 0.46 if sh < 0.72 else 0.68
+		var world_center := xf.origin + rot_b.y * (center_lift * sh)
 		var mat := _get_absorbable_crystal_material(col, 0.92, 3.4)
 		var mi := MeshInstance3D.new()
 		mi.name = "CaveCrystalShard_%d" % i
@@ -2672,7 +2912,7 @@ func _build_crystals(_rng: RandomNumberGenerator = null, props_data: Dictionary 
 			"half": Vector3(0.46, 0.56, 0.46),
 			"base_r": 0.44,
 			"sides": 6,
-			"vol": clampf(0.56 * sh * sh * sh, 0.35, 1.85),
+			"vol": clampf(0.56 * sh * sh * sh, 0.025, 1.85),
 		})
 
 
@@ -2896,6 +3136,19 @@ func _build_water_features() -> void:
 	_pool_water_mat = pool_mat
 	_lake_water_mat = lake_mat
 	_stream_water_mat = stream_mat
+
+	if _cached_water_meshes.is_empty() and ResourceLoader.exists(CAVE_WATER_MESHES_PATH):
+		var wc := load(CAVE_WATER_MESHES_PATH) as ArrayMesh
+		if wc != null:
+			var wkeys: PackedStringArray = wc.get_meta("keys", PackedStringArray())
+			if wkeys.size() == wc.get_surface_count():
+				for si in wc.get_surface_count():
+					var sm := ArrayMesh.new()
+					sm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wc.surface_get_arrays(si))
+					var smat := wc.surface_get_material(si)
+					if smat != null:
+						sm.surface_set_material(0, smat)
+					_cached_water_meshes[wkeys[si]] = sm
 
 	if _cached_water_meshes.has("pool"):
 		var p_mi := MeshInstance3D.new()
@@ -3379,6 +3632,22 @@ func _build_water_features() -> void:
 	wf_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	holder.add_child(wf_mi)
 
+	if not _cached_water_meshes.is_empty():
+		var wc_pack := ArrayMesh.new()
+		var wc_keys := PackedStringArray()
+		for k in ["pool", "lake", "stream", "waterfall", "waterfall_spout"]:
+			var cm := _cached_water_meshes.get(k, null) as Mesh
+			if cm != null and cm.get_surface_count() > 0:
+				var si_new := wc_pack.get_surface_count()
+				wc_pack.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cm.surface_get_arrays(0))
+				var cmat := cm.surface_get_material(0)
+				if cmat != null:
+					wc_pack.surface_set_material(si_new, cmat)
+				wc_keys.append(k)
+		if wc_pack.get_surface_count() > 0:
+			wc_pack.set_meta("keys", wc_keys)
+			_save_cached_res(wc_pack, CAVE_WATER_MESHES_PATH)
+
 
 func _build_pool_stream_bed_bins() -> Dictionary:
 	var bins := {}
@@ -3552,7 +3821,7 @@ func _build_speleothems(boulder_body: StaticBody3D, _rng: RandomNumberGenerator 
 	var spele_holder := Node3D.new()
 	spele_holder.name = "CaveSpeleothems"
 	add_child(spele_holder)
-	_add_zoned_multimeshes(spele_holder, "CaveSpeleothems", smesh, xforms, [], GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 115.0, 16.0, 4.0)
+	_add_zoned_multimeshes(spele_holder, "CaveSpeleothems", smesh, xforms, [], GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, null, 115.0, 16.0, 4.0)
 
 	if boulder_body != null:
 		var body_rid := boulder_body.get_rid()
@@ -3676,10 +3945,10 @@ func _build_flora(terrain_scene: Node3D, fallen_log_xf: Transform3D, _rng: Rando
 		return holder
 
 	_flora_grass_node = add_mm.call("MoundGrass", grass_mesh, _grass_shader_mat, grass_xf, false)
-	add_mm.call("MoundFerns", fern_mesh, null, fern_xf, true)
+	add_mm.call("MoundFerns", fern_mesh, null, fern_xf, false)
 	add_mm.call("MoundPlants", plant_mesh, null, plant_xf, false)
-	add_mm.call("MoundBushes", bush_mesh, null, bush_xf, true)
-	add_mm.call("LogShelfFungi", shelf_mesh, null, shelf_xf, true)
+	add_mm.call("MoundBushes", bush_mesh, null, bush_xf, false)
+	add_mm.call("LogShelfFungi", shelf_mesh, null, shelf_xf, false)
 	add_mm.call("GrottoMushrooms", grotto_mush_mesh, null, grotto_mush_xf, false)
 
 
@@ -4506,7 +4775,18 @@ static func _sample_door_wall_z_and_nrm(
 	return {"pos": p_relaxed, "nrm": d_nrm, "ao": sdf_ao, "curv": sdf_curv}
 
 
-static func _build_door_wall_integration_mesh(door_xf: Transform3D, debug_grid: Array = []) -> ArrayMesh:
+static func _build_door_wall_integration_mesh(door_xf: Transform3D, debug_grid: Array = [], use_cache: bool = false) -> ArrayMesh:
+	if use_cache:
+		if _cached_door_wall_mesh != null:
+			var cached_o: Vector3 = _cached_door_wall_mesh.get_meta("door_origin", Vector3.INF)
+			if cached_o.distance_to(door_xf.origin) < 0.01:
+				return _cached_door_wall_mesh
+		if ResourceLoader.exists(DOOR_WALL_MESH_PATH):
+			var loaded := load(DOOR_WALL_MESH_PATH) as ArrayMesh
+			if loaded != null and loaded.get_meta("door_origin", Vector3.INF).distance_to(door_xf.origin) < 0.01:
+				_cached_door_wall_mesh = loaded
+				return loaded
+
 	var st_wall := SurfaceTool.new()
 	st_wall.begin(Mesh.PRIMITIVE_TRIANGLES)
 
@@ -4728,7 +5008,13 @@ static func _build_door_wall_integration_mesh(door_xf: Transform3D, debug_grid: 
 		debug_grid.append(wall_pts)
 
 	st_wall.generate_tangents()
-	return st_wall.commit()
+	var built_mesh := st_wall.commit()
+	if built_mesh != null:
+		built_mesh.set_meta("door_origin", door_xf.origin)
+		if use_cache:
+			_cached_door_wall_mesh = built_mesh
+			_save_cached_res(built_mesh, DOOR_WALL_MESH_PATH)
+	return built_mesh
 
 
 static func _build_periodic_lattice(res: int, seed_val: int) -> PackedFloat32Array:
@@ -4775,6 +5061,11 @@ static func _sample_periodic_fbm(
 static func _get_fire_noise_tex() -> ImageTexture:
 	if _fire_noise_tex != null:
 		return _fire_noise_tex
+	if ResourceLoader.exists(FIRE_NOISE_TEX_PATH):
+		var loaded := load(FIRE_NOISE_TEX_PATH) as ImageTexture
+		if loaded != null:
+			_fire_noise_tex = loaded
+			return _fire_noise_tex
 	var size := 128
 	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
 	var g0 := _build_periodic_lattice(8, 7103)
@@ -4792,12 +5083,18 @@ static func _get_fire_noise_tex() -> ImageTexture:
 			img.set_pixel(x, y, Color(r, g, b, a))
 	img.generate_mipmaps()
 	_fire_noise_tex = ImageTexture.create_from_image(img)
+	_save_cached_res(_fire_noise_tex, FIRE_NOISE_TEX_PATH)
 	return _fire_noise_tex
 
 
 static func _get_fire_flipbook_tex() -> ImageTexture:
 	if _fire_flipbook_tex != null:
 		return _fire_flipbook_tex
+	if ResourceLoader.exists(FIRE_FLIPBOOK_TEX_PATH):
+		var loaded := load(FIRE_FLIPBOOK_TEX_PATH) as ImageTexture
+		if loaded != null:
+			_fire_flipbook_tex = loaded
+			return _fire_flipbook_tex
 	var tile_sz := 64
 	var grid_n := 4
 	var total_sz := tile_sz * grid_n # 256x256
@@ -4837,6 +5134,7 @@ static func _get_fire_flipbook_tex() -> ImageTexture:
 
 	img.generate_mipmaps()
 	_fire_flipbook_tex = ImageTexture.create_from_image(img)
+	_save_cached_res(_fire_flipbook_tex, FIRE_FLIPBOOK_TEX_PATH)
 	return _fire_flipbook_tex
 
 
@@ -5494,7 +5792,7 @@ func _build_ancient_big_door() -> void:
 	# Living Cavern Cliff & Overhanging Ogival Portal Hood integrated directly into CaveShell rock
 	var wall_int_mi := MeshInstance3D.new()
 	wall_int_mi.name = "DoorWallIntegrationMesh"
-	wall_int_mi.mesh = _build_door_wall_integration_mesh(door_xf)
+	wall_int_mi.mesh = _build_door_wall_integration_mesh(door_xf, [], true)
 	wall_int_mi.material_override = _get_cave_rock_material()
 	wall_int_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	door_root.add_child(wall_int_mi)
@@ -5506,317 +5804,333 @@ func _build_ancient_big_door() -> void:
 	var ember_shader := load("res://shaders/torch_ember.gdshader") as Shader
 	var haze_shader := load("res://shaders/torch_heat_haze.gdshader") as Shader
 
-	var st_main := SurfaceTool.new()
-	st_main.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# 2. Grounded Cut-Stone Threshold Sill & Organic Worn Flagstone Apron (zero glowing circuits or blocky tiles)
-	var floor_sdf := CaveSystem.get_sdf()
-	var sill_xs := [-2.68, 0.0, 2.68]
-	var sill_hx := [1.46, 1.40, 1.46]
-	for si in 3:
-		var sill_drop := -0.018 if si == 1 else 0.0
-		var sill_xf := Transform3D(Basis.IDENTITY, Vector3(float(sill_xs[si]), -0.26 + sill_drop, 0.44))
-		_add_sculpted_stone_to_st(st_main, sill_xf, float(sill_hx[si]), float(sill_hx[si]) * 0.98, 0.30, 0.78, 0.38, 0.0, 0.14 + float(si) * 0.23, 0.88, 0.68, 0.08, 0.018)
-
-	# Staggered courses of rounded, weathered flagstone pavers embedded deep into the Sanctum SDF floor
-	var apron_courses := [
-		# [z_center, half_depth, span_x, count, base_y_lift, outer_rock_blend]
-		[1.48, 0.44, 4.65, 5, 0.01, 0.18],
-		[2.32, 0.42, 5.05, 6, -0.01, 0.40],
-		[3.12, 0.38, 4.15, 5, -0.03, 0.68],
-	]
-	for ci in apron_courses.size():
-		var cspec: Array = apron_courses[ci]
-		var zc := float(cspec[0])
-		var hz_p := float(cspec[1])
-		var span_x := float(cspec[2])
-		var p_cnt := int(cspec[3])
-		var y_lift := float(cspec[4])
-		var rock_bl := float(cspec[5])
-		for pi in p_cnt:
-			var pf := (float(pi) + 0.5) / float(p_cnt)
-			var px := lerpf(-span_x, span_x, pf) + sin(float(ci * 7 + pi) * 1.9) * 0.10
-			var pz := zc + cos(float(pi * 5 + ci) * 1.7) * 0.07
-			var wp_p := door_world_pos + basis_door * Vector3(px, 0.0, pz)
-			var f_sample := CaveSystem.sample_sdf_floor_below(wp_p.x, wp_p.z, door_world_pos.y + 1.4, GEOFENCE_OVERWORLD_H)
-			var cave_floor_y := (f_sample.w - door_world_pos.y) if (floor_sdf != null and f_sample.w > -50.0) else (-0.16 - 0.06 * float(ci))
-			var stone_top := cave_floor_y + 0.042 + y_lift + sin(float(pi * 3 + ci) * 2.3) * 0.014
-			var hy_p := 0.24
-			var yaw_p := sin(float(pi * 11 + ci * 3)) * 0.08
-			var hx_p := (span_x / float(p_cnt)) * 0.88
-			var p_xf := Transform3D(Basis(Vector3.UP, yaw_p), Vector3(px, stone_top - hy_p, pz))
-			_add_sculpted_stone_to_st(st_main, p_xf, hx_p, hx_p * 0.94, hy_p, hz_p, 0.56, 0.0, 0.11 + float(pi) * 0.19 + float(ci) * 0.27, 0.86, 0.72, rock_bl, 0.028)
-
-	# 3. Classic Inverted-U (∩) Stone Archway: Vertical Pilasters, Impost Capitals, Rounded Voussoirs, Keystone & Recessed Spandrel Masonry
-	var arch_half_span := 3.55
-	var arch_spring_y := 6.20
-
-	# Tight inner recessed stone reveal following the clean inverted-U opening (zero wavy dark outer tube!)
-	var arch_u_steps := 44
-	var arch_v_segs := 10
-	var r_rev_off := 0.12
-	var r_rev_thk := 0.22
-	var z_rev_cen := 0.18
-	var z_rev_thk := 0.48
-	var rev_pts: Array = []
-	var rev_uvs: Array = []
-	var rev_cols: Array = []
-	var rev_outs: Array = []
-	var rev_phs: Array = []
-	for iu in range(arch_u_steps + 1):
-		var uf := float(iu) / float(arch_u_steps)
-		var fr := _round_arch_frame(uf, arch_half_span, arch_spring_y, -0.75)
-		var b_xy: Vector2 = fr["pos"]
-		var o_xy: Vector2 = fr["out"]
-		var ring_c := Vector3(b_xy.x + o_xy.x * r_rev_off, b_xy.y + o_xy.y * r_rev_off, z_rev_cen)
-		var rad_3d := Vector3(o_xy.x, o_xy.y, 0.0).normalized()
-		var rp: Array[Vector3] = []
-		var ruv: Array[Vector2] = []
-		var rc: Array[Color] = []
-		var ro: Array[Vector3] = []
-		var rph: Array[float] = []
-		for iv in arch_v_segs:
-			var vf := float(iv) / float(arch_v_segs)
-			var pa := vf * TAU
-			var cp := cos(pa)
-			var sp := sin(pa)
-			var sx := signf(cp) * pow(absf(cp), 0.76)
-			var sz := signf(sp) * pow(absf(sp), 0.76)
-			var p := ring_c + rad_3d * (sx * r_rev_thk) + Vector3(0.0, 0.0, sz * z_rev_thk)
-			var out_n := (rad_3d * (cp / r_rev_thk) + Vector3(0.0, 0.0, sp / z_rev_thk)).normalized()
-			var ao_v := 0.68 * lerpf(0.75, 1.0, clampf(0.5 + 0.5 * sz, 0.0, 1.0))
-			rp.append(p)
-			ruv.append(Vector2(vf, uf * 4.0))
-			rc.append(Color(ao_v, 0.35, 0.04, 1.0))
-			ro.append(out_n)
-			rph.append(uf * 0.9)
-		rev_pts.append(rp)
-		rev_uvs.append(ruv)
-		rev_cols.append(rc)
-		rev_outs.append(ro)
-		rev_phs.append(rph)
-	_emit_smooth_grid(st_main, rev_pts, rev_uvs, rev_cols, rev_outs, false, true, true, 0.0, rev_phs)
-
-	# Upper spandrel masonry wall sealing cleanly behind/above the semicircular arch into DoorWallIntegrationMesh (no void gaps)
-	var spandrel_rows := [
-		# [y_center, hy, half_x_span, count, rock_blend]
-		[9.75, 0.55, 4.75, 6, 0.36],
-		[10.75, 0.58, 4.15, 5, 0.54],
-		[11.75, 0.62, 2.95, 4, 0.74],
-	]
-	for sri in spandrel_rows.size():
-		var rspec: Array = spandrel_rows[sri]
-		var sy_c := float(rspec[0])
-		var hy_s := float(rspec[1])
-		var span_s := float(rspec[2])
-		var cnt_s := int(rspec[3])
-		var r_bl := float(rspec[4])
-		for sci in cnt_s:
-			var scf := (float(sci) + 0.5) / float(cnt_s)
-			var sx := lerpf(-span_s, span_s, scf)
-			var hx_s := (span_s / float(cnt_s)) * 1.08
-			var sp_xf := Transform3D(Basis.IDENTITY, Vector3(sx, sy_c, 0.34))
-			_add_sculpted_stone_to_st(st_main, sp_xf, hx_s, hx_s * 0.96, hy_s, 0.44, 0.46, 0.0, 0.19 + float(sci) * 0.21 + float(sri) * 0.17, 0.84, 0.62, r_bl, 0.028)
-
-	for side_f: float in [-1.0, 1.0]:
-		# Outer rock-cheek masonry spandrel tucking cleanly behind DoorWallIntegrationMesh along the straight jambs
-		for oji in 6:
-			var oy := -0.25 + float(oji) * 1.38
-			var o_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.82, oy, 0.32))
-			_add_sculpted_stone_to_st(st_main, o_xf, 0.56, 0.54, 0.74, 0.48, 0.50, 0.0, 0.33 + float(oji) * 0.18, 0.82, 0.62, 0.62, 0.032)
-
-		# Heavy carved stone base plinth anchored into cave floor (y = -0.82 .. +0.62m)
-		var plinth_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.18, -0.10, 0.48))
-		_add_sculpted_stone_to_st(st_main, plinth_xf, 0.74, 0.66, 0.74, 0.68, 0.42, 0.0, 0.18 + side_f * 0.07, 0.88, 0.64, 0.12, 0.024)
-		var plinth_cap_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.16, 0.64, 0.50))
-		_add_sculpted_stone_to_st(st_main, plinth_cap_xf, 0.68, 0.60, 0.16, 0.70, 0.42, 0.0, 0.34, 0.90, 0.68, 0.06, 0.018)
-
-		# 6 stacked sculpted ashlar jamb pilaster stones rising cleanly vertically from y = 0.78 to y = 5.95
-		var pil_y0 := 0.78
-		var pil_y1 := 5.95
-		var pil_courses := 6
-		var pil_step := (pil_y1 - pil_y0) / float(pil_courses)
-		for pi in pil_courses:
-			var cy := pil_y0 + (float(pi) + 0.5) * pil_step
-			var alt := 0.03 if (pi % 2 == 0) else -0.02
-			var cx := side_f * (arch_half_span + 0.58 + alt * 0.3)
-			var pil_xf := Transform3D(Basis.IDENTITY, Vector3(cx, cy, 0.50 + alt * 0.4))
-			_add_sculpted_stone_to_st(st_main, pil_xf, 0.58 + alt, 0.56 - alt * 0.4, pil_step * 0.51, 0.60 + alt * 0.5, 0.44, 0.0, 0.25 + float(pi) * 0.21 + side_f * 0.09, 0.90, 0.68, 0.06, 0.024)
-
-		# Carved projecting impost capital stone at spring line (y = 6.14m)
-		var imp_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span + 0.60), 6.14, 0.54))
-		_add_sculpted_stone_to_st(st_main, imp_xf, 0.60, 0.70, 0.22, 0.68, 0.42, 0.0, 0.67, 0.92, 0.70, 0.04, 0.020)
-
-		# 7 wedge-shaped sculpted stone voussoirs sweeping smoothly around the semi-circular arch crown
-		var voussoir_count := 7
-		var ang_key_half := 0.135
-		var ang_start := PI if side_f < 0.0 else 0.0
-		var ang_end := (PI * 0.5 + ang_key_half) if side_f < 0.0 else (PI * 0.5 - ang_key_half)
-		for vi in voussoir_count:
-			var aa := lerpf(ang_start, ang_end, float(vi) / float(voussoir_count))
-			var ab := lerpf(ang_start, ang_end, float(vi + 1) / float(voussoir_count))
-			var am := 0.5 * (aa + ab)
-			var out_2d := Vector2(cos(am), sin(am))
-			var r_mid := arch_half_span + 0.58 + (0.025 if (vi % 2 == 0) else -0.015)
-			var v_pos := Vector3(out_2d.x * r_mid, arch_spring_y + out_2d.y * r_mid, 0.54 + (0.025 if (vi % 2 == 1) else 0.0))
-			var pa_2d := Vector2(cos(aa) * arch_half_span, arch_spring_y + sin(aa) * arch_half_span)
-			var pb_2d := Vector2(cos(ab) * arch_half_span, arch_spring_y + sin(ab) * arch_half_span)
-			var tang_3d := Vector3(pb_2d.x - pa_2d.x, pb_2d.y - pa_2d.y, 0.0).normalized()
-			var out_3d := Vector3(out_2d.x, out_2d.y, 0.0).normalized()
-			if tang_3d.cross(out_3d).z < 0.0:
-				tang_3d = -tang_3d
-			var v_basis := Basis(tang_3d, out_3d, Vector3.BACK)
-			var seg_len := (arch_half_span + 0.58) * absf(ab - aa)
-			var hx_in := seg_len * 0.45
-			var hx_out := seg_len * 0.56
-			var v_xf := Transform3D(v_basis, v_pos)
-			_add_sculpted_stone_to_st(st_main, v_xf, hx_in, hx_out, 0.40, 0.54, 0.44, 0.0, 0.12 + float(vi) * 0.17 + side_f * 0.05, 0.90, 0.68, 0.06, 0.024)
-
-	# Heavy sculpted center keystone crowning the rounded arch apex (y ~ 10.34m)
-	var key_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, arch_spring_y + arch_half_span + 0.60, 0.62))
-	_add_sculpted_stone_to_st(st_main, key_xf, 0.44, 0.64, 0.68, 0.62, 0.42, 0.0, 0.89, 0.94, 0.70, 0.04, 0.026)
-
-	# 4. Heavy Kiln-Charred Ancient Oak Double Door Leaves (Inverted-U), Organic Forged Wrought-Iron Hardware
-	var door_bot_y := -0.06
-	# Solid dark backing slab behind the arch leaves so grooves never reveal empty void
-	var back_pts: Array = []
-	var back_uvs: Array = []
-	var back_cols: Array = []
-	var back_outs: Array = []
-	var back_phs: Array = []
-	for iy in 13:
-		var yf := float(iy) / 12.0
-		var row_p: Array[Vector3] = []
-		var row_uv: Array[Vector2] = []
-		var row_c: Array[Color] = []
-		var row_o: Array[Vector3] = []
-		var row_ph: Array[float] = []
-		for ix in 17:
-			var xf := float(ix) / 16.0
-			var px := lerpf(-arch_half_span - 0.10, arch_half_span + 0.10, xf)
-			var y_top := _round_arch_y_at_x(absf(px), arch_half_span, arch_spring_y) + 0.14
-			row_p.append(Vector3(px, lerpf(door_bot_y - 0.15, y_top, yf), 0.16))
-			row_uv.append(Vector2(xf, yf))
-			row_c.append(Color(0.36, 0.15, 0.0, 1.0))
-			row_o.append(Vector3.BACK)
-			row_ph.append(0.5)
-		back_pts.append(row_p)
-		back_uvs.append(row_uv)
-		back_cols.append(row_c)
-		back_outs.append(row_o)
-		back_phs.append(row_ph)
-	_emit_smooth_grid(st_main, back_pts, back_uvs, back_cols, back_outs, false, false, true, 1.0, back_phs)
-
-	for side_f: float in [-1.0, 1.0]:
-		# Sculpted coffered monolithic stone door leaf trimmed cleanly to the inverted-U arch
-		_add_planked_round_door_leaf_to_st(st_main, side_f, arch_half_span, arch_spring_y, door_bot_y, 0.34)
-
-		# Carved stone pivot bosses at top & bottom outer corners (authentic stone-door pivot architecture)
-		for piv_y: float in [door_bot_y + 0.38, arch_spring_y - 0.28]:
-			_add_sculpted_stone_to_st(st_main, Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span - 0.14), piv_y, 0.43)), 0.18, 0.18, 0.24, 0.075, 0.88, 1.0, 0.31, 0.88, 0.55, 0.0, 0.015)
-
-		# Heavy forged-iron drop-ring door handle / knocker (x = +-1.12m, y = 2.65m) mounted on a carved stone rosette
-		var ring_x := side_f * 1.12
-		var ring_bow := cos(clampf(1.12 / arch_half_span, 0.0, 1.0) * PI * 0.45) * 0.10
-		var ring_z := 0.34 + ring_bow
-		_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z), Vector3.BACK, 0.28, 0.065, 1.0, 0.38)
-		_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z + 0.05), Vector3.BACK, 0.095, 0.070, 2.0, 0.52)
-		_sculpt_smooth_torus_arc(st_main, Vector3(ring_x, 2.38, ring_z + 0.08), 0.195, 0.285, 0.095, 22, 8, 2.0, 0.62, 0.92, 0.45, 0.0)
-
-	# Carved stone central meeting astragal / rebate molding sealing the center seam
-	var seam_pts: Array[Vector3] = []
-	var seam_ra: Array[float] = []
-	var seam_rb: Array[float] = []
-	for si in 13:
-		var sy := lerpf(door_bot_y + 0.04, arch_spring_y + arch_half_span - 0.04, float(si) / 12.0)
-		seam_pts.append(Vector3(0.0, sy, 0.45))
-		seam_ra.append(0.115)
-		seam_rb.append(0.065)
-	_sculpt_lofted_tube(st_main, seam_pts, seam_ra, seam_rb, 10, 1.0, 0.19, 0.84, 0.90, 0.35, 0.0)
-
-	# Carved Stone Bas-Relief Concentric Seal Medallion across the center of the stone vault doors (y = 5.05m)
-	_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.45), 0.88, 1.06, 0.11, 32, 8, 1.0, 0.27, 0.88, 0.45, 0.0)
-	_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.46), 0.48, 0.62, 0.09, 26, 8, 1.0, 0.41, 0.90, 0.45, 0.0)
-	var esc_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, 5.05, 0.47))
-	_add_sculpted_stone_to_st(st_main, esc_xf, 0.34, 0.34, 0.34, 0.075, 0.92, 3.0, 0.44, 0.92, 0.72, 0.0, 0.008)
-	_add_domed_rivet_to_st(st_main, Vector3(0.0, 5.05, 0.56), Vector3.BACK, 0.14, 0.055, 3.0, 0.48)
-
-	# 5. Grounded Carved Stone & Forged Wrought-Iron Standing Braziers (ZERO hoops/bars above y = 3.04m!)
 	var torch_x_abs := door_w * 0.5 + 1.75 # 6.05m, centered inside the concave grotto shrine alcoves
 	var torch_z := 2.38
-	for side_f: float in [-1.0, 1.0]:
-		var tx := side_f * torch_x_abs
-		var tc_base := Vector3(tx, 0.0, torch_z)
 
-		# Grounded stepped octagonal stone plinth rooted below Sanctum floor (y = -0.68m .. 0.52m)
-		var ped_spine: Array[Vector3] = [
-			tc_base + Vector3(0.0, -0.68, 0.0),
-			tc_base + Vector3(0.0, -0.10, 0.0),
-			tc_base + Vector3(0.0, 0.18, 0.0),
-			tc_base + Vector3(0.0, 0.22, 0.0),
-			tc_base + Vector3(0.0, 0.48, 0.0),
-			tc_base + Vector3(0.0, 0.54, 0.0),
+	var main_mesh: ArrayMesh = null
+	if _cached_door_monolith_mesh != null:
+		if _cached_door_monolith_mesh.get_meta("door_origin", Vector3.INF).distance_to(door_world_pos) < 0.01:
+			main_mesh = _cached_door_monolith_mesh
+	if main_mesh == null and ResourceLoader.exists(DOOR_MONOLITH_MESH_PATH):
+		var loaded_mono := load(DOOR_MONOLITH_MESH_PATH) as ArrayMesh
+		if loaded_mono != null and loaded_mono.get_meta("door_origin", Vector3.INF).distance_to(door_world_pos) < 0.01:
+			_cached_door_monolith_mesh = loaded_mono
+			main_mesh = loaded_mono
+
+	if main_mesh == null:
+		var st_main := SurfaceTool.new()
+		st_main.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+		# 2. Grounded Cut-Stone Threshold Sill & Organic Worn Flagstone Apron (zero glowing circuits or blocky tiles)
+		var floor_sdf := CaveSystem.get_sdf()
+		var sill_xs := [-2.68, 0.0, 2.68]
+		var sill_hx := [1.46, 1.40, 1.46]
+		for si in 3:
+			var sill_drop := -0.018 if si == 1 else 0.0
+			var sill_xf := Transform3D(Basis.IDENTITY, Vector3(float(sill_xs[si]), -0.26 + sill_drop, 0.44))
+			_add_sculpted_stone_to_st(st_main, sill_xf, float(sill_hx[si]), float(sill_hx[si]) * 0.98, 0.30, 0.78, 0.38, 0.0, 0.14 + float(si) * 0.23, 0.88, 0.68, 0.08, 0.018)
+
+		# Staggered courses of rounded, weathered flagstone pavers embedded deep into the Sanctum SDF floor
+		var apron_courses := [
+			# [z_center, half_depth, span_x, count, base_y_lift, outer_rock_blend]
+			[1.48, 0.44, 4.65, 5, 0.01, 0.18],
+			[2.32, 0.42, 5.05, 6, -0.01, 0.40],
+			[3.12, 0.38, 4.15, 5, -0.03, 0.68],
 		]
-		var ped_ra: Array[float] = [0.90, 0.88, 0.86, 0.68, 0.64, 0.46]
-		_sculpt_lofted_tube(st_main, ped_spine, ped_ra, ped_ra, 8, 0.0, 0.22, 0.80, 0.90, 0.45, 0.46)
-		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 0.56, 0.0), 0.36, 0.54, 0.14, 20, 7, 0.0, 0.28, 0.88, 0.42, 0.08)
+		for ci in apron_courses.size():
+			var cspec: Array = apron_courses[ci]
+			var zc := float(cspec[0])
+			var hz_p := float(cspec[1])
+			var span_x := float(cspec[2])
+			var p_cnt := int(cspec[3])
+			var y_lift := float(cspec[4])
+			var rock_bl := float(cspec[5])
+			for pi in p_cnt:
+				var pf := (float(pi) + 0.5) / float(p_cnt)
+				var px := lerpf(-span_x, span_x, pf) + sin(float(ci * 7 + pi) * 1.9) * 0.10
+				var pz := zc + cos(float(pi * 5 + ci) * 1.7) * 0.07
+				var wp_p := door_world_pos + basis_door * Vector3(px, 0.0, pz)
+				var f_sample := CaveSystem.sample_sdf_floor_below(wp_p.x, wp_p.z, door_world_pos.y + 1.4, GEOFENCE_OVERWORLD_H)
+				var cave_floor_y := (f_sample.w - door_world_pos.y) if (floor_sdf != null and f_sample.w > -50.0) else (-0.16 - 0.06 * float(ci))
+				var stone_top := cave_floor_y + 0.042 + y_lift + sin(float(pi * 3 + ci) * 2.3) * 0.014
+				var hy_p := 0.24
+				var yaw_p := sin(float(pi * 11 + ci * 3)) * 0.08
+				var hx_p := (span_x / float(p_cnt)) * 0.88
+				var p_xf := Transform3D(Basis(Vector3.UP, yaw_p), Vector3(px, stone_top - hy_p, pz))
+				_add_sculpted_stone_to_st(st_main, p_xf, hx_p, hx_p * 0.94, hy_p, hz_p, 0.56, 0.0, 0.11 + float(pi) * 0.19 + float(ci) * 0.27, 0.86, 0.72, rock_bl, 0.028)
 
-		# 12-fluted tapered ancient stone column shaft rising to capital (y = 0.56m .. 2.24m)
-		var shaft_spine: Array[Vector3] = [
-			tc_base + Vector3(0.0, 0.56, 0.0),
-			tc_base + Vector3(0.0, 1.05, 0.0),
-			tc_base + Vector3(0.0, 1.65, 0.0),
-			tc_base + Vector3(0.0, 2.22, 0.0),
+		# 3. Classic Inverted-U (∩) Stone Archway: Vertical Pilasters, Impost Capitals, Rounded Voussoirs, Keystone & Recessed Spandrel Masonry
+		var arch_half_span := 3.55
+		var arch_spring_y := 6.20
+
+		# Tight inner recessed stone reveal following the clean inverted-U opening (zero wavy dark outer tube!)
+		var arch_u_steps := 44
+		var arch_v_segs := 10
+		var r_rev_off := 0.12
+		var r_rev_thk := 0.22
+		var z_rev_cen := 0.18
+		var z_rev_thk := 0.48
+		var rev_pts: Array = []
+		var rev_uvs: Array = []
+		var rev_cols: Array = []
+		var rev_outs: Array = []
+		var rev_phs: Array = []
+		for iu in range(arch_u_steps + 1):
+			var uf := float(iu) / float(arch_u_steps)
+			var fr := _round_arch_frame(uf, arch_half_span, arch_spring_y, -0.75)
+			var b_xy: Vector2 = fr["pos"]
+			var o_xy: Vector2 = fr["out"]
+			var ring_c := Vector3(b_xy.x + o_xy.x * r_rev_off, b_xy.y + o_xy.y * r_rev_off, z_rev_cen)
+			var rad_3d := Vector3(o_xy.x, o_xy.y, 0.0).normalized()
+			var rp: Array[Vector3] = []
+			var ruv: Array[Vector2] = []
+			var rc: Array[Color] = []
+			var ro: Array[Vector3] = []
+			var rph: Array[float] = []
+			for iv in arch_v_segs:
+				var vf := float(iv) / float(arch_v_segs)
+				var pa := vf * TAU
+				var cp := cos(pa)
+				var sp := sin(pa)
+				var sx := signf(cp) * pow(absf(cp), 0.76)
+				var sz := signf(sp) * pow(absf(sp), 0.76)
+				var p := ring_c + rad_3d * (sx * r_rev_thk) + Vector3(0.0, 0.0, sz * z_rev_thk)
+				var out_n := (rad_3d * (cp / r_rev_thk) + Vector3(0.0, 0.0, sp / z_rev_thk)).normalized()
+				var ao_v := 0.68 * lerpf(0.75, 1.0, clampf(0.5 + 0.5 * sz, 0.0, 1.0))
+				rp.append(p)
+				ruv.append(Vector2(vf, uf * 4.0))
+				rc.append(Color(ao_v, 0.35, 0.04, 1.0))
+				ro.append(out_n)
+				rph.append(uf * 0.9)
+			rev_pts.append(rp)
+			rev_uvs.append(ruv)
+			rev_cols.append(rc)
+			rev_outs.append(ro)
+			rev_phs.append(rph)
+		_emit_smooth_grid(st_main, rev_pts, rev_uvs, rev_cols, rev_outs, false, true, true, 0.0, rev_phs)
+
+		# Upper spandrel masonry wall sealing cleanly behind/above the semicircular arch into DoorWallIntegrationMesh (no void gaps)
+		var spandrel_rows := [
+			# [y_center, hy, half_x_span, count, rock_blend]
+			[9.75, 0.55, 4.75, 6, 0.36],
+			[10.75, 0.58, 4.15, 5, 0.54],
+			[11.75, 0.62, 2.95, 4, 0.74],
 		]
-		var shaft_ra: Array[float] = [0.43, 0.40, 0.38, 0.36]
-		_sculpt_lofted_tube(st_main, shaft_spine, shaft_ra, shaft_ra, 24, 0.0, 0.16, 0.84, 0.90, 0.40, 0.06, 0.055, 12.0, 0.0)
+		for sri in spandrel_rows.size():
+			var rspec: Array = spandrel_rows[sri]
+			var sy_c := float(rspec[0])
+			var hy_s := float(rspec[1])
+			var span_s := float(rspec[2])
+			var cnt_s := int(rspec[3])
+			var r_bl := float(rspec[4])
+			for sci in cnt_s:
+				var scf := (float(sci) + 0.5) / float(cnt_s)
+				var sx := lerpf(-span_s, span_s, scf)
+				var hx_s := (span_s / float(cnt_s)) * 1.08
+				var sp_xf := Transform3D(Basis.IDENTITY, Vector3(sx, sy_c, 0.34))
+				_add_sculpted_stone_to_st(st_main, sp_xf, hx_s, hx_s * 0.96, hy_s, 0.44, 0.46, 0.0, 0.19 + float(sci) * 0.21 + float(sri) * 0.17, 0.84, 0.62, r_bl, 0.028)
 
-		# Carved stone column capital & horizontal neck collar (y = 2.18m .. 2.50m)
-		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.20, 0.0), 0.32, 0.46, 0.12, 20, 7, 0.0, 0.36, 0.90, 0.42, 0.04)
-		var cap_spine: Array[Vector3] = [
-			tc_base + Vector3(0.0, 2.20, 0.0),
-			tc_base + Vector3(0.0, 2.36, 0.0),
-			tc_base + Vector3(0.0, 2.50, 0.0),
-		]
-		var cap_ra: Array[float] = [0.37, 0.48, 0.44]
-		_sculpt_lofted_tube(st_main, cap_spine, cap_ra, cap_ra, 8, 0.0, 0.42, 0.86, 0.92, 0.42, 0.04)
+		for side_f: float in [-1.0, 1.0]:
+			# Outer rock-cheek masonry spandrel tucking cleanly behind DoorWallIntegrationMesh along the straight jambs
+			for oji in 6:
+				var oy := -0.25 + float(oji) * 1.38
+				var o_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.82, oy, 0.32))
+				_add_sculpted_stone_to_st(st_main, o_xf, 0.56, 0.54, 0.74, 0.48, 0.50, 0.0, 0.33 + float(oji) * 0.18, 0.82, 0.62, 0.62, 0.032)
 
-		# 4 forged-iron scroll/strut brackets flaring underneath from capital to cradle the fire bowl (strictly <= y = 2.94m)
-		for bi in 4:
-			var ba := PI * 0.25 + float(bi) * (PI * 0.5)
-			var b_dir := Vector3(cos(ba), 0.0, sin(ba))
-			var lug_pts: Array[Vector3] = [
-				tc_base + Vector3(0.0, 2.24, 0.0) + b_dir * 0.36,
-				tc_base + Vector3(0.0, 2.44, 0.0) + b_dir * 0.58,
-				tc_base + Vector3(0.0, 2.68, 0.0) + b_dir * 0.78,
-				tc_base + Vector3(0.0, 2.92, 0.0) + b_dir * 0.86,
+			# Heavy carved stone base plinth anchored into cave floor (y = -0.82 .. +0.62m)
+			var plinth_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.18, -0.10, 0.48))
+			_add_sculpted_stone_to_st(st_main, plinth_xf, 0.74, 0.66, 0.74, 0.68, 0.42, 0.0, 0.18 + side_f * 0.07, 0.88, 0.64, 0.12, 0.024)
+			var plinth_cap_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * 4.16, 0.64, 0.50))
+			_add_sculpted_stone_to_st(st_main, plinth_cap_xf, 0.68, 0.60, 0.16, 0.70, 0.42, 0.0, 0.34, 0.90, 0.68, 0.06, 0.018)
+
+			# 6 stacked sculpted ashlar jamb pilaster stones rising cleanly vertically from y = 0.78 to y = 5.95
+			var pil_y0 := 0.78
+			var pil_y1 := 5.95
+			var pil_courses := 6
+			var pil_step := (pil_y1 - pil_y0) / float(pil_courses)
+			for pi in pil_courses:
+				var cy := pil_y0 + (float(pi) + 0.5) * pil_step
+				var alt := 0.03 if (pi % 2 == 0) else -0.02
+				var cx := side_f * (arch_half_span + 0.58 + alt * 0.3)
+				var pil_xf := Transform3D(Basis.IDENTITY, Vector3(cx, cy, 0.50 + alt * 0.4))
+				_add_sculpted_stone_to_st(st_main, pil_xf, 0.58 + alt, 0.56 - alt * 0.4, pil_step * 0.51, 0.60 + alt * 0.5, 0.44, 0.0, 0.25 + float(pi) * 0.21 + side_f * 0.09, 0.90, 0.68, 0.06, 0.024)
+
+			# Carved projecting impost capital stone at spring line (y = 6.14m)
+			var imp_xf := Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span + 0.60), 6.14, 0.54))
+			_add_sculpted_stone_to_st(st_main, imp_xf, 0.60, 0.70, 0.22, 0.68, 0.42, 0.0, 0.67, 0.92, 0.70, 0.04, 0.020)
+
+			# 7 wedge-shaped sculpted stone voussoirs sweeping smoothly around the semi-circular arch crown
+			var voussoir_count := 7
+			var ang_key_half := 0.135
+			var ang_start := PI if side_f < 0.0 else 0.0
+			var ang_end := (PI * 0.5 + ang_key_half) if side_f < 0.0 else (PI * 0.5 - ang_key_half)
+			for vi in voussoir_count:
+				var aa := lerpf(ang_start, ang_end, float(vi) / float(voussoir_count))
+				var ab := lerpf(ang_start, ang_end, float(vi + 1) / float(voussoir_count))
+				var am := 0.5 * (aa + ab)
+				var out_2d := Vector2(cos(am), sin(am))
+				var r_mid := arch_half_span + 0.58 + (0.025 if (vi % 2 == 0) else -0.015)
+				var v_pos := Vector3(out_2d.x * r_mid, arch_spring_y + out_2d.y * r_mid, 0.54 + (0.025 if (vi % 2 == 1) else 0.0))
+				var pa_2d := Vector2(cos(aa) * arch_half_span, arch_spring_y + sin(aa) * arch_half_span)
+				var pb_2d := Vector2(cos(ab) * arch_half_span, arch_spring_y + sin(ab) * arch_half_span)
+				var tang_3d := Vector3(pb_2d.x - pa_2d.x, pb_2d.y - pa_2d.y, 0.0).normalized()
+				var out_3d := Vector3(out_2d.x, out_2d.y, 0.0).normalized()
+				if tang_3d.cross(out_3d).z < 0.0:
+					tang_3d = -tang_3d
+				var v_basis := Basis(tang_3d, out_3d, Vector3.BACK)
+				var seg_len := (arch_half_span + 0.58) * absf(ab - aa)
+				var hx_in := seg_len * 0.45
+				var hx_out := seg_len * 0.56
+				var v_xf := Transform3D(v_basis, v_pos)
+				_add_sculpted_stone_to_st(st_main, v_xf, hx_in, hx_out, 0.40, 0.54, 0.44, 0.0, 0.12 + float(vi) * 0.17 + side_f * 0.05, 0.90, 0.68, 0.06, 0.024)
+
+		# Heavy sculpted center keystone crowning the rounded arch apex (y ~ 10.34m)
+		var key_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, arch_spring_y + arch_half_span + 0.60, 0.62))
+		_add_sculpted_stone_to_st(st_main, key_xf, 0.44, 0.64, 0.68, 0.62, 0.42, 0.0, 0.89, 0.94, 0.70, 0.04, 0.026)
+
+		# 4. Heavy Kiln-Charred Ancient Oak Double Door Leaves (Inverted-U), Organic Forged Wrought-Iron Hardware
+		var door_bot_y := -0.06
+		# Solid dark backing slab behind the arch leaves so grooves never reveal empty void
+		var back_pts: Array = []
+		var back_uvs: Array = []
+		var back_cols: Array = []
+		var back_outs: Array = []
+		var back_phs: Array = []
+		for iy in 13:
+			var yf := float(iy) / 12.0
+			var row_p: Array[Vector3] = []
+			var row_uv: Array[Vector2] = []
+			var row_c: Array[Color] = []
+			var row_o: Array[Vector3] = []
+			var row_ph: Array[float] = []
+			for ix in 17:
+				var xf := float(ix) / 16.0
+				var px := lerpf(-arch_half_span - 0.10, arch_half_span + 0.10, xf)
+				var y_top := _round_arch_y_at_x(absf(px), arch_half_span, arch_spring_y) + 0.14
+				row_p.append(Vector3(px, lerpf(door_bot_y - 0.15, y_top, yf), 0.16))
+				row_uv.append(Vector2(xf, yf))
+				row_c.append(Color(0.36, 0.15, 0.0, 1.0))
+				row_o.append(Vector3.BACK)
+				row_ph.append(0.5)
+			back_pts.append(row_p)
+			back_uvs.append(row_uv)
+			back_cols.append(row_c)
+			back_outs.append(row_o)
+			back_phs.append(row_ph)
+		_emit_smooth_grid(st_main, back_pts, back_uvs, back_cols, back_outs, false, false, true, 1.0, back_phs)
+
+		for side_f: float in [-1.0, 1.0]:
+			# Sculpted coffered monolithic stone door leaf trimmed cleanly to the inverted-U arch
+			_add_planked_round_door_leaf_to_st(st_main, side_f, arch_half_span, arch_spring_y, door_bot_y, 0.34)
+
+			# Carved stone pivot bosses at top & bottom outer corners (authentic stone-door pivot architecture)
+			for piv_y: float in [door_bot_y + 0.38, arch_spring_y - 0.28]:
+				_add_sculpted_stone_to_st(st_main, Transform3D(Basis.IDENTITY, Vector3(side_f * (arch_half_span - 0.14), piv_y, 0.43)), 0.18, 0.18, 0.24, 0.075, 0.88, 1.0, 0.31, 0.88, 0.55, 0.0, 0.015)
+
+			# Heavy forged-iron drop-ring door handle / knocker (x = +-1.12m, y = 2.65m) mounted on a carved stone rosette
+			var ring_x := side_f * 1.12
+			var ring_bow := cos(clampf(1.12 / arch_half_span, 0.0, 1.0) * PI * 0.45) * 0.10
+			var ring_z := 0.34 + ring_bow
+			_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z), Vector3.BACK, 0.28, 0.065, 1.0, 0.38)
+			_add_domed_rivet_to_st(st_main, Vector3(ring_x, 2.65, ring_z + 0.05), Vector3.BACK, 0.095, 0.070, 2.0, 0.52)
+			_sculpt_smooth_torus_arc(st_main, Vector3(ring_x, 2.38, ring_z + 0.08), 0.195, 0.285, 0.095, 22, 8, 2.0, 0.62, 0.92, 0.45, 0.0)
+
+		# Carved stone central meeting astragal / rebate molding sealing the center seam
+		var seam_pts: Array[Vector3] = []
+		var seam_ra: Array[float] = []
+		var seam_rb: Array[float] = []
+		for si in 13:
+			var sy := lerpf(door_bot_y + 0.04, arch_spring_y + arch_half_span - 0.04, float(si) / 12.0)
+			seam_pts.append(Vector3(0.0, sy, 0.45))
+			seam_ra.append(0.115)
+			seam_rb.append(0.065)
+		_sculpt_lofted_tube(st_main, seam_pts, seam_ra, seam_rb, 10, 1.0, 0.19, 0.84, 0.90, 0.35, 0.0)
+
+		# Carved Stone Bas-Relief Concentric Seal Medallion across the center of the stone vault doors (y = 5.05m)
+		_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.45), 0.88, 1.06, 0.11, 32, 8, 1.0, 0.27, 0.88, 0.45, 0.0)
+		_sculpt_smooth_torus_arc(st_main, Vector3(0.0, 5.05, 0.46), 0.48, 0.62, 0.09, 26, 8, 1.0, 0.41, 0.90, 0.45, 0.0)
+		var esc_xf := Transform3D(Basis.IDENTITY, Vector3(0.0, 5.05, 0.47))
+		_add_sculpted_stone_to_st(st_main, esc_xf, 0.34, 0.34, 0.34, 0.075, 0.92, 3.0, 0.44, 0.92, 0.72, 0.0, 0.008)
+		_add_domed_rivet_to_st(st_main, Vector3(0.0, 5.05, 0.56), Vector3.BACK, 0.14, 0.055, 3.0, 0.48)
+
+		# 5. Grounded Carved Stone & Forged Wrought-Iron Standing Braziers (ZERO hoops/bars above y = 3.04m!)
+		for side_f: float in [-1.0, 1.0]:
+			var tx := side_f * torch_x_abs
+			var tc_base := Vector3(tx, 0.0, torch_z)
+
+			# Grounded stepped octagonal stone plinth rooted below Sanctum floor (y = -0.68m .. 0.52m)
+			var ped_spine: Array[Vector3] = [
+				tc_base + Vector3(0.0, -0.68, 0.0),
+				tc_base + Vector3(0.0, -0.10, 0.0),
+				tc_base + Vector3(0.0, 0.18, 0.0),
+				tc_base + Vector3(0.0, 0.22, 0.0),
+				tc_base + Vector3(0.0, 0.48, 0.0),
+				tc_base + Vector3(0.0, 0.54, 0.0),
 			]
-			_sculpt_lofted_tube(st_main, lug_pts, [0.068, 0.072, 0.066, 0.056], [0.052, 0.056, 0.052, 0.046], 8, 2.0, float(bi) * 0.22, 0.86, 0.94, 0.45, 0.0)
+			var ped_ra: Array[float] = [0.90, 0.88, 0.86, 0.68, 0.64, 0.46]
+			_sculpt_lofted_tube(st_main, ped_spine, ped_ra, ped_ra, 8, 0.0, 0.22, 0.80, 0.90, 0.45, 0.46)
+			_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 0.56, 0.0), 0.36, 0.54, 0.14, 20, 7, 0.0, 0.28, 0.88, 0.42, 0.08)
 
-		# Wide shallow riveted wrought-iron fire cauldron bowl with recessed hollow fire basin (y = 2.48m .. 3.03m)
-		var bowl_spine: Array[Vector3] = [
-			tc_base + Vector3(0.0, 2.48, 0.0),
-			tc_base + Vector3(0.0, 2.64, 0.0),
-			tc_base + Vector3(0.0, 2.84, 0.0),
-			tc_base + Vector3(0.0, 3.01, 0.0),
-			tc_base + Vector3(0.0, 3.03, 0.0),
-			tc_base + Vector3(0.0, 2.92, 0.0),
-			tc_base + Vector3(0.0, 2.78, 0.0),
-			tc_base + Vector3(0.0, 2.73, 0.0),
-		]
-		var bowl_ra: Array[float] = [0.42, 0.64, 0.80, 0.87, 0.77, 0.69, 0.52, 0.05]
-		_sculpt_lofted_tube(st_main, bowl_spine, bowl_ra, bowl_ra, 24, 2.0, 0.45, 0.84, 0.94, 0.45, 0.0)
+			# 12-fluted tapered ancient stone column shaft rising to capital (y = 0.56m .. 2.24m)
+			var shaft_spine: Array[Vector3] = [
+				tc_base + Vector3(0.0, 0.56, 0.0),
+				tc_base + Vector3(0.0, 1.05, 0.0),
+				tc_base + Vector3(0.0, 1.65, 0.0),
+				tc_base + Vector3(0.0, 2.22, 0.0),
+			]
+			var shaft_ra: Array[float] = [0.43, 0.40, 0.38, 0.36]
+			_sculpt_lofted_tube(st_main, shaft_spine, shaft_ra, shaft_ra, 24, 0.0, 0.16, 0.84, 0.90, 0.40, 0.06, 0.055, 12.0, 0.0)
 
-		# TRUE HORIZONTAL (XZ-plane) iron rim band, tarnished bronze belly band & 12 domed rivets (nothing above rim!)
-		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0), 0.78, 0.90, 0.11, 24, 7, 2.0, 0.55, 0.92, 0.45, 0.0)
-		_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.68, 0.0), 0.62, 0.71, 0.08, 24, 6, 3.0, 0.40, 0.90, 0.45, 0.0)
-		for ri in 12:
-			var ra := float(ri) * (TAU / 12.0)
-			var r_dir := Vector3(cos(ra), 0.0, sin(ra))
-			_add_domed_rivet_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0) + r_dir * 0.885, r_dir, 0.036, 0.026, 2.0, 0.12 + float(ri) * 0.08)
+			# Carved stone column capital & horizontal neck collar (y = 2.18m .. 2.50m)
+			_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.20, 0.0), 0.32, 0.46, 0.12, 20, 7, 0.0, 0.36, 0.90, 0.42, 0.04)
+			var cap_spine: Array[Vector3] = [
+				tc_base + Vector3(0.0, 2.20, 0.0),
+				tc_base + Vector3(0.0, 2.36, 0.0),
+				tc_base + Vector3(0.0, 2.50, 0.0),
+			]
+			var cap_ra: Array[float] = [0.37, 0.48, 0.44]
+			_sculpt_lofted_tube(st_main, cap_spine, cap_ra, cap_ra, 8, 0.0, 0.42, 0.86, 0.92, 0.42, 0.04)
 
-	st_main.generate_tangents()
-	var main_mesh := st_main.commit()
+			# 4 forged-iron scroll/strut brackets flaring underneath from capital to cradle the fire bowl (strictly <= y = 2.94m)
+			for bi in 4:
+				var ba := PI * 0.25 + float(bi) * (PI * 0.5)
+				var b_dir := Vector3(cos(ba), 0.0, sin(ba))
+				var lug_pts: Array[Vector3] = [
+					tc_base + Vector3(0.0, 2.24, 0.0) + b_dir * 0.36,
+					tc_base + Vector3(0.0, 2.44, 0.0) + b_dir * 0.58,
+					tc_base + Vector3(0.0, 2.68, 0.0) + b_dir * 0.78,
+					tc_base + Vector3(0.0, 2.92, 0.0) + b_dir * 0.86,
+				]
+				_sculpt_lofted_tube(st_main, lug_pts, [0.068, 0.072, 0.066, 0.056], [0.052, 0.056, 0.052, 0.046], 8, 2.0, float(bi) * 0.22, 0.86, 0.94, 0.45, 0.0)
+
+			# Wide shallow riveted wrought-iron fire cauldron bowl with recessed hollow fire basin (y = 2.48m .. 3.03m)
+			var bowl_spine: Array[Vector3] = [
+				tc_base + Vector3(0.0, 2.48, 0.0),
+				tc_base + Vector3(0.0, 2.64, 0.0),
+				tc_base + Vector3(0.0, 2.84, 0.0),
+				tc_base + Vector3(0.0, 3.01, 0.0),
+				tc_base + Vector3(0.0, 3.03, 0.0),
+				tc_base + Vector3(0.0, 2.92, 0.0),
+				tc_base + Vector3(0.0, 2.78, 0.0),
+				tc_base + Vector3(0.0, 2.73, 0.0),
+			]
+			var bowl_ra: Array[float] = [0.42, 0.64, 0.80, 0.87, 0.77, 0.69, 0.52, 0.05]
+			_sculpt_lofted_tube(st_main, bowl_spine, bowl_ra, bowl_ra, 24, 2.0, 0.45, 0.84, 0.94, 0.45, 0.0)
+
+			# TRUE HORIZONTAL (XZ-plane) iron rim band, tarnished bronze belly band & 12 domed rivets (nothing above rim!)
+			_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0), 0.78, 0.90, 0.11, 24, 7, 2.0, 0.55, 0.92, 0.45, 0.0)
+			_sculpt_horizontal_ring_to_st(st_main, tc_base + Vector3(0.0, 2.68, 0.0), 0.62, 0.71, 0.08, 24, 6, 3.0, 0.40, 0.90, 0.45, 0.0)
+			for ri in 12:
+				var ra := float(ri) * (TAU / 12.0)
+				var r_dir := Vector3(cos(ra), 0.0, sin(ra))
+				_add_domed_rivet_to_st(st_main, tc_base + Vector3(0.0, 2.97, 0.0) + r_dir * 0.885, r_dir, 0.036, 0.026, 2.0, 0.12 + float(ri) * 0.08)
+
+		st_main.generate_tangents()
+		main_mesh = st_main.commit()
+		if main_mesh != null:
+			main_mesh.set_meta("door_origin", door_world_pos)
+			_cached_door_monolith_mesh = main_mesh
+			_save_cached_res(main_mesh, DOOR_MONOLITH_MESH_PATH)
 	var main_mi := MeshInstance3D.new()
 	main_mi.name = "DoorMonolithMesh"
 	main_mi.mesh = main_mesh
