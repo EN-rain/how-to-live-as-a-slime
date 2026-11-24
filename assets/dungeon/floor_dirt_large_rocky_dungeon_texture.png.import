@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://vi5jc5ai6yls"
-path="res://.godot/imported/floor_dirt_large_rocky_dungeon_texture.png-bad7903a0298346c4989fb4707db72dd.ctex"
+path.s3tc="res://.godot/imported/floor_dirt_large_rocky_dungeon_texture.png-bad7903a0298346c4989fb4707db72dd.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "9a714bc33f4314ea4520009f20b048a8"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/dungeon/floor_dirt_large_rocky_dungeon_texture.png"
-dest_files=["res://.godot/imported/floor_dirt_large_rocky_dungeon_texture.png-bad7903a0298346c4989fb4707db72dd.ctex"]
+dest_files=["res://.godot/imported/floor_dirt_large_rocky_dungeon_texture.png-bad7903a0298346c4989fb4707db72dd.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

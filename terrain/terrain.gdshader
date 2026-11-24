@@ -30,6 +30,9 @@ uniform vec2 village_radii_xz = vec2(106.4, 92.4);
 uniform vec2 u_webwood_center = vec2(-410.0, 480.0);
 uniform vec2 u_webwood_trail_start = vec2(-335.0, 390.0);
 uniform vec2 u_webwood_trail_bend = vec2(-396.0, 468.0);
+uniform sampler2D u_trail_map : hint_default_black, filter_linear;
+uniform vec4 u_trail_map_bounds = vec4(-1200.0, -900.0, 2600.0, 3800.0);
+uniform float u_has_trail_map = 0.0;
 uniform vec3 mud_light_color : source_color = vec3(0.52, 0.42, 0.31);
 uniform vec3 mud_dark_color : source_color = vec3(0.36, 0.28, 0.20);
 uniform vec3 mud_verge_color : source_color = vec3(0.44, 0.40, 0.27);
@@ -174,34 +177,42 @@ void fragment() {
 
 	// 1c. Winding Continent Dirt Trails linking World Hubs (zero fragment noise!)
 	if (v_world_y > beach_height + 0.8 && v_world_y < 105.0) {
-		float road_wobble = (v_macro_pat - 0.5) * 8.0 + (v_med_pat - 0.5) * 3.2;
-		float d_path = 1e6;
-		// Central Basin South Edge -> Crystal Cave trail (cleanly outside central sandbox test structures)
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, -17.0), vec2(-16.0, -28.0)));
-		// Central Basin NW Edge -> Webwood Spider Forest (clean valley routing, zero hillside gashes!)
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, 15.0), vec2(-105.0, 140.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-105.0, 140.0), vec2(-220.0, 260.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-220.0, 260.0), u_webwood_trail_start));
-		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, u_webwood_trail_bend));
-		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_bend, u_webwood_center));
-		// Central Basin NE Edge -> SE Gnawed Ruins & Rat Warren Eastward Swamp Road (routes around SW lagoon to South Causeway)
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(12.0, 15.0), vec2(215.0, 185.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(215.0, 185.0), vec2(375.0, 442.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(375.0, 442.0), vec2(460.0, 442.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 490.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 434.0)));
-		// Webwood Junction -> Skeleton Crypt Western Road
-		d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, vec2(-530.0, 316.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-530.0, 316.0), vec2(-820.0, 344.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(-820.0, 344.0), vec2(-820.0, 326.0)));
-		// Central Basin East Edge -> Wolf Pack Crag NE Foothill Trail (enters through wide South amphitheater throat)
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(18.0, -14.0), vec2(150.0, -125.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(150.0, -125.0), vec2(286.0, -218.0)));
-		d_path = min(d_path, seg_dist2d(v_xz, vec2(286.0, -218.0), vec2(290.0, -240.0)));
-		if (d_path < 8.5) {
-			float p_dist = d_path + road_wobble * 0.14;
-			float trail_mask = (1.0 - smoothstep(2.2, 4.4, p_dist)) * smoothstep(0.55, 0.82, v_upness);
-			float rut_core = 1.0 - smoothstep(0.6, 2.2, p_dist);
+		float trail_mask = 0.0;
+		float rut_core = 0.0;
+		if (u_has_trail_map > 0.5) {
+			vec2 tm_uv = (v_xz - u_trail_map_bounds.xy) / u_trail_map_bounds.zw;
+			if (tm_uv.x >= 0.0 && tm_uv.x <= 1.0 && tm_uv.y >= 0.0 && tm_uv.y <= 1.0) {
+				vec2 tm = texture(u_trail_map, tm_uv).rg;
+				trail_mask = tm.r * smoothstep(0.55, 0.82, v_upness);
+				rut_core = tm.g;
+			}
+		} else {
+			float road_wobble = (v_macro_pat - 0.5) * 8.0 + (v_med_pat - 0.5) * 3.2;
+			float d_path = 1e6;
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, -17.0), vec2(-16.0, -28.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-6.0, 15.0), vec2(-105.0, 140.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-105.0, 140.0), vec2(-220.0, 260.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-220.0, 260.0), u_webwood_trail_start));
+			d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, u_webwood_trail_bend));
+			d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_bend, u_webwood_center));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(12.0, 15.0), vec2(215.0, 185.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(215.0, 185.0), vec2(375.0, 442.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(375.0, 442.0), vec2(460.0, 442.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 490.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(460.0, 442.0), vec2(460.0, 434.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, u_webwood_trail_start, vec2(-530.0, 316.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-530.0, 316.0), vec2(-820.0, 344.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(-820.0, 344.0), vec2(-820.0, 326.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(18.0, -14.0), vec2(150.0, -125.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(150.0, -125.0), vec2(286.0, -218.0)));
+			d_path = min(d_path, seg_dist2d(v_xz, vec2(286.0, -218.0), vec2(290.0, -240.0)));
+			if (d_path < 8.5) {
+				float p_dist = d_path + road_wobble * 0.14;
+				trail_mask = (1.0 - smoothstep(2.2, 4.4, p_dist)) * smoothstep(0.55, 0.82, v_upness);
+				rut_core = 1.0 - smoothstep(0.6, 2.2, p_dist);
+			}
+		}
+		if (trail_mask > 0.002) {
 			vec3 trail_col = mix(mud_verge_color * 0.72, mix(mud_dark_color, mud_light_color, v_med_pat * 0.65), smoothstep(0.15, 0.70, trail_mask));
 			trail_col = mix(trail_col, mud_dark_color * 0.76, rut_core * 0.45);
 			g_col = mix(g_col, trail_col, trail_mask * 0.88);

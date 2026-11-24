@@ -157,6 +157,8 @@ const SN_SPLIT_AMT := &"uSplitAmt"
 const SN_SPLIT_DIR := &"uSplitDir"
 const SN_SPLIT_NECK_RADIUS := &"uSplitNeckRadius"
 const SN_SPLIT_PARTNER_LOCAL := &"uSplitPartnerLocal"
+const SN_NOISE_TEX := &"uNoiseTex"
+const SN_HAS_NOISE_TEX := &"uHasNoiseTex"
 
 # Engulf drape state.
 var engulf_target = null
@@ -258,6 +260,42 @@ var _proxy_cs: CollisionShape3D
 var _core_mesh: MeshInstance3D
 static var _core_sphere_mesh: SphereMesh
 static var _core_material: StandardMaterial3D
+static var _noise_tex_3d: ImageTexture3D = null
+
+
+static func _get_noise_tex_3d() -> ImageTexture3D:
+	if _noise_tex_3d != null:
+		return _noise_tex_3d
+	const SZ := 32
+	var n1 := FastNoiseLite.new()
+	n1.seed = 4099
+	n1.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n1.fractal_type = FastNoiseLite.FRACTAL_NONE
+	n1.frequency = 0.085
+	var n2 := FastNoiseLite.new()
+	n2.seed = 8191
+	n2.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n2.fractal_type = FastNoiseLite.FRACTAL_NONE
+	n2.frequency = 0.11
+	var slices1: Array[Image] = n1.get_seamless_image_3d(SZ, SZ, SZ)
+	var slices2: Array[Image] = n2.get_seamless_image_3d(SZ, SZ, SZ)
+	if slices1.size() == SZ and slices2.size() == SZ:
+		var rg_slices: Array[Image] = []
+		rg_slices.resize(SZ)
+		var px_count := SZ * SZ
+		for z in SZ:
+			var b1 := slices1[z].get_data()
+			var b2 := slices2[z].get_data()
+			var rg := PackedByteArray()
+			rg.resize(px_count * 2)
+			for i in px_count:
+				rg[i * 2] = b1[i]
+				rg[i * 2 + 1] = b2[i]
+			rg_slices[z] = Image.create_from_data(SZ, SZ, false, Image.FORMAT_RG8, rg)
+		var tex := ImageTexture3D.new()
+		if tex.create(Image.FORMAT_RG8, SZ, SZ, SZ, false, rg_slices) == OK:
+			_noise_tex_3d = tex
+	return _noise_tex_3d
 ## Posture key whose hull was last proven clear; steady ticks skip the re-check.
 var _verified_key := -1
 var fission_clone: Slime = null
@@ -461,6 +499,10 @@ func _ready() -> void:
 		body.material_override = _mat
 		set_shader_param(SN_MELT, tuning.melt)
 		set_shader_param(SN_REF_RADIUS, tuning.reference_radius)
+		var ntex := _get_noise_tex_3d()
+		if ntex != null:
+			set_shader_param(SN_NOISE_TEX, ntex)
+			set_shader_param(SN_HAS_NOISE_TEX, 1.0)
 		_reset_array_uniforms()
 
 	if not is_budding:

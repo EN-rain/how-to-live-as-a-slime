@@ -55,7 +55,8 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 		"shadow_idx": 0,
 		"grass_mult": 0.20,
 		"vis_grass": 50.0,
-		"vis_trees": 130.0,
+		"vis_trees_3d": 75.0,
+		"vis_trees": 280.0,
 		"vis_rocks": 120.0,
 		"vis_veg": 100.0,
 		"dof_far": false,
@@ -74,7 +75,8 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 		"shadow_idx": 1,
 		"grass_mult": 0.55,
 		"vis_grass": 105.0,
-		"vis_trees": 380.0,
+		"vis_trees_3d": 115.0,
+		"vis_trees": 420.0,
 		"vis_rocks": 300.0,
 		"vis_veg": 260.0,
 		"dof_far": false,
@@ -93,7 +95,8 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 		"shadow_idx": 2,
 		"grass_mult": 1.0,
 		"vis_grass": 160.0,
-		"vis_trees": 550.0,
+		"vis_trees_3d": 150.0,
+		"vis_trees": 600.0,
 		"vis_rocks": 450.0,
 		"vis_veg": 400.0,
 		"dof_far": false,
@@ -112,7 +115,8 @@ const QUALITY_PRESETS: Array[Dictionary] = [
 		"shadow_idx": 3,
 		"grass_mult": 1.3,
 		"vis_grass": 220.0,
-		"vis_trees": 750.0,
+		"vis_trees_3d": 190.0,
+		"vis_trees": 800.0,
 		"vis_rocks": 600.0,
 		"vis_veg": 550.0,
 		"dof_far": true,
@@ -777,9 +781,13 @@ func _apply_to_active_scene() -> void:
 
 func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void:
 	var vis_grass: float = clampf(float(preset.get("vis_grass", 160.0)) * 0.56, 28.0, 95.0)
-	var vis_trees: float = float(preset.get("vis_trees", 550.0))
+	var vis_trees_3d: float = float(preset.get("vis_trees_3d", 115.0))
+	var vis_trees: float = float(preset.get("vis_trees", 420.0))
 	var vis_rocks: float = float(preset.get("vis_rocks", 450.0))
 	var vis_veg: float = float(preset.get("vis_veg", 400.0))
+
+	if "_active_grass_vis_end" in terrain:
+		terrain.set("_active_grass_vis_end", vis_grass)
 
 	var apply_group_range := func(node: Node, range_val: float) -> void:
 		if node is GeometryInstance3D:
@@ -792,7 +800,7 @@ func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void
 				var hd := float(gi.get_meta("half_diag", 0.0))
 				gi.visibility_range_end = (range_val + hd) if range_val > 0.0 else 0.0
 
-	# Grass & Wispy grass (chunks are children named Chunk_*)
+	# Grass & Wispy grass (chunks are children named Chunk_* / RegChunk_*)
 	var grass_node := terrain.get_node_or_null("Grass")
 	if grass_node:
 		apply_group_range.call(grass_node, vis_grass)
@@ -800,11 +808,24 @@ func _apply_terrain_visibility_ranges(terrain: Node, preset: Dictionary) -> void
 	if wispy_node:
 		apply_group_range.call(wispy_node, vis_grass)
 
-	# Trees
+	# Trees: near 3D Chunk_* + distant billboard ImpostorChunk_*
 	var trees_node := terrain.get_node_or_null("Trees")
 	if trees_node:
 		for child in trees_node.get_children():
-			apply_group_range.call(child, vis_trees)
+			for sub in child.get_children():
+				if sub is GeometryInstance3D:
+					var gi := sub as GeometryInstance3D
+					var hd := float(gi.get_meta("half_diag", 0.0))
+					if sub.name.begins_with("ImpostorChunk_"):
+						gi.visibility_range_begin = vis_trees_3d if vis_trees_3d > 0.0 else 0.0
+						gi.visibility_range_begin_margin = 10.0
+						gi.visibility_range_end = (vis_trees + hd) if vis_trees > 0.0 else 0.0
+						gi.visibility_range_end_margin = 25.0
+					elif sub.name.begins_with("Chunk_"):
+						gi.visibility_range_begin = 0.0
+						gi.visibility_range_begin_margin = 0.0
+						gi.visibility_range_end = (vis_trees_3d + hd) if vis_trees_3d > 0.0 else vis_trees + hd
+						gi.visibility_range_end_margin = 10.0
 
 	# Rocks
 	var rocks_node := terrain.get_node_or_null("Rocks")
@@ -847,6 +868,10 @@ func _fast_update_terrain_grass(terrain: Node, target_grass: int) -> void:
 			var cache_dict: Dictionary = terrain.get("_cached_grass_data")
 			if cache_dict != null:
 				cache_dict.clear()
+		var q_idx := clampi(int(get_value("graphics", "quality_preset", 0)), 0, QUALITY_PRESETS.size() - 1)
+		var preset := QUALITY_PRESETS[q_idx]
+		if "_active_grass_vis_end" in terrain:
+			terrain.set("_active_grass_vis_end", clampf(float(preset.get("vis_grass", 160.0)) * 0.56, 28.0, 95.0))
 		if grass_node != null and terrain.has_method("_build_grass_multimesh"):
 			grass_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			terrain.call("_build_grass_multimesh", grass_node)

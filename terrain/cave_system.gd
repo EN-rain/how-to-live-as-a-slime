@@ -510,12 +510,11 @@ func rebuild_cave(terrain_scene: Node3D, seed_val: int = 1337, build_colliders: 
 	# P2: Kitbashed entrance talus, brow crags, breakdown mound boulders & deadwood tree/log
 	var fallen_log_xf := _build_boulders_and_trees(terrain_scene, boulder_body, rock_meshes, rock_shapes, null, props_data)
 
-	# P3: Active atmosphere controller and sunbeam shafts
+	# P3: Active atmosphere controller (sunbeam cone meshes removed to avoid floor intersection halo)
 	if not Engine.is_editor_hint():
 		var atmos := CaveAtmosphere.new()
 		atmos.name = "CaveAtmosphere"
 		add_child(atmos)
-	_build_skylight_beams_and_dust()
 
 	# P4: Radiating Geode crystal clusters + tiny Fork crawlway mouth teaser crystals + Deep Abyssal Shard Bundle
 	_pending_crystal_props.clear()
@@ -706,11 +705,9 @@ func update_zone_culling(cam_pos: Vector3, cl: Vector3, cave_factor: float) -> v
 		if _ow_water.visible != want_ocean:
 			_ow_water.visible = want_ocean
 
-	# Always fine-tune SkylightKeySpot shadow pass & far exterior CaveShell shadows/visibility
-	if _skylight_spot != null:
-		var spot_in_range := show_cave_interior and zone_vis[1] and d_skylight_2d < 72.0
-		if _skylight_spot.visible != spot_in_range:
-			_skylight_spot.visible = spot_in_range
+	# SkylightKeySpot disabled to prevent hard circular shadow/cone halo on the cave floor
+	if _skylight_spot != null and _skylight_spot.visible:
+		_skylight_spot.visible = false
 	if show_cave_interior:
 		for omni in _accent_lights:
 			if omni != null:
@@ -1455,7 +1452,8 @@ func _build_interior_lighting_rig() -> void:
 	var sky_from := CaveLayout.to_world(Vector3(sky_c_spot.x + 2.0, 64.0, sky_c_spot.z - 2.0))
 	var sky_aim := CaveLayout.to_world(Vector3(mound_c_spot.x, 20.0, mound_c_spot.z))
 	key_spot.light_color = Color(1.0, 0.95, 0.84, 1.0)
-	key_spot.light_energy = 3.4
+	key_spot.light_energy = 0.0
+	key_spot.visible = false
 	key_spot.spot_range = 74.0
 	key_spot.spot_attenuation = 0.85
 	key_spot.spot_angle = 40.0
@@ -1488,6 +1486,9 @@ func _build_interior_lighting_rig() -> void:
 		omni.omni_range = float(a[4])
 		omni.omni_attenuation = float(a[5])
 		omni.shadow_enabled = false
+		omni.distance_fade_enabled = true
+		omni.distance_fade_begin = 55.0
+		omni.distance_fade_length = 20.0
 		rig.add_child(omni)
 
 

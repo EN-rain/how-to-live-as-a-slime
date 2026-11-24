@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://dn5j1sen2slpj"
-path="res://.godot/imported/rubble_half_dungeon_texture.png-de302e7a4379242f6186dd06197ea755.ctex"
+path.s3tc="res://.godot/imported/rubble_half_dungeon_texture.png-de302e7a4379242f6186dd06197ea755.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "9a714bc33f4314ea4520009f20b048a8"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/dungeon/rubble_half_dungeon_texture.png"
-dest_files=["res://.godot/imported/rubble_half_dungeon_texture.png-de302e7a4379242f6186dd06197ea755.ctex"]
+dest_files=["res://.godot/imported/rubble_half_dungeon_texture.png-de302e7a4379242f6186dd06197ea755.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

@@ -15,6 +15,8 @@ uniform float uDispersion : hint_range(0.0, 2.0, 0.01) = 0.85;
 uniform float uRefractionStrength : hint_range(0.0, 1.0, 0.01) = 0.32;
 uniform float uRippleNoiseScale = 1.65;
 uniform float uBubbleNoiseScale = 3.5;
+uniform sampler3D uNoiseTex : filter_linear, repeat_enable;
+uniform float uHasNoiseTex = 0.0;
 
 group_uniforms Surface;
 uniform float uRimStrength : hint_range(0.0, 2.0, 0.01) = 1.15;
@@ -706,7 +708,7 @@ void fragment() {
 	vec3 worldNormal = normalize(vWorldNormal);
 
 	vec3 noiseCoord = vWorldPosition * uRippleNoiseScale + vec3(0.0, -t * 0.45, t * 0.25);
-	float n1 = snoise(noiseCoord);
+	float n1 = (uHasNoiseTex > 0.5) ? (texture(uNoiseTex, noiseCoord * 0.16).r * 2.0 - 1.0) : snoise(noiseCoord);
 	float n2 = (uShaderLOD > 0.5) ? n1 : (0.62 * n1 + 0.38 * sin(noiseCoord.x * 3.1 - t * 0.65 + n1 * 2.1) * cos(noiseCoord.z * 2.9 + noiseCoord.y * 2.2 + t * 0.5));
 
 	float ndotv = max(0.0, dot(normal, viewDir));
@@ -754,7 +756,7 @@ void fragment() {
 	vec3 localP = vLocalPos * uBubbleNoiseScale + vec3(0.0, t * 0.6, 0.0);
 	float bubbleField = 0.0;
 	if (uShaderLOD < 0.5) {
-		float bubbleNoise1 = snoise(localP);
+		float bubbleNoise1 = (uHasNoiseTex > 0.5) ? (texture(uNoiseTex, localP * 0.18).g * 2.0 - 1.0) : snoise(localP);
 		float bubbleNoise2 = 0.5 + 0.5 * (sin(localP.x * 7.3 + localP.y * 5.1 + n1 * 4.2) * cos(localP.z * 7.9 - t * 2.4));
 		bubbleField = smoothstep(0.55, 0.72, bubbleNoise1) * smoothstep(0.4, 0.6, bubbleNoise2);
 	}

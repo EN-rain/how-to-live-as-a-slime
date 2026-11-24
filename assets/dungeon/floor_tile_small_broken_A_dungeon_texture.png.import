@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bfgprfr0fdoip"
-path="res://.godot/imported/floor_tile_small_broken_A_dungeon_texture.png-72abad56b959d8cd5f85b50862478983.ctex"
+path.s3tc="res://.godot/imported/floor_tile_small_broken_A_dungeon_texture.png-72abad56b959d8cd5f85b50862478983.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "9a714bc33f4314ea4520009f20b048a8"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/dungeon/floor_tile_small_broken_A_dungeon_texture.png"
-dest_files=["res://.godot/imported/floor_tile_small_broken_A_dungeon_texture.png-72abad56b959d8cd5f85b50862478983.ctex"]
+dest_files=["res://.godot/imported/floor_tile_small_broken_A_dungeon_texture.png-72abad56b959d8cd5f85b50862478983.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

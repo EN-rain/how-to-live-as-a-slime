@@ -240,9 +240,10 @@ ambient_color = Color(0.38, 0.43, 0.52, 1)
 ambient_color_energy = 0.65
 
 [node name="SkylightKeySpot" type="SpotLight3D" parent="CaveLighting" unique_id=860007959]
+visible = false
 transform = Transform3D(0.3394403, -0.93869025, 0.060340777, 0, 0.064149484, 0.9979403, -0.94062763, -0.33874115, 0.02177492, -106.36557, 64, -86.2332)
 light_color = Color(1, 0.95, 0.84, 1)
-light_energy = 3.4
+light_energy = 0.0
 shadow_enabled = true
 shadow_bias = 0.08
 shadow_normal_bias = 0.2

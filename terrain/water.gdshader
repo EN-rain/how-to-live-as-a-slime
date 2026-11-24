@@ -108,7 +108,8 @@ vec3 sample_ocean_interaction_waves(vec2 world_xz, float time_val, out bool any_
 	}
 
 	if (active_wake_count > 0) {
-		for (int i = 0; i < 12; i++) {
+		int n_wakes = min(active_wake_count, 12);
+		for (int i = 0; i < n_wakes; i++) {
 			vec4 wp = wake_points[i];
 			float age = wp.y;
 			if (age >= 0.0 && age < 2.6 && wp.w > 0.01) {

@@ -401,6 +401,9 @@ func _add_flicker_light(parent: Node3D, pos: Vector3, col: Color, energy: float,
 	l.omni_range = radius
 	l.omni_attenuation = 1.35
 	l.shadow_enabled = false
+	l.distance_fade_enabled = true
+	l.distance_fade_begin = 48.0
+	l.distance_fade_length = 16.0
 	parent.add_child(l)
 	_flicker_lights.append({
 		"light": l,

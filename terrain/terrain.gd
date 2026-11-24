@@ -445,8 +445,10 @@ func _ready() -> void:
 		var settings := SlimeSettings.get_or_create()
 		if settings != null:
 			var q_idx := clampi(int(settings.get_value("graphics", "quality_preset", 0)), 0, SlimeSettings.QUALITY_PRESETS.size() - 1)
-			var g_mult := float(settings.get_value("graphics", "grass_density", SlimeSettings.QUALITY_PRESETS[q_idx]["grass_mult"]))
+			var preset: Dictionary = SlimeSettings.QUALITY_PRESETS[q_idx]
+			var g_mult := float(settings.get_value("graphics", "grass_density", preset["grass_mult"]))
 			grass_count = clampi(int(roundf(float(authored_base) * g_mult)), 0, 250000)
+			_active_grass_vis_end = clampf(float(preset.get("vis_grass", 160.0)) * 0.56, 28.0, 95.0)
 		if get_parent() != null:
 			var slime_node := get_parent().get_node_or_null("Slime") as Node3D
 			if slime_node != null:
@@ -521,6 +523,7 @@ func rebuild() -> void:
 			var rtex := load("res://assets/nature/Rocks_Diffuse.png") as Texture2D
 			if rtex != null:
 				tmat.set_shader_parameter("detail_rock_tex", rtex)
+			_sync_trail_map_to_material(tmat)
 	if grass_node != null:
 		_apply_webwood_shader_uniforms(grass_node.material_override as ShaderMaterial, _webwood_layout)
 	if wispy_node != null:
@@ -535,6 +538,8 @@ func rebuild() -> void:
 	if terrain_node != null:
 		terrain_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_build_terrain_mesh(terrain_node)
+		if not Engine.is_editor_hint():
+			_build_terrain_occluder()
 
 	VillageBuilder.ensure_dock_layout(self)
 
@@ -542,7 +547,13 @@ func rebuild() -> void:
 		_build_water_mesh(water_node)
 
 	_cached_grass_data.clear()
+	_cached_regional_grass_data.clear()
 	_cached_grass_count = -1
+	if not Engine.is_editor_hint() and _active_grass_vis_end <= 0.0:
+		var settings_r := SlimeSettings.get_or_create()
+		if settings_r != null:
+			var q_idx_r := clampi(int(settings_r.get_value("graphics", "quality_preset", 0)), 0, SlimeSettings.QUALITY_PRESETS.size() - 1)
+			_active_grass_vis_end = clampf(float(SlimeSettings.QUALITY_PRESETS[q_idx_r].get("vis_grass", 160.0)) * 0.56, 28.0, 95.0)
 	if grass_node != null:
 		grass_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_build_grass_multimesh(grass_node)
@@ -1569,39 +1580,84 @@ func _build_water_mesh(water_node: MeshInstance3D) -> void:
 			uvs[idx] = Vector2(x * 0.005, z * 0.005)
 			idx += 1
 
-	var ii := 0
+	var coast_split_ring := clampi(int(round(float(rings) * 0.55)), 1, rings - 1)
+	var near_indices := PackedInt32Array()
+	var far_indices := PackedInt32Array()
+	near_indices.resize(coast_split_ring * segments * 6)
+	far_indices.resize((rings - coast_split_ring) * segments * 6)
+
+	var nii := 0
+	var fii := 0
 	for ir in range(rings):
 		var r0 := ir * row_count
 		var r1 := (ir + 1) * row_count
+		var is_far := ir >= coast_split_ring
 		for iseg in range(segments):
 			var i00 := r0 + iseg
 			var i10 := i00 + 1
 			var i01 := r1 + iseg
 			var i11 := i01 + 1
+			if is_far:
+				far_indices[fii] = i00
+				far_indices[fii + 1] = i01
+				far_indices[fii + 2] = i10
+				far_indices[fii + 3] = i10
+				far_indices[fii + 4] = i01
+				far_indices[fii + 5] = i11
+				fii += 6
+			else:
+				near_indices[nii] = i00
+				near_indices[nii + 1] = i01
+				near_indices[nii + 2] = i10
+				near_indices[nii + 3] = i10
+				near_indices[nii + 4] = i01
+				near_indices[nii + 5] = i11
+				nii += 6
 
-			indices[ii] = i00
-			indices[ii + 1] = i01
-			indices[ii + 2] = i10
-
-			indices[ii + 3] = i10
-			indices[ii + 4] = i01
-			indices[ii + 5] = i11
-			ii += 6
-
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	arr[Mesh.ARRAY_NORMAL] = normals
-	arr[Mesh.ARRAY_TEX_UV] = uvs
-	arr[Mesh.ARRAY_INDEX] = indices
-
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-
-	water_node.mesh = mesh
+	var near_arr := []
+	near_arr.resize(Mesh.ARRAY_MAX)
+	near_arr[Mesh.ARRAY_VERTEX] = verts
+	near_arr[Mesh.ARRAY_NORMAL] = normals
+	near_arr[Mesh.ARRAY_TEX_UV] = uvs
+	near_arr[Mesh.ARRAY_INDEX] = near_indices
+	var near_mesh := ArrayMesh.new()
+	near_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, near_arr)
+	water_node.mesh = near_mesh
 	water_node.position = Vector3.ZERO
 	water_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	water_node.custom_aabb = AABB(Vector3(-r_out, -30.0, -r_out), Vector3(r_out * 2.0, 60.0, r_out * 2.0))
+	water_node.custom_aabb = AABB(Vector3(-r_coast_end, -30.0, -r_coast_end), Vector3(r_coast_end * 2.0, 60.0, r_coast_end * 2.0))
+
+	# Outer horizon rings without hint_depth_texture (skips depth buffer copy when inland)
+	var far_arr := []
+	far_arr.resize(Mesh.ARRAY_MAX)
+	far_arr[Mesh.ARRAY_VERTEX] = verts
+	far_arr[Mesh.ARRAY_NORMAL] = normals
+	far_arr[Mesh.ARRAY_TEX_UV] = uvs
+	far_arr[Mesh.ARRAY_INDEX] = far_indices
+	var far_mesh := ArrayMesh.new()
+	far_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, far_arr)
+	var far_node := get_node_or_null("WaterFar") as MeshInstance3D
+	if far_node == null:
+		far_node = MeshInstance3D.new()
+		far_node.name = "WaterFar"
+		add_child(far_node)
+	far_node.mesh = far_mesh
+	far_node.position = Vector3.ZERO
+	far_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	far_node.custom_aabb = AABB(Vector3(-r_out, -30.0, -r_out), Vector3(r_out * 2.0, 60.0, r_out * 2.0))
+	var far_shader := load("res://terrain/water_far.gdshader") as Shader
+	if far_shader != null:
+		var far_mat := far_node.material_override as ShaderMaterial
+		if far_mat == null or far_mat.shader != far_shader:
+			far_mat = ShaderMaterial.new()
+			far_mat.shader = far_shader
+		var near_mat := water_node.material_override as ShaderMaterial
+		if near_mat != null:
+			for pname in [&"deep_color", &"wave_speed", &"roughness_val"]:
+				var pval = near_mat.get_shader_parameter(pname)
+				if pval != null:
+					far_mat.set_shader_parameter(pname, pval)
+		far_node.material_override = far_mat
 
 
 func _make_grass_tuft_mesh() -> ArrayMesh:
@@ -1706,6 +1762,140 @@ var _grass_map_w: int = 0
 var _grass_map_h: int = 0
 
 
+func _build_terrain_occluder() -> void:
+	var occ_inst := get_node_or_null("TerrainOccluder") as OccluderInstance3D
+	if occ_inst == null:
+		occ_inst = OccluderInstance3D.new()
+		occ_inst.name = "TerrainOccluder"
+		add_child(occ_inst)
+	const OCC_N := 48
+	var half := terrain_size * 0.5
+	var step := terrain_size / float(OCC_N)
+	var row := OCC_N + 1
+	var verts := PackedVector3Array()
+	verts.resize(row * row)
+	for iz in range(row):
+		var vz := -half + float(iz) * step
+		for ix in range(row):
+			var vx := -half + float(ix) * step
+			# Conservative lower-bound height so coarse occluder triangles never poke above terrain valleys
+			var hs := step * 0.5
+			var vy := minf(
+				minf(sample_height(vx, vz), sample_height(vx - hs, vz)),
+				minf(sample_height(vx + hs, vz), minf(sample_height(vx, vz - hs), sample_height(vx, vz + hs)))
+			) - 8.0
+			verts[iz * row + ix] = Vector3(vx, vy, vz)
+	var indices := PackedInt32Array()
+	indices.resize(OCC_N * OCC_N * 6)
+	var ii := 0
+	for iz in range(OCC_N):
+		var z0 := -half + float(iz) * step
+		var z1 := z0 + step
+		for ix in range(OCC_N):
+			var x0 := -half + float(ix) * step
+			var x1 := x0 + step
+			if enable_cave and (is_point_in_cave_cutout(x0, z0) or is_point_in_cave_cutout(x1, z0) or is_point_in_cave_cutout(x0, z1) or is_point_in_cave_cutout(x1, z1)):
+				continue
+			var i00 := iz * row + ix
+			var i10 := i00 + 1
+			var i01 := i00 + row
+			var i11 := i01 + 1
+			indices[ii] = i00; indices[ii + 1] = i10; indices[ii + 2] = i01
+			indices[ii + 3] = i10; indices[ii + 4] = i11; indices[ii + 5] = i01
+			ii += 6
+	indices.resize(ii)
+	var arr_occ := ArrayOccluder3D.new()
+	arr_occ.set_arrays(verts, indices)
+	occ_inst.occluder = arr_occ
+
+
+var _trail_map_tex: ImageTexture = null
+var _trail_map_sig: String = ""
+
+
+static func _seg_dist_2d(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var h := clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-6), 0.0, 1.0)
+	return p.distance_to(a + ab * h)
+
+
+func _sync_trail_map_to_material(tmat: ShaderMaterial) -> void:
+	if tmat == null:
+		return
+	var w_c: Vector2 = _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+	var w_s: Vector2 = _webwood_layout.get("trail_start", WorldLandmarks.SPIDER_TRAIL_START)
+	var w_b: Vector2 = _webwood_layout.get("trail_bend", WorldLandmarks.SPIDER_TRAIL_BEND)
+	var sig := "%d|%.1f,%.1f|%.1f,%.1f|%.1f,%.1f" % [terrain_seed, w_c.x, w_c.y, w_s.x, w_s.y, w_b.x, w_b.y]
+	if _trail_map_tex == null or _trail_map_sig != sig:
+		_trail_map_sig = sig
+		const TRES := 512
+		var segs: Array[Array] = [
+			[Vector2(-6.0, -17.0), Vector2(-16.0, -28.0)],
+			[Vector2(-6.0, 15.0), Vector2(-105.0, 140.0)],
+			[Vector2(-105.0, 140.0), Vector2(-220.0, 260.0)],
+			[Vector2(-220.0, 260.0), w_s],
+			[w_s, w_b],
+			[w_b, w_c],
+			[Vector2(12.0, 15.0), Vector2(215.0, 185.0)],
+			[Vector2(215.0, 185.0), Vector2(375.0, 442.0)],
+			[Vector2(375.0, 442.0), Vector2(460.0, 442.0)],
+			[Vector2(460.0, 442.0), Vector2(460.0, 490.0)],
+			[Vector2(460.0, 442.0), Vector2(460.0, 434.0)],
+			[w_s, Vector2(-530.0, 316.0)],
+			[Vector2(-530.0, 316.0), Vector2(-820.0, 344.0)],
+			[Vector2(-820.0, 344.0), Vector2(-820.0, 326.0)],
+			[Vector2(18.0, -14.0), Vector2(150.0, -125.0)],
+			[Vector2(150.0, -125.0), Vector2(286.0, -218.0)],
+			[Vector2(286.0, -218.0), Vector2(290.0, -240.0)],
+		]
+		var n_macro := FastNoiseLite.new()
+		n_macro.seed = terrain_seed + 313
+		n_macro.frequency = 0.025
+		var n_med := FastNoiseLite.new()
+		n_med.seed = terrain_seed + 617
+		n_med.frequency = 0.25
+		var rg := PackedByteArray()
+		rg.resize(TRES * TRES * 2)
+		var bx := grass_map_bounds.position.x
+		var bz := grass_map_bounds.position.y
+		var bw := grass_map_bounds.size.x
+		var bh := grass_map_bounds.size.y
+		for py in range(TRES):
+			var wz := bz + (float(py) / float(TRES - 1)) * bh
+			for px in range(TRES):
+				var wx := bx + (float(px) / float(TRES - 1)) * bw
+				var p := Vector2(wx, wz)
+				var d_path := 1e6
+				for s in segs:
+					d_path = minf(d_path, _seg_dist_2d(p, s[0] as Vector2, s[1] as Vector2))
+				var o := (py * TRES + px) * 2
+				if d_path < 8.5:
+					var wobble := n_macro.get_noise_2d(wx, wz) * 4.0 + n_med.get_noise_2d(wx, wz) * 1.6
+					var pd := d_path + wobble * 0.14
+					var tmask := 1.0 - smoothstep(2.2, 4.4, pd)
+					var rcore := 1.0 - smoothstep(0.6, 2.2, pd)
+					rg[o] = int(round(clampf(tmask, 0.0, 1.0) * 255.0))
+					rg[o + 1] = int(round(clampf(rcore, 0.0, 1.0) * 255.0))
+				else:
+					rg[o] = 0
+					rg[o + 1] = 0
+		var img := Image.create_from_data(TRES, TRES, false, Image.FORMAT_RG8, rg)
+		_trail_map_tex = ImageTexture.create_from_image(img)
+	tmat.set_shader_parameter(&"u_trail_map", _trail_map_tex)
+	tmat.set_shader_parameter(&"u_trail_map_bounds", Vector4(grass_map_bounds.position.x, grass_map_bounds.position.y, grass_map_bounds.size.x, grass_map_bounds.size.y))
+	tmat.set_shader_parameter(&"u_has_trail_map", 1.0)
+
+
+func _is_grass_static_excluded(x: float, z: float) -> bool:
+	if enable_cave and (CaveSystem.is_in_portal_scatter_exclusion(x, z, true) or is_point_in_cave_cutout(x, z)):
+		return true
+	if VillageBuilder.is_in_village_exclusion(x, z, true):
+		return true
+	if WorldLandmarks.is_in_landmark_exclusion(x, z, true):
+		return true
+	return false
+
+
 func _ensure_grass_map() -> void:
 	if _grass_map_tex != null and not _grass_map_rgba.is_empty():
 		return
@@ -1763,6 +1953,26 @@ func _ensure_grass_map() -> void:
 		rgba[o + 1] = int(round(h_val * 255.0))
 		rgba[o + 2] = int(round(t_val * 255.0))
 		rgba[o + 3] = 255
+
+	# Bake 3-state static exclusion mask into alpha (0=excluded, 128=boundary, 255=clear)
+	var bx := grass_map_bounds.position.x
+	var bz := grass_map_bounds.position.y
+	var bw := grass_map_bounds.size.x
+	var bh := grass_map_bounds.size.y
+	var inv_res := 1.0 / float(RES - 1)
+	for py in range(RES):
+		var wz := bz + float(py) * inv_res * bh
+		for px in range(RES):
+			var wx := bx + float(px) * inv_res * bw
+			var c_ex := _is_grass_static_excluded(wx, wz)
+			var n_ex := _is_grass_static_excluded(wx + 10.0, wz) or _is_grass_static_excluded(wx - 10.0, wz) or _is_grass_static_excluded(wx, wz + 10.0) or _is_grass_static_excluded(wx, wz - 10.0)
+			var n_cl := (not _is_grass_static_excluded(wx + 10.0, wz)) or (not _is_grass_static_excluded(wx - 10.0, wz)) or (not _is_grass_static_excluded(wx, wz + 10.0)) or (not _is_grass_static_excluded(wx, wz - 10.0))
+			var alpha_v := 128
+			if c_ex and not n_cl:
+				alpha_v = 0
+			elif not c_ex and not n_ex:
+				alpha_v = 255
+			rgba[(py * RES + px) * 4 + 3] = alpha_v
 
 	_grass_map_w = RES
 	_grass_map_h = RES
@@ -1903,6 +2113,37 @@ const GRASS_CACHE_PREFIX := "user://cache/grass_"
 func _grass_cache_path(target_total: int, cache_sig: String) -> String:
 	return "%s%d_%s.dat" % [GRASS_CACHE_PREFIX, target_total, cache_sig.md5_text().left(12)]
 
+static var _cached_regional_grass_data: Dictionary = {}
+static var _cached_regional_grass_sig: String = ""
+var _active_grass_vis_end: float = -1.0
+
+
+func _get_effective_grass_vis_end() -> float:
+	return _active_grass_vis_end if _active_grass_vis_end > 0.0 else grass_visibility_end
+
+
+func _compute_dynamic_grass_radius(raw_cap: int) -> float:
+	var spawn_r := grass_spawn_radius
+	if Engine.is_editor_hint():
+		spawn_r = minf(spawn_r, 18.0)
+	return minf(spawn_r, sqrt(maxf(float(raw_cap), 400.0) * grass_spacing * grass_spacing / PI) * 1.18)
+
+
+func _build_regional_grass_cache_sig() -> String:
+	var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
+	var lm_md5 := FileAccess.get_md5("res://scripts/world_landmarks.gd").left(8)
+	var vb_md5 := FileAccess.get_md5("res://terrain/village_builder.gd").left(8)
+	return "reg_v1|%s|%s|%d|%.1f|%d|%.1f|%s|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%s|%.1f,%d,%.1f,%d,%.1f,%d,%.1f,%d" % [
+		lm_md5, vb_md5,
+		terrain_seed, terrain_size, terrain_subdivisions, continent_radius, str(enable_cave),
+		grass_spacing, grass_clearing_threshold,
+		min_grass_normal_y, grass_slope_gravity_blend, grass_height_map_min, grass_height_map_max,
+		str(_webwood_layout),
+		rs.wolf_grass_radius, rs.wolf_grass_count, rs.rat_grass_radius, rs.rat_grass_count,
+		rs.skel_grass_radius, rs.skel_grass_count, rs.village_grass_radius, rs.village_grass_count,
+	]
+
+
 func _build_grass_cache_sig(center: Vector2, target_total: int) -> String:
 	var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
 	var lm_md5 := FileAccess.get_md5("res://scripts/world_landmarks.gd").left(8)
@@ -1918,85 +2159,49 @@ func _build_grass_cache_sig(center: Vector2, target_total: int) -> String:
 	]
 
 
-## Industry-Standard Hexagonal Blue-Noise Stratified Placement with Continuous Polar Perturbation.
-## Completely eliminates Cartesian grid lines and agricultural rows, guaranteeing a lush, gapless carpet.
-func build_grass_data(center: Vector2 = Vector2.ZERO, store_in_cache: bool = true) -> Dictionary:
-	var is_ed := Engine.is_editor_hint()
-	var target_total := editor_grass_count if is_ed else grass_count
-	if store_in_cache and not is_ed and not _cached_grass_data.is_empty() and _cached_grass_count == target_total and _cached_grass_center == center:
-		return _cached_grass_data
-
-	var cache_sig := ""
-	var gcache_path := ""
-	if store_in_cache and not is_ed and target_total > 0:
-		cache_sig = _build_grass_cache_sig(center, target_total)
-		gcache_path = _grass_cache_path(target_total, cache_sig)
-		if FileAccess.file_exists(gcache_path):
-			var f_in := FileAccess.open(gcache_path, FileAccess.READ)
-			if f_in != null:
-				var d = f_in.get_var(false)
-				f_in.close()
-				if d is Dictionary and String(d.get("sig", "")) == cache_sig:
-					var c_typed: Array[Transform3D] = []
-					var w_typed: Array[Transform3D] = []
-					c_typed.assign(d.get("common", []))
-					w_typed.assign(d.get("wispy", []))
-					var loaded_res := { "common": c_typed, "wispy": w_typed }
-					_cached_grass_data = loaded_res
-					_cached_grass_count = target_total
-					_cached_grass_center = center
-					return loaded_res
-
-	var rng := RandomNumberGenerator.new()
-	rng.seed = terrain_seed + 77
-	var common_xforms: Array[Transform3D] = []
-	var wispy_xforms: Array[Transform3D] = []
-
-	if target_total <= 0:
-		return { "common": common_xforms, "wispy": wispy_xforms }
-
-	var spawn_r := grass_spawn_radius
-	# In editor preview, focus on tight 18m radius around center at full lush density
+func _get_regional_pass_defs() -> Array:
+	var pass_defs: Array = []
 	if Engine.is_editor_hint():
-		spawn_r = minf(spawn_r, 18.0)
-
-	var spacing := grass_spacing
-	# Pass 0 = main meadow rings around the world origin; pass 1 = guaranteed lush apron around the cave mouth
-	# (the ring budget runs out before reaching the entrance, which left bald terrain there).
-	var mouth_c := Vector2(CaveLayout.ORIGIN.x, CaveLayout.ORIGIN.z)
-	var sky_w := CaveLayout.to_world(CaveLayout.SKYLIGHT["c"])
-	var sky_c := Vector2(sky_w.x, sky_w.z)
-	var pass_defs: Array = [[center, spawn_r, target_total, 0.0]]
-	if enable_cave and not Engine.is_editor_hint():
+		return pass_defs
+	if enable_cave:
+		var mouth_c := Vector2(CaveLayout.ORIGIN.x, CaveLayout.ORIGIN.z)
+		var sky_w := CaveLayout.to_world(CaveLayout.SKYLIGHT["c"])
+		var sky_c := Vector2(sky_w.x, sky_w.z)
 		pass_defs.append([mouth_c, 72.0, 8000, -1.0])
 		pass_defs.append([sky_c, 64.0, 5600, -1.0])
-	if not Engine.is_editor_hint():
-		pass_defs.append([Vector2(0.0, 10.0), 58.0, 5800, -1.0])
-		var web_c: Vector2 = _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
-		var web_gr_r: float = float(_webwood_layout.get("grass_radius", 145.0))
-		var web_gr_n: int = int(_webwood_layout.get("grass_count", 14500))
-		pass_defs.append([web_c, web_gr_r, web_gr_n, -1.0])
-		var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
-		pass_defs.append([WorldLandmarks.WOLF_CRAG_CENTER, rs.wolf_grass_radius, rs.wolf_grass_count, -1.0])
-		pass_defs.append([Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0), rs.rat_grass_radius, rs.rat_grass_count, -1.0])
-		pass_defs.append([WorldLandmarks.SKEL_CAVE_MOUTH, rs.skel_grass_radius, rs.skel_grass_count, -1.0])
-		pass_defs.append([Vector2(590.0, 2200.0), rs.village_grass_radius * 1.35, rs.village_grass_count, -1.0])
-	var main_reach := 0.0
+	pass_defs.append([Vector2(0.0, 10.0), 58.0, 5800, -1.0])
+	var web_c: Vector2 = _webwood_layout.get("center", WorldLandmarks.SPIDER_FOREST_CENTER)
+	var web_gr_r: float = float(_webwood_layout.get("grass_radius", 145.0))
+	var web_gr_n: int = int(_webwood_layout.get("grass_count", 14500))
+	pass_defs.append([web_c, web_gr_r, web_gr_n, -1.0])
+	var rs := regional_scatter if regional_scatter != null else RegionalScatterProfile.new()
+	pass_defs.append([WorldLandmarks.WOLF_CRAG_CENTER, rs.wolf_grass_radius, rs.wolf_grass_count, -1.0])
+	pass_defs.append([Vector2(WorldLandmarks.RAT_WARREN_MOUTH.x, WorldLandmarks.RAT_WARREN_MOUTH.y + 44.0), rs.rat_grass_radius, rs.rat_grass_count, -1.0])
+	pass_defs.append([WorldLandmarks.SKEL_CAVE_MOUTH, rs.skel_grass_radius, rs.skel_grass_count, -1.0])
+	pass_defs.append([Vector2(590.0, 2200.0), rs.village_grass_radius * 1.35, rs.village_grass_count, -1.0])
+	return pass_defs
+
+
+func _build_grass_pass_transforms(pass_defs: Array, seed_offset: int, skip_center: Vector2 = Vector2.ZERO, skip_radius: float = -1.0) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = terrain_seed + seed_offset
+	var common_xforms: Array[Transform3D] = []
+	var wispy_xforms: Array[Transform3D] = []
+	var spacing := grass_spacing
+
 	for pass_i in pass_defs.size():
 		var pc: Vector2 = pass_defs[pass_i][0]
 		var raw_cap := int(pass_defs[pass_i][2])
 		var pass_r := float(pass_defs[pass_i][1])
-		if pass_i == 0:
-			pass_r = minf(pass_r, sqrt(maxf(float(raw_cap), 400.0) * spacing * spacing / PI) * 1.18)
+		if raw_cap <= 0 or pass_r <= 0.0:
+			continue
 		var max_rings := int(ceil(pass_r / spacing))
-		var pass_cap: int = (common_xforms.size() + wispy_xforms.size() + raw_cap) if pass_i > 0 else raw_cap
+		var pass_cap := common_xforms.size() + wispy_xforms.size() + raw_cap
 
 		for ring in range(max_rings + 1):
 			if (common_xforms.size() + wispy_xforms.size()) >= pass_cap:
 				break
 			var r_dist := float(ring) * spacing
-			if pass_i == 0:
-				main_reach = r_dist * 0.85
 			var outer_keep := 1.0
 			var feather_start := pass_r * 0.62
 			if r_dist > feather_start:
@@ -2017,13 +2222,19 @@ func build_grass_data(center: Vector2 = Vector2.ZERO, store_in_cache: bool = tru
 				var x := r_jitter * cos(a_jitter) + pc.x
 				var z := r_jitter * sin(a_jitter) + pc.y
 
-				if pass_i > 0 and Vector2(x, z).distance_to(center) <= main_reach:
+				if skip_radius > 0.0 and Vector2(x, z).distance_to(skip_center) <= skip_radius:
 					continue
-				if enable_cave and (CaveSystem.is_in_portal_scatter_exclusion(x, z, true) or is_point_in_cave_cutout(x, z)):
-					continue
-				if VillageBuilder.is_in_village_exclusion(x, z, true):
-					continue
-				if WorldLandmarks.is_in_landmark_exclusion(x, z, true):
+				if not _grass_map_rgba.is_empty() and _grass_map_w > 1 and _grass_map_h > 1:
+					var gu := clampf((x - grass_map_bounds.position.x) / maxf(1.0, grass_map_bounds.size.x), 0.0, 1.0)
+					var gv := clampf((z - grass_map_bounds.position.y) / maxf(1.0, grass_map_bounds.size.y), 0.0, 1.0)
+					var gpx := clampi(int(round(gu * float(_grass_map_w - 1))), 0, _grass_map_w - 1)
+					var gpy := clampi(int(round(gv * float(_grass_map_h - 1))), 0, _grass_map_h - 1)
+					var excl_a := _grass_map_rgba[(gpy * _grass_map_w + gpx) * 4 + 3]
+					if excl_a == 0:
+						continue
+					if excl_a < 255 and _is_grass_static_excluded(x, z):
+						continue
+				elif _is_grass_static_excluded(x, z):
 					continue
 
 				# 1. Botanical Meadow Density + Terrain Grass Map (glades, trails, height zones & species bias)
@@ -2074,20 +2285,79 @@ func build_grass_data(center: Vector2 = Vector2.ZERO, store_in_cache: bool = tru
 				else:
 					common_xforms.append(xf)
 
+	return { "common": common_xforms, "wispy": wispy_xforms }
+
+
+func build_dynamic_grass_data(center: Vector2 = Vector2.ZERO) -> Dictionary:
+	var target_total := editor_grass_count if Engine.is_editor_hint() else grass_count
+	if target_total <= 0:
+		return { "common": [] as Array[Transform3D], "wispy": [] as Array[Transform3D] }
+	var pass_r := _compute_dynamic_grass_radius(target_total)
+	return _build_grass_pass_transforms([[center, pass_r, target_total, 0.0]], 77)
+
+
+func build_regional_grass_data() -> Dictionary:
+	var empty_res := { "common": [] as Array[Transform3D], "wispy": [] as Array[Transform3D] }
+	if Engine.is_editor_hint() or grass_count <= 0:
+		return empty_res
+
+	var reg_sig := _build_regional_grass_cache_sig()
+	if not _cached_regional_grass_data.is_empty() and _cached_regional_grass_sig == reg_sig:
+		return _cached_regional_grass_data
+
+	var reg_path := "%sreg_%s.dat" % [GRASS_CACHE_PREFIX, reg_sig.md5_text().left(12)]
+	if FileAccess.file_exists(reg_path):
+		var f_in := FileAccess.open(reg_path, FileAccess.READ)
+		if f_in != null:
+			var d = f_in.get_var(false)
+			f_in.close()
+			if d is Dictionary and String(d.get("sig", "")) == reg_sig:
+				var c_typed: Array[Transform3D] = []
+				var w_typed: Array[Transform3D] = []
+				c_typed.assign(d.get("common", []))
+				w_typed.assign(d.get("wispy", []))
+				var loaded_res := { "common": c_typed, "wispy": w_typed }
+				_cached_regional_grass_data = loaded_res
+				_cached_regional_grass_sig = reg_sig
+				return loaded_res
+
+	var reg_res := _build_grass_pass_transforms(_get_regional_pass_defs(), 177)
+	_cached_regional_grass_data = reg_res
+	_cached_regional_grass_sig = reg_sig
+	var dir_abs := ProjectSettings.globalize_path(reg_path.get_base_dir())
+	DirAccess.make_dir_recursive_absolute(dir_abs)
+	if DirAccess.dir_exists_absolute(dir_abs):
+		var f_out := FileAccess.open(reg_path, FileAccess.WRITE)
+		if f_out != null:
+			f_out.store_var({"sig": reg_sig, "common": reg_res["common"], "wispy": reg_res["wispy"]}, false)
+			f_out.close()
+	return reg_res
+
+
+## Industry-Standard Hexagonal Blue-Noise Stratified Placement with Continuous Polar Perturbation.
+## Completely eliminates Cartesian grid lines and agricultural rows, guaranteeing a lush, gapless carpet.
+func build_grass_data(center: Vector2 = Vector2.ZERO, store_in_cache: bool = true) -> Dictionary:
+	var is_ed := Engine.is_editor_hint()
+	var target_total := editor_grass_count if is_ed else grass_count
+	if store_in_cache and not is_ed and not _cached_grass_data.is_empty() and _cached_grass_count == target_total and _cached_grass_center == center:
+		return _cached_grass_data
+
+	var dyn := build_dynamic_grass_data(center)
+	var common_xforms: Array[Transform3D] = []
+	var wispy_xforms: Array[Transform3D] = []
+	common_xforms.append_array(dyn.get("common", []))
+	wispy_xforms.append_array(dyn.get("wispy", []))
+
+	if not is_ed and target_total > 0:
+		var reg := build_regional_grass_data()
+		common_xforms.append_array(reg.get("common", []))
+		wispy_xforms.append_array(reg.get("wispy", []))
 
 	var res := { "common": common_xforms, "wispy": wispy_xforms }
-	if store_in_cache and not Engine.is_editor_hint():
+	if store_in_cache and not is_ed:
 		_cached_grass_data = res
 		_cached_grass_count = target_total
 		_cached_grass_center = center
-		if not cache_sig.is_empty() and not gcache_path.is_empty():
-			var dir_abs := ProjectSettings.globalize_path(gcache_path.get_base_dir())
-			DirAccess.make_dir_recursive_absolute(dir_abs)
-			if DirAccess.dir_exists_absolute(dir_abs):
-				var f_out := FileAccess.open(gcache_path, FileAccess.WRITE)
-				if f_out != null:
-					f_out.store_var({"sig": cache_sig, "common": common_xforms, "wispy": wispy_xforms}, false)
-					f_out.close()
 	return res
 
 
@@ -2113,11 +2383,15 @@ func _build_chunked_multimeshes(
 	cast_shadow: GeometryInstance3D.ShadowCastingSetting,
 	material: Material = null,
 	chunk_size: float = 48.0,
-	aabb_grow_margin: float = 2.0
+	aabb_grow_margin: float = 2.0,
+	chunk_prefix: String = "Chunk_",
+	vis_begin: float = 0.0,
+	vis_begin_margin: float = 0.0,
+	custom_data: Array = []
 ) -> void:
-	# 1. Clear existing chunk nodes
+	# 1. Clear existing chunk nodes matching chunk_prefix
 	for child in parent_node.get_children():
-		if child.name.begins_with("Chunk_"):
+		if child.name.begins_with(chunk_prefix):
 			parent_node.remove_child(child)
 			child.queue_free()
 
@@ -2130,15 +2404,22 @@ func _build_chunked_multimeshes(
 	if transforms.is_empty() or mesh == null:
 		return
 
+	var has_custom := not custom_data.is_empty() and custom_data.size() == transforms.size()
+
 	# 2. Partition into spatial grid tiles
 	var chunk_map: Dictionary = {}
-	for xf_val in transforms:
-		var xf: Transform3D = xf_val
+	var custom_map: Dictionary = {}
+	for idx_t in range(transforms.size()):
+		var xf: Transform3D = transforms[idx_t]
 		var p := xf.origin
 		var key := Vector2i(int(floor(p.x / chunk_size)), int(floor(p.z / chunk_size)))
 		var arr: Array = chunk_map.get(key, [])
 		arr.append(xf)
 		chunk_map[key] = arr
+		if has_custom:
+			var carr: Array = custom_map.get(key, [])
+			carr.append(custom_data[idx_t])
+			custom_map[key] = carr
 
 	# 3. Instantiate a MultiMeshInstance3D per tile centered at its tight AABB so Godot's native distance culling works accurately
 	for key: Vector2i in chunk_map.keys():
@@ -2163,22 +2444,33 @@ func _build_chunked_multimeshes(
 
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
+		if has_custom:
+			mm.use_custom_data = true
 		mm.mesh = mesh
 		mm.instance_count = chunk_xforms.size()
 
+		var chunk_custom: Array = custom_map.get(key, []) if has_custom else []
 		for i in chunk_xforms.size():
 			var xf: Transform3D = chunk_xforms[i]
 			xf.origin -= center
 			mm.set_instance_transform(i, xf)
+			if has_custom:
+				mm.set_instance_custom_data(i, chunk_custom[i] as Color)
 
 		var chunk_inst := MultiMeshInstance3D.new()
-		chunk_inst.name = "Chunk_%d_%d" % [key.x, key.y]
+		chunk_inst.name = "%s%d_%d" % [chunk_prefix, key.x, key.y]
 		chunk_inst.position = center
 		chunk_inst.multimesh = mm
 		if material != null:
 			chunk_inst.material_override = material
 		chunk_inst.cast_shadow = cast_shadow
 		chunk_inst.set_meta("half_diag", half_diag)
+		if vis_begin > 0.0:
+			chunk_inst.visibility_range_begin = vis_begin
+			chunk_inst.visibility_range_begin_margin = vis_begin_margin
+		else:
+			chunk_inst.visibility_range_begin = 0.0
+			chunk_inst.visibility_range_begin_margin = 0.0
 		if vis_end > 0.0:
 			chunk_inst.visibility_range_end = vis_end + half_diag
 			chunk_inst.visibility_range_end_margin = vis_margin
@@ -2260,37 +2552,55 @@ func _get_wispy_grass_lod_mesh() -> Mesh:
 	return _cached_wispy_grass_lod_mesh
 
 
-func _build_grass_multimesh(grass_node: MultiMeshInstance3D) -> void:
+func _build_grass_multimesh(grass_node: MultiMeshInstance3D, rebuild_regional: bool = true) -> void:
 	if Engine.is_editor_hint() and not preview_grass_in_editor:
 		grass_node.multimesh = null
 		return
 
-	if _cached_grass_data.is_empty():
-		_cached_grass_data = build_grass_data(_grass_center)
-
-	var common_xforms: Array[Transform3D] = _cached_grass_data.get("common", [])
 	if _grass_mat == null:
 		_grass_mat = grass_node.material_override as ShaderMaterial
 	_sync_grass_map_to_materials()
-	_build_chunked_multimeshes(grass_node, _get_grass_mesh(), common_xforms, grass_visibility_end, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, _grass_mat, 32.0, 2.0)
+	var eff_vis := _get_effective_grass_vis_end()
+
+	if rebuild_regional:
+		var reg_data := build_regional_grass_data()
+		var reg_xforms: Array[Transform3D] = reg_data.get("common", [])
+		_build_chunked_multimeshes(grass_node, _get_grass_mesh(), reg_xforms, eff_vis, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, _grass_mat, 32.0, 2.0, "RegChunk_")
+
+	if _cached_grass_data.is_empty() or _cached_grass_count != grass_count or _cached_grass_center != _grass_center:
+		_cached_grass_data = build_dynamic_grass_data(_grass_center)
+		_cached_grass_count = grass_count
+		_cached_grass_center = _grass_center
+
+	var common_xforms: Array[Transform3D] = _cached_grass_data.get("common", [])
+	_build_chunked_multimeshes(grass_node, _get_grass_mesh(), common_xforms, eff_vis, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, _grass_mat, 32.0, 2.0, "Chunk_")
 
 
-func _build_grass_wispy_multimesh(wispy_node: MultiMeshInstance3D) -> void:
+func _build_grass_wispy_multimesh(wispy_node: MultiMeshInstance3D, rebuild_regional: bool = true) -> void:
 	if Engine.is_editor_hint() and not preview_grass_in_editor:
 		wispy_node.multimesh = null
 		return
 
-	if _cached_grass_data.is_empty():
-		_cached_grass_data = build_grass_data(_grass_center)
-
-	var wispy_xforms: Array[Transform3D] = _cached_grass_data.get("wispy", [])
 	var mat: ShaderMaterial = wispy_node.material_override as ShaderMaterial
 	if mat == null:
 		mat = _grass_mat
 	else:
 		_grass_wispy_mat = mat
 	_sync_grass_map_to_materials()
-	_build_chunked_multimeshes(wispy_node, _get_wispy_grass_mesh(), wispy_xforms, grass_visibility_end, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, mat, 32.0, 2.0)
+	var eff_vis := _get_effective_grass_vis_end()
+
+	if rebuild_regional:
+		var reg_data := build_regional_grass_data()
+		var reg_xforms: Array[Transform3D] = reg_data.get("wispy", [])
+		_build_chunked_multimeshes(wispy_node, _get_wispy_grass_mesh(), reg_xforms, eff_vis, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, mat, 32.0, 2.0, "RegChunk_")
+
+	if _cached_grass_data.is_empty() or _cached_grass_count != grass_count or _cached_grass_center != _grass_center:
+		_cached_grass_data = build_dynamic_grass_data(_grass_center)
+		_cached_grass_count = grass_count
+		_cached_grass_center = _grass_center
+
+	var wispy_xforms: Array[Transform3D] = _cached_grass_data.get("wispy", [])
+	_build_chunked_multimeshes(wispy_node, _get_wispy_grass_mesh(), wispy_xforms, eff_vis, grass_visibility_margin, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, mat, 32.0, 2.0, "Chunk_")
 
 
 var _grass_wispy_mat: ShaderMaterial = null
@@ -2343,8 +2653,8 @@ func _update_tree_shadow_cull(cam_pos: Vector3) -> void:
 
 
 func _grass_recenter_worker(target_c: Vector2) -> void:
-	# Compute grass distribution off-thread; returns via _grass_worker_res before task completes.
-	_grass_worker_res = build_grass_data(target_c, false)
+	# Compute only dynamic player-ring grass off-thread; static regional grass stays intact.
+	_grass_worker_res = build_dynamic_grass_data(target_c)
 var _grass_recenter_cooldown: float = 0.0
 
 func _ensure_grass_far_materials() -> void:
@@ -2418,11 +2728,16 @@ func _process(delta: float) -> void:
 			_update_grass_chunk_lod(_grass_wispy_holder_ref, _grass_wispy_mat if _grass_wispy_mat != null else _grass_mat, _grass_wispy_far_mat if _grass_wispy_far_mat != null else _grass_far_mat, _get_wispy_grass_mesh(), _get_wispy_grass_lod_mesh(), lod_pos)
 			_update_tree_shadow_cull(lod_pos)
 
-		# Apply finished async grass recentering without stalling a frame
+		var dyn_r := _compute_dynamic_grass_radius(grass_count)
+		var trigger_dist := clampf(dyn_r * 0.36, 18.0, 48.0)
+		var urgent_dist := clampf(dyn_r * 0.58, 30.0, 72.0)
+
+		# Apply finished async grass recentering without stalling a frame or tearing down static regional chunks
 		if _grass_worker_task_id >= 0 and WorkerThreadPool.is_task_completed(_grass_worker_task_id):
 			WorkerThreadPool.wait_for_task_completion(_grass_worker_task_id)
 			_grass_worker_task_id = -1
 			if not _grass_worker_res.is_empty():
+				_grass_center = _grass_worker_center
 				_cached_grass_data = _grass_worker_res
 				_cached_grass_count = grass_count
 				_cached_grass_center = _grass_worker_center
@@ -2430,17 +2745,20 @@ func _process(delta: float) -> void:
 				var gn_a := _grass_holder_ref as MultiMeshInstance3D
 				var wn_a := _grass_wispy_holder_ref as MultiMeshInstance3D
 				if gn_a != null:
-					_build_grass_multimesh(gn_a)
+					_build_grass_multimesh(gn_a, false)
 				if wn_a != null:
-					_build_grass_wispy_multimesh(wn_a)
+					_build_grass_wispy_multimesh(wn_a, false)
 				_last_grass_lod_cam_pos = Vector3(1e9, 1e9, 1e9)
+				if Vector2(p_pos.x, p_pos.z).distance_to(_grass_center) > trigger_dist:
+					_grass_recenter_cooldown = 0.0
 
 		_grass_recenter_cooldown = maxf(0.0, _grass_recenter_cooldown - delta)
 		var p_xz := Vector2(p_pos.x, p_pos.z)
 		var jump_dist := p_xz.distance_to(_grass_center)
-		if _grass_worker_task_id < 0 and ((jump_dist > 95.0) or (_grass_recenter_cooldown <= 0.0 and jump_dist > 60.0)) and p_pos.y > 7.5:
-			_grass_recenter_cooldown = 1.5
-			_grass_center = p_xz
+		if _grass_worker_task_id < 0 and grass_count > 0 and ((jump_dist > urgent_dist) or (_grass_recenter_cooldown <= 0.0 and jump_dist > trigger_dist)) and p_pos.y > 5.0:
+			_ensure_grid_coords()
+			_ensure_grass_map()
+			_grass_recenter_cooldown = 0.25
 			_grass_worker_center = p_xz
 			_grass_worker_res = {}
 			_grass_worker_task_id = WorkerThreadPool.add_task(_grass_recenter_worker.bind(p_xz), false, "GrassRecenter")
@@ -2474,7 +2792,34 @@ const TREE_NODE_NAMES := [
 	"DeadTree1",
 ]
 
+const TREE_IMPOSTOR_STYLES := [0, 0, 1, 1, 2, 2, 3, 3, 4]
+const TREE_BARK_TEX_PATHS := [
+	"res://assets/nature/Bark_NormalTree.png",
+	"res://assets/nature/Bark_NormalTree.png",
+	"res://assets/nature/Bark_NormalTree.png",
+	"res://assets/nature/Bark_NormalTree.png",
+	"res://assets/nature_extra/BirchTree_Bark.jpg",
+	"res://assets/nature_extra/BirchTree_Bark.jpg",
+	"res://assets/nature_extra/MapleTree_Bark.jpg",
+	"res://assets/nature_extra/MapleTree_Bark.jpg",
+	"res://assets/nature_extra/NormalTree_Bark.jpg",
+]
+const TREE_LEAF_TEX_PATHS := [
+	"res://assets/nature/Leaves_NormalTree_C.png",
+	"res://assets/nature/Leaves_NormalTree_C.png",
+	"res://assets/nature/Leaf_Pine_C.png",
+	"res://assets/nature/Leaf_Pine_C.png",
+	"res://assets/nature_extra/BirchTree_Leaves.png",
+	"res://assets/nature_extra/BirchTree_Leaves.png",
+	"res://assets/nature_extra/MapleTree_Leaves.png",
+	"res://assets/nature_extra/MapleTree_Leaves.png",
+	"",
+]
+
 var _cached_tree_meshes: Array[Mesh] = []
+var _cached_merged_tree_impostor_mesh: Mesh = null
+var _cached_tree_impostor_dims: Array[Vector3] = []
+var _tree_impostor_shader: Shader = null
 var _tree_eat_grid: Dictionary = {}
 var _tree_eat_grid_built: bool = false
 var _tree_trunk_body_rid: RID = RID()
@@ -2553,6 +2898,111 @@ func _get_tree_mesh(archetype: int) -> Mesh:
 	if archetype >= 0 and archetype < _cached_tree_meshes.size():
 		return _cached_tree_meshes[archetype]
 	return null
+
+
+func _build_tex_array(paths: Array, fallback_color: Color) -> Texture2DArray:
+	const TEX_SZ := 256
+	var imgs: Array[Image] = []
+	for p in paths:
+		var img: Image = null
+		var path_s: String = String(p)
+		if not path_s.is_empty():
+			var tex := load(path_s) as Texture2D
+			if tex != null:
+				img = tex.get_image()
+				if img != null:
+					img = img.duplicate() as Image
+					if img.is_compressed():
+						img.decompress()
+					if img.get_width() != TEX_SZ or img.get_height() != TEX_SZ:
+						img.resize(TEX_SZ, TEX_SZ, Image.INTERPOLATE_BILINEAR)
+					img.convert(Image.FORMAT_RGBA8)
+					img.generate_mipmaps()
+		if img == null:
+			img = Image.create(TEX_SZ, TEX_SZ, true, Image.FORMAT_RGBA8)
+			img.fill(fallback_color)
+			img.generate_mipmaps()
+		imgs.append(img)
+	var arr_tex := Texture2DArray.new()
+	if arr_tex.create_from_images(imgs) == OK:
+		return arr_tex
+	return null
+
+
+func _ensure_tree_impostor_assets() -> void:
+	if _cached_merged_tree_impostor_mesh != null and not _cached_tree_impostor_dims.is_empty():
+		return
+	if _tree_impostor_shader == null:
+		_tree_impostor_shader = load("res://terrain/tree_impostor.gdshader") as Shader
+	_cached_tree_impostor_dims.clear()
+	var max_hw := 1.4
+	var max_h := 4.0
+	for i in range(TREE_ASSET_PATHS.size()):
+		var m3d := _get_tree_mesh(i)
+		var half_w := 3.2
+		var min_y := 0.0
+		var max_y := 9.0
+		if m3d != null:
+			var aabb := m3d.get_aabb()
+			half_w = maxf(maxf(absf(aabb.position.x), absf(aabb.end.x)), maxf(absf(aabb.position.z), absf(aabb.end.z)))
+			half_w = maxf(half_w * 1.05, 1.4)
+			min_y = minf(aabb.position.y, 0.0)
+			max_y = maxf(aabb.end.y, 4.0)
+		max_hw = maxf(max_hw, half_w)
+		max_h = maxf(max_h, max_y)
+		_cached_tree_impostor_dims.append(Vector3(half_w, min_y, max_y))
+
+	if _tree_impostor_shader == null:
+		return
+	# Unit quad: X in [-1, 1], Y in [0, 1]; shader scales by INSTANCE_CUSTOM (arch, half_w, min_y, max_y)
+	var verts := PackedVector3Array([
+		Vector3(-1.0, 0.0, 0.0),
+		Vector3(1.0, 0.0, 0.0),
+		Vector3(1.0, 1.0, 0.0),
+		Vector3(-1.0, 1.0, 0.0),
+	])
+	var normals := PackedVector3Array([Vector3.BACK, Vector3.BACK, Vector3.BACK, Vector3.BACK])
+	var uvs := PackedVector2Array([
+		Vector2(0.0, 1.0),
+		Vector2(1.0, 1.0),
+		Vector2(1.0, 0.0),
+		Vector2(0.0, 0.0),
+	])
+	var indices := PackedInt32Array([0, 1, 2, 0, 2, 3])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var imp_mesh := ArrayMesh.new()
+	imp_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	imp_mesh.custom_aabb = AABB(Vector3(-max_hw, -0.5, -max_hw), Vector3(max_hw * 2.0, max_h + 1.0, max_hw * 2.0))
+
+	var mat := ShaderMaterial.new()
+	mat.shader = _tree_impostor_shader
+	mat.set_shader_parameter(&"u_webwood_center", get_webwood_center())
+	var bark_arr := _build_tex_array(TREE_BARK_TEX_PATHS, Color(0.36, 0.28, 0.22, 1.0))
+	if bark_arr != null:
+		mat.set_shader_parameter(&"bark_textures", bark_arr)
+	var leaf_arr := _build_tex_array(TREE_LEAF_TEX_PATHS.slice(0, 8), Color(0.28, 0.48, 0.22, 0.0))
+	if leaf_arr != null:
+		mat.set_shader_parameter(&"leaf_textures", leaf_arr)
+	imp_mesh.surface_set_material(0, mat)
+	_cached_merged_tree_impostor_mesh = imp_mesh
+
+
+func _get_merged_tree_impostor_mesh() -> Mesh:
+	_ensure_tree_impostor_assets()
+	return _cached_merged_tree_impostor_mesh
+
+
+func _get_tree_impostor_dims(archetype: int) -> Vector3:
+	_ensure_tree_impostor_assets()
+	if archetype >= 0 and archetype < _cached_tree_impostor_dims.size():
+		return _cached_tree_impostor_dims[archetype]
+	return Vector3(3.2, 0.0, 9.0)
 
 
 var _cached_tree_data: Array[Dictionary] = []
@@ -2655,6 +3105,28 @@ func build_tree_data() -> Array[Dictionary]:
 	if not enable_trees or target_count <= 0:
 		_cached_tree_data = []
 		return []
+
+	var tcache_sig := ""
+	var tcache_path := ""
+	if not Engine.is_editor_hint():
+		tcache_sig = "tr_v1|%d|%d|%d|%.1f|%.1f|%.1f|%s|%s" % [
+			terrain_seed, tree_seed, target_count, tree_clearing_radius, tree_spawn_radius,
+			tree_min_height, str(enable_cave), str(_webwood_layout)
+		]
+		tcache_path = "user://cache/trees_%s.dat" % tcache_sig.md5_text().left(12)
+		if FileAccess.file_exists(tcache_path):
+			var f_in := FileAccess.open(tcache_path, FileAccess.READ)
+			if f_in != null:
+				var d = f_in.get_var(false)
+				f_in.close()
+				if d is Dictionary and String(d.get("sig", "")) == tcache_sig:
+					var typed_t: Array[Dictionary] = []
+					typed_t.assign(d.get("trees", []))
+					var typed_s: Array[Dictionary] = []
+					typed_s.assign(d.get("spider", []))
+					_cached_tree_data = typed_t
+					_spider_forest_trees = typed_s
+					return typed_t
 
 	var placed_trees: Array[Dictionary] = []
 	var placed_positions: Array[Vector3] = []
@@ -2910,6 +3382,14 @@ func build_tree_data() -> Array[Dictionary]:
 				added_h += 1
 
 	_cached_tree_data = placed_trees
+	if not Engine.is_editor_hint() and not tcache_path.is_empty():
+		var dir_abs := ProjectSettings.globalize_path(tcache_path.get_base_dir())
+		DirAccess.make_dir_recursive_absolute(dir_abs)
+		if DirAccess.dir_exists_absolute(dir_abs):
+			var f_out := FileAccess.open(tcache_path, FileAccess.WRITE)
+			if f_out != null:
+				f_out.store_var({"sig": tcache_sig, "trees": placed_trees, "spider": _spider_forest_trees}, false)
+				f_out.close()
 	return placed_trees
 
 
@@ -2957,10 +3437,43 @@ func _build_trees(trees_node: Node3D) -> void:
 		if arch >= 0 and arch < grouped_xforms.size():
 			grouped_xforms[arch].append(t.transform)
 
+	var vis_3d := 115.0
+	var vis_impostor := 420.0
+	if not Engine.is_editor_hint():
+		var settings_t := SlimeSettings.get_or_create()
+		if settings_t != null:
+			var q_idx_t := clampi(int(settings_t.get_value("graphics", "quality_preset", 0)), 0, SlimeSettings.QUALITY_PRESETS.size() - 1)
+			var preset_t: Dictionary = SlimeSettings.QUALITY_PRESETS[q_idx_t]
+			vis_3d = float(preset_t.get("vis_trees_3d", 115.0))
+			vis_impostor = float(preset_t.get("vis_trees", 420.0))
+
 	for a in range(TREE_ASSET_PATHS.size()):
 		var node: MultiMeshInstance3D = mm_nodes[a]
 		var mesh := _get_tree_mesh(a)
-		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], 290.0, 25.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 72.0, 12.0)
+		for ch in node.get_children():
+			if ch.name.begins_with("ImpostorChunk_"):
+				node.remove_child(ch)
+				ch.queue_free()
+		_build_chunked_multimeshes(node, mesh, grouped_xforms[a], vis_3d, 10.0, GeometryInstance3D.SHADOW_CASTING_SETTING_ON, null, 72.0, 12.0, "Chunk_", 0.0, 0.0)
+
+	# Merged single-draw-call impostor chunks across all 9 tree archetypes via Texture2DArray + INSTANCE_CUSTOM
+	var imp_holder := trees_node.get_node_or_null("ImpostorForest") as MultiMeshInstance3D
+	if imp_holder == null:
+		imp_holder = MultiMeshInstance3D.new()
+		imp_holder.name = "ImpostorForest"
+		trees_node.add_child(imp_holder)
+	var imp_mesh := _get_merged_tree_impostor_mesh()
+	if imp_mesh != null:
+		var all_imp_xforms: Array[Transform3D] = []
+		var all_imp_custom: Array[Color] = []
+		for t in tree_data:
+			var arch: int = t.archetype
+			if arch < 0 or arch >= TREE_ASSET_PATHS.size():
+				continue
+			var dims := _get_tree_impostor_dims(arch)
+			all_imp_xforms.append(t.transform)
+			all_imp_custom.append(Color(float(arch), dims.x, dims.y, dims.z))
+		_build_chunked_multimeshes(imp_holder, imp_mesh, all_imp_xforms, vis_impostor, 25.0, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, null, 72.0, 12.0, "ImpostorChunk_", vis_3d, 10.0, all_imp_custom)
 
 	_collect_tree_chunks(trees_node)
 	_update_tree_shadow_cull(Vector3(_grass_center.x, 22.0, _grass_center.y))
@@ -3019,25 +3532,38 @@ func _hide_tree_multimesh_instance(tree_pos: Vector3, arch: int) -> void:
 	var trees_node := get_node_or_null("Trees")
 	if trees_node == null:
 		return
-	var type_names := ["CommonTree1", "CommonTree2", "Pine1", "Pine2"]
-	if arch < 0 or arch >= type_names.size():
+	if arch < 0 or arch >= TREE_NODE_NAMES.size():
 		return
-	var type_node := trees_node.get_node_or_null(type_names[arch])
+	var type_node := trees_node.get_node_or_null(TREE_NODE_NAMES[arch])
 	if type_node == null:
 		return
 	var zero_xf := Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), Vector3(0.0, -9999.0, 0.0))
 	for ch in type_node.get_children():
-		if ch is MultiMeshInstance3D:
+		if ch is MultiMeshInstance3D and ch.name.begins_with("Chunk_"):
 			var mmi := ch as MultiMeshInstance3D
 			var mm := mmi.multimesh
 			if mm == null:
 				continue
-			var cnt := mm.instance_count
-			for idx in range(cnt):
+			for idx in range(mm.instance_count):
 				var xf := mm.get_instance_transform(idx)
-				if absf(xf.origin.x - tree_pos.x) < 0.08 and absf(xf.origin.z - tree_pos.z) < 0.08:
+				var world_o := mmi.position + xf.origin
+				if absf(world_o.x - tree_pos.x) < 0.08 and absf(world_o.z - tree_pos.z) < 0.08:
 					mm.set_instance_transform(idx, zero_xf)
-					return
+					break
+	var imp_holder := trees_node.get_node_or_null("ImpostorForest")
+	if imp_holder != null:
+		for ch in imp_holder.get_children():
+			if ch is MultiMeshInstance3D and ch.name.begins_with("ImpostorChunk_"):
+				var mmi := ch as MultiMeshInstance3D
+				var mm := mmi.multimesh
+				if mm == null:
+					continue
+				for idx in range(mm.instance_count):
+					var xf := mm.get_instance_transform(idx)
+					var world_o := mmi.position + xf.origin
+					if absf(world_o.x - tree_pos.x) < 0.08 and absf(world_o.z - tree_pos.z) < 0.08:
+						mm.set_instance_transform(idx, zero_xf)
+						return
 
 
 func try_eat_nearby_trees(slime: Node3D, props_sys: Node) -> int:
@@ -3158,6 +3684,24 @@ func build_rock_data() -> Array[Dictionary]:
 	var target_count := editor_rock_count if Engine.is_editor_hint() else rock_count
 	if not enable_rocks or target_count <= 0:
 		return []
+
+	var rcache_sig := ""
+	var rcache_path := ""
+	if not Engine.is_editor_hint():
+		rcache_sig = "rk_v1|%d|%d|%d|%.1f|%s|%s" % [
+			terrain_seed, rock_seed, target_count, rock_spawn_radius,
+			str(enable_cave), str(_webwood_layout)
+		]
+		rcache_path = "user://cache/rocks_%s.dat" % rcache_sig.md5_text().left(12)
+		if FileAccess.file_exists(rcache_path):
+			var f_in := FileAccess.open(rcache_path, FileAccess.READ)
+			if f_in != null:
+				var d = f_in.get_var(false)
+				f_in.close()
+				if d is Dictionary and String(d.get("sig", "")) == rcache_sig:
+					var typed_r: Array[Dictionary] = []
+					typed_r.assign(d.get("rocks", []))
+					return typed_r
 
 	# Obtain tree positions for mutual exclusion (rocks must never spawn inside trees)
 	var tree_data := _cached_tree_data if not _cached_tree_data.is_empty() else build_tree_data()
@@ -3438,6 +3982,14 @@ func build_rock_data() -> Array[Dictionary]:
 			})
 			added_r += 1
 
+	if not Engine.is_editor_hint() and not rcache_path.is_empty():
+		var dir_abs := ProjectSettings.globalize_path(rcache_path.get_base_dir())
+		DirAccess.make_dir_recursive_absolute(dir_abs)
+		if DirAccess.dir_exists_absolute(dir_abs):
+			var f_out := FileAccess.open(rcache_path, FileAccess.WRITE)
+			if f_out != null:
+				f_out.store_var({"sig": rcache_sig, "rocks": placed_rocks}, false)
+				f_out.close()
 	return placed_rocks
 
 
